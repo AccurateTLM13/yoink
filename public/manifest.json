@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "Yoink",
+  "version": "1.1.0",
+  "description": "Professional Full Page, Visible Viewport, Selection, and Multi-Tab Screenshot Tool.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "scripting",
+    "storage",
+    "unlimitedStorage",
+    "downloads",
+    "offscreen",
+    "clipboardWrite"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "Yoink",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "commands": {
+    "capture_full_page": {
+      "suggested_key": {
+        "default": "Alt+Shift+1",
+        "windows": "Alt+Shift+1",
+        "mac": "Alt+Shift+1"
+      },
+      "description": "Capture entire page"
+    },
+    "capture_visible": {
+      "suggested_key": {
+        "default": "Alt+Shift+3",
+        "windows": "Alt+Shift+3",
+        "mac": "Alt+Shift+3"
+      },
+      "description": "Capture visible part"
+    },
+    "capture_selection": {
+      "suggested_key": {
+        "default": "Alt+Shift+4",
+        "windows": "Alt+Shift+4",
+        "mac": "Alt+Shift+4"
+      },
+      "description": "Capture selection"
+    }
+  }
+}
