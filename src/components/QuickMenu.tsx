@@ -217,20 +217,20 @@ export const QuickMenu: React.FC<Props> = React.memo(({
           </button>
         </div>
 
-        {/* Card 3: Multi-Device Responsive Capture */}
+        {/* Card 3: Multi-Device Capture */}
         <button
           onClick={onOpenMultiSize}
           disabled={isCapturing}
           onMouseEnter={() => setSelectedKey('multisize')}
           className="w-full rounded-2xl border border-blue-200/80 bg-[#eff6ff]/70 hover:bg-blue-100/60 transition-all p-3 flex items-center justify-between cursor-pointer text-left"
         >
-          <div className="flex items-center space-x-3">
+          <div className="flex items-center space-x-3 min-w-0">
             <Smartphone size={18} className="text-blue-600 shrink-0" />
-            <span className="text-[13px] font-semibold text-blue-600">
-              Multi-Device Responsive Capture ...
+            <span className="text-[13px] font-semibold text-blue-600 truncate whitespace-nowrap">
+              Multi-Device Capture ...
             </span>
           </div>
-          <span className="text-xs font-semibold text-blue-600 bg-blue-100/90 px-2.5 py-0.5 rounded-full">
+          <span className="text-xs font-semibold text-blue-600 bg-blue-100/90 px-2.5 py-0.5 rounded-full shrink-0 whitespace-nowrap ml-2">
             3 sizes
           </span>
         </button>
