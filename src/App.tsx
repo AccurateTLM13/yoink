@@ -15,14 +15,8 @@ import {
   captureSelection,
   captureAllTabs,
 } from './utils/capture';
-import { QuickMenu } from './components/QuickMenu';
-import { UrlBatchModal } from './components/UrlBatchModal';
-import { HistoryDrawer } from './components/HistoryDrawer';
-import { OptionsDrawer } from './components/OptionsDrawer';
-import { MultiSizeModal } from './components/MultiSizeModal';
+import { ViewRouter, CurrentView } from './components/ViewRouter';
 import { ImagePreviewModal } from './components/ImagePreviewModal';
-
-type CurrentView = 'menu' | 'urllist' | 'history' | 'options' | 'multisize';
 
 const getInitialView = (): CurrentView => {
   if (typeof window !== 'undefined') {
@@ -97,7 +91,8 @@ export default function App() {
       const listener = (changes: any, area: string) => {
         if (area === 'local') {
           if (changes.omnicapture_history) {
-            setHistory(changes.omnicapture_history.newValue || []);
+            // Re-fetch full history (with dataUrls hydrated from IndexedDB)
+            getStoredHistory().then(setHistory);
           }
           if (changes.pending_view && changes.pending_view.newValue) {
             setView(changes.pending_view.newValue as CurrentView);
@@ -176,7 +171,6 @@ export default function App() {
       setStatusMessage(`All ${results.length} tabs captured!`);
       if (results.length > 0) {
         setRecentBatchCount(results.length);
-        // Seamless UX: Automatically navigate to History so user sees all captured tabs
         setView('history');
       }
     } catch (err: any) {
@@ -194,7 +188,9 @@ export default function App() {
 
   const handleDeleteHistoryItem = useCallback(async (id: string) => {
     const updated = await deleteStoredHistoryItem(id);
-    setHistory(updated);
+    // Re-fetch to get hydrated dataUrls from IndexedDB
+    const fresh = await getStoredHistory();
+    setHistory(fresh);
   }, []);
 
   const handleClearHistory = useCallback(async () => {
@@ -206,6 +202,27 @@ export default function App() {
   const handleBatchResults = useCallback((items: HistoryItem[]) => {
     setHistory((prev) => [...items, ...prev]);
   }, []);
+
+  // Shared router props
+  const routerProps = {
+    view,
+    setView,
+    settings,
+    history,
+    isCapturing,
+    statusMessage,
+    recentBatchCount,
+    onCaptureFullPage: handleCaptureFullPage,
+    onCaptureVisible: handleCaptureVisible,
+    onCaptureSelection: handleCaptureSelection,
+    onCaptureAllTabs: handleCaptureAllTabs,
+    onSaveSettings: handleSaveSettings,
+    onDeleteHistoryItem: handleDeleteHistoryItem,
+    onClearHistory: handleClearHistory,
+    onBatchResults: handleBatchResults,
+    onSelectPreview: setPreviewItem,
+    onDismissBatchBanner: () => setRecentBatchCount(null),
+  };
 
   if (isFullTab) {
     return (
@@ -224,70 +241,18 @@ export default function App() {
           </div>
 
           <div className="flex-1 overflow-hidden relative flex flex-col">
-            {view === 'history' && (
-              <HistoryDrawer
-                history={history}
-                onBack={() => {
-                  setRecentBatchCount(null);
-                  setView('menu');
-                }}
-                recentBatchBanner={recentBatchCount}
-                onDismissBatchBanner={() => setRecentBatchCount(null)}
-                onSelectPreview={(item) => setPreviewItem(item)}
-                onDeleteItem={handleDeleteHistoryItem}
-                onClearAll={handleClearHistory}
-                isFullTab={true}
-              />
-            )}
-
-            {view === 'menu' && (
+            {/* Full-tab menu view is inset for visual consistency */}
+            {view === 'menu' ? (
               <div className="flex-1 flex items-center justify-center p-8 bg-zinc-50/50">
                 <div className="w-[370px] bg-white rounded-2xl border border-zinc-200 shadow-md overflow-hidden">
-                  <QuickMenu
-                    onCaptureFullPage={handleCaptureFullPage}
-                    onCaptureVisible={handleCaptureVisible}
-                    onCaptureSelection={handleCaptureSelection}
-                    onCaptureAllTabs={handleCaptureAllTabs}
-                    onOpenUrlBatch={() => setView('urllist')}
-                    onOpenMultiSize={() => setView('multisize')}
-                    onOpenHistory={() => setView('history')}
-                    onOpenOptions={() => setView('options')}
-                    historyCount={history.length}
-                    isCapturing={isCapturing}
-                    activeAction={statusMessage}
-                  />
+                  <ViewRouter {...routerProps} isFullTab={true} />
                 </div>
               </div>
-            )}
-
-            {view === 'urllist' && (
-              <UrlBatchModal
-                settings={settings}
-                onBack={() => setView('menu')}
-                onFinished={handleBatchResults}
-                onPreview={(item) => setPreviewItem(item)}
-              />
-            )}
-
-            {view === 'multisize' && (
-              <MultiSizeModal
-                settings={settings}
-                onBack={() => setView('menu')}
-                onFinished={handleBatchResults}
-                onPreview={(item) => setPreviewItem(item)}
-              />
-            )}
-
-            {view === 'options' && (
-              <OptionsDrawer
-                settings={settings}
-                onBack={() => setView('menu')}
-                onSave={handleSaveSettings}
-              />
+            ) : (
+              <ViewRouter {...routerProps} isFullTab={true} />
             )}
           </div>
 
-          {/* Image Preview / Quick Action Modal */}
           {previewItem && (
             <ImagePreviewModal item={previewItem} onClose={() => setPreviewItem(null)} />
           )}
@@ -298,68 +263,10 @@ export default function App() {
 
   return (
     <div className="w-[370px] h-[550px] flex flex-col bg-white text-zinc-900 overflow-hidden font-sans border border-zinc-200/80 rounded-2xl shadow-xl">
-      {/* Primary View Router */}
       <div className="flex-1 overflow-hidden relative">
-        {view === 'menu' && (
-          <QuickMenu
-            onCaptureFullPage={handleCaptureFullPage}
-            onCaptureVisible={handleCaptureVisible}
-            onCaptureSelection={handleCaptureSelection}
-            onCaptureAllTabs={handleCaptureAllTabs}
-            onOpenUrlBatch={() => setView('urllist')}
-            onOpenMultiSize={() => setView('multisize')}
-            onOpenHistory={() => setView('history')}
-            onOpenOptions={() => setView('options')}
-            historyCount={history.length}
-            isCapturing={isCapturing}
-            activeAction={statusMessage}
-          />
-        )}
-
-        {view === 'urllist' && (
-          <UrlBatchModal
-            settings={settings}
-            onBack={() => setView('menu')}
-            onFinished={handleBatchResults}
-            onPreview={(item) => setPreviewItem(item)}
-          />
-        )}
-
-        {view === 'multisize' && (
-          <MultiSizeModal
-            settings={settings}
-            onBack={() => setView('menu')}
-            onFinished={handleBatchResults}
-            onPreview={(item) => setPreviewItem(item)}
-          />
-        )}
-
-        {view === 'history' && (
-          <HistoryDrawer
-            history={history}
-            onBack={() => {
-              setRecentBatchCount(null);
-              setView('menu');
-            }}
-            recentBatchBanner={recentBatchCount}
-            onDismissBatchBanner={() => setRecentBatchCount(null)}
-            onSelectPreview={(item) => setPreviewItem(item)}
-            onDeleteItem={handleDeleteHistoryItem}
-            onClearAll={handleClearHistory}
-            isFullTab={false}
-          />
-        )}
-
-        {view === 'options' && (
-          <OptionsDrawer
-            settings={settings}
-            onBack={() => setView('menu')}
-            onSave={handleSaveSettings}
-          />
-        )}
+        <ViewRouter {...routerProps} isFullTab={false} />
       </div>
 
-      {/* Image Preview / Quick Action Modal */}
       {previewItem && (
         <ImagePreviewModal item={previewItem} onClose={() => setPreviewItem(null)} />
       )}

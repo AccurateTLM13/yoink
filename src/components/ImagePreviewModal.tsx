@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Download, Copy, Check, ExternalLink, Maximize2, FileImage } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Download, Copy, Check, ExternalLink } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { copyImageToClipboard, downloadDataUrl } from '../utils/storage';
 
@@ -10,6 +10,15 @@ interface Props {
 
 export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
   const [copied, setCopied] = useState(false);
+
+  // Close on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
   if (!item) return null;
 
@@ -29,21 +38,38 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
     downloadDataUrl(item.dataUrl, filename);
   };
 
+  const handleOpenUrl = () => {
+    if (item.url) {
+      window.open(item.url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
       {/* Top Bar */}
       <div className="flex items-center justify-between px-4 py-3 bg-zinc-900/95 border-b border-zinc-800 text-white">
         <div className="flex items-center space-x-2 min-w-0 pr-2">
-          <FileImage size={18} className="text-blue-400 shrink-0" />
           <div className="min-w-0">
             <h3 className="text-sm font-semibold truncate text-zinc-100">{item.title}</h3>
             <p className="text-[11px] text-zinc-400 font-mono truncate">
-              {item.width} × {item.height}px • {item.mode.toUpperCase()} • {new Date(item.timestamp).toLocaleTimeString()}
+              {item.width > 0 ? `${item.width} × ${item.height}px • ` : ''}
+              {item.mode.toUpperCase()} • {new Date(item.timestamp).toLocaleTimeString()}
             </p>
           </div>
         </div>
 
         <div className="flex items-center space-x-1.5 shrink-0">
+          {item.url && (
+            <button
+              onClick={handleOpenUrl}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-xs font-medium transition cursor-pointer"
+              title="Open source URL in new tab"
+            >
+              <ExternalLink size={14} />
+              <span>Open URL</span>
+            </button>
+          )}
+
           <button
             onClick={handleCopy}
             className="flex items-center gap-1 px-2.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-xs font-medium transition cursor-pointer"
@@ -65,7 +91,7 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
           <button
             onClick={onClose}
             className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded transition cursor-pointer"
-            title="Close"
+            title="Close (Esc)"
           >
             <X size={18} />
           </button>

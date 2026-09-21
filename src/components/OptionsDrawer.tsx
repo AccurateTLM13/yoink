@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { ChevronLeft, Save, Sliders, Keyboard, Check, RefreshCw } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { ChevronLeft, Save, Sliders, Keyboard, Check, AlertTriangle } from 'lucide-react';
 import { CaptureSettings, CaptureFormat } from '../types';
 
 interface Props {
@@ -11,11 +11,32 @@ interface Props {
 export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, onSave }) => {
   const [form, setForm] = useState<CaptureSettings>({ ...settings });
   const [saved, setSaved] = useState(false);
+  const [confirmBack, setConfirmBack] = useState(false);
+
+  /**
+   * isDirty: true when the user has made unsaved changes.
+   * JSON comparison is safe here — CaptureSettings contains only primitives.
+   */
+  const isDirty = useMemo(
+    () => JSON.stringify(form) !== JSON.stringify(settings),
+    [form, settings]
+  );
 
   const handleSave = () => {
     onSave(form);
     setSaved(true);
+    setConfirmBack(false);
     setTimeout(() => setSaved(false), 1800);
+  };
+
+  const handleBack = () => {
+    if (isDirty && !confirmBack) {
+      // First click: warn the user
+      setConfirmBack(true);
+      return;
+    }
+    // Second click (confirmed) or no dirty state: navigate away
+    onBack();
   };
 
   return (
@@ -23,11 +44,15 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
       {/* Header */}
       <div className="flex items-center justify-between p-3.5 border-b border-zinc-200 bg-white">
         <button
-          onClick={onBack}
-          className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 hover:text-zinc-950 transition cursor-pointer"
+          onClick={handleBack}
+          className={`flex items-center gap-1.5 text-xs font-semibold transition cursor-pointer ${
+            confirmBack
+              ? 'text-amber-600 hover:text-amber-700'
+              : 'text-zinc-700 hover:text-zinc-950'
+          }`}
         >
           <ChevronLeft size={16} />
-          <span>Back to Menu</span>
+          <span>{confirmBack ? 'Discard changes?' : 'Back to Menu'}</span>
         </button>
 
         <button
@@ -38,6 +63,18 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
           <span>{saved ? 'Saved!' : 'Save Options'}</span>
         </button>
       </div>
+
+      {/* Unsaved changes banner */}
+      {isDirty && (
+        <div className="mx-3.5 mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-2 text-xs text-amber-800">
+          <AlertTriangle size={13} className="shrink-0 text-amber-500" />
+          <span className="font-medium">
+            {confirmBack
+              ? 'Click "Discard changes?" again to leave without saving, or click "Save Options".'
+              : 'You have unsaved changes.'}
+          </span>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-4 space-y-5 text-xs">
         {/* Section: Image Format & Quality */}

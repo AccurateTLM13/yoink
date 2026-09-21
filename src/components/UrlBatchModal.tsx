@@ -11,9 +11,7 @@ interface Props {
 }
 
 export const UrlBatchModal: React.FC<Props> = React.memo(({ settings, onBack, onFinished, onPreview }) => {
-  const [urlsText, setUrlsText] = useState(
-    'https://google.com\nhttps://github.com\nhttps://news.ycombinator.com'
-  );
+  const [urlsText, setUrlsText] = useState('');
   const [delaySec, setDelaySec] = useState(3);
   const [isRunning, setIsRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');

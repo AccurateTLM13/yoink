@@ -192,7 +192,7 @@ export const QuickMenu: React.FC<Props> = React.memo(({
               </span>
             </div>
             <span className="text-xs font-semibold text-zinc-600 bg-zinc-100 px-2.5 py-0.5 rounded-full min-w-[20px] text-center">
-              {historyCount > 0 ? historyCount : 9}
+              {historyCount}
             </span>
           </button>
 
