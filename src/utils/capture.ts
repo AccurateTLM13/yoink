@@ -29,7 +29,12 @@ export function formatFilename(
     // fallback
   }
 
-  const cleanTitle = (title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  let cleanTitle = (title || 'capture')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40);
+  if (!cleanTitle) cleanTitle = 'capture';
 
   let filename = template
     .replace('{title}', cleanTitle)
@@ -121,10 +126,10 @@ export function generateMockScreenshot(
 
     // Badge
     ctx.fillStyle = '#2563eb';
-    ctx.fillRect(80, height - 100, 260, 36);
+    ctx.fillRect(80, height - 100, 240, 36);
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 14px monospace';
-    ctx.fillText('OMNICAPTURE PRO VERIFIED', 100, height - 76);
+    ctx.fillText('YOINK CAPTURE ENGINE', 100, height - 76);
 
     const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
     resolve(canvas.toDataURL(mime, 0.95));

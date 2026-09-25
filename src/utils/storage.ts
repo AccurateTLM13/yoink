@@ -12,73 +12,94 @@ export const DEFAULT_SETTINGS: CaptureSettings = {
 
 const SETTINGS_KEY = 'omnicapture_settings';
 const HISTORY_KEY = 'omnicapture_history';
+const FULL_IMAGE_PREFIX = 'yoink_full_';
 const MAX_HISTORY_ITEMS = 40;
 
-// ---------------------------------------------------------------------------
-// IndexedDB — Image Storage
-// Storing base64 dataUrls in chrome.storage.local serialises them through
-// JSON on every read/write, which is expensive for large screenshots. Instead,
-// image blobs live in IndexedDB and only lightweight metadata goes through
-// chrome.storage.local.
-// ---------------------------------------------------------------------------
+/**
+ * Generate a downscaled thumbnail from full dataUrl for fast index rendering
+ */
+export async function createThumbnail(dataUrl: string, maxDim: number = 320): Promise<string> {
+  if (!dataUrl) return '';
+  if (typeof document === 'undefined' || typeof Image === 'undefined') {
+    return dataUrl;
+  }
 
-const IDB_NAME = 'yoink_db';
-const IDB_STORE = 'images';
-const IDB_VERSION = 1;
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const { width, height } = img;
+        const scale = Math.min(1, maxDim / Math.max(width, height));
+        const targetW = Math.max(1, Math.round(width * scale));
+        const targetH = Math.max(1, Math.round(height * scale));
 
-function openImageDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-    req.onupgradeneeded = (e) => {
-      (e.target as IDBOpenDBRequest).result.createObjectStore(IDB_STORE);
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(dataUrl);
+
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      } catch {
+        resolve(dataUrl);
+      }
     };
-    req.onsuccess = (e) => resolve((e.target as IDBOpenDBRequest).result);
-    req.onerror = () => reject(req.error);
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
   });
 }
 
-async function saveImageToDb(id: string, dataUrl: string): Promise<void> {
-  const db = await openImageDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).put(dataUrl, id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+/**
+ * Save full resolution image separately under dedicated key
+ */
+export async function saveFullResolutionImage(id: string, dataUrl: string): Promise<void> {
+  const key = `${FULL_IMAGE_PREFIX}${id}`;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ [key]: dataUrl });
+      return;
+    }
+  } catch (e) {
+    console.warn('Chrome storage full image save failed', e);
+  }
+
+  try {
+    localStorage.setItem(key, dataUrl);
+  } catch (e) {
+    console.warn('localStorage full image save failed (quota limit)', e);
+  }
 }
 
-async function getImageFromDb(id: string): Promise<string | null> {
-  const db = await openImageDb();
-  return new Promise((resolve, reject) => {
-    const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(id);
-    req.onsuccess = () => resolve((req.result as string) ?? null);
-    req.onerror = () => reject(req.error);
-  });
-}
+/**
+ * Retrieve full resolution image on-demand (for preview, download, or copy)
+ */
+export async function getFullResolutionImage(id: string): Promise<string | null> {
+  const key = `${FULL_IMAGE_PREFIX}${id}`;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      const res = await chrome.storage.local.get([key]);
+      if (res && typeof res[key] === 'string') return res[key] as string;
+    }
+  } catch (e) {
+    console.warn('Chrome storage full image fetch failed', e);
+  }
 
-async function deleteImageFromDb(id: string): Promise<void> {
-  const db = await openImageDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
+  try {
+    const local = localStorage.getItem(key);
+    if (local) return local;
+  } catch {}
 
-async function clearImageDb(): Promise<void> {
-  const db = await openImageDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
+  // Fallback to checking the history item directly
+  try {
+    const history = await getStoredHistory();
+    const item = history.find((i) => i.id === id);
+    if (item && item.dataUrl) return item.dataUrl;
+    if (item && item.thumbnailUrl) return item.thumbnailUrl;
+  } catch {}
 
-// ---------------------------------------------------------------------------
-// Settings
-// ---------------------------------------------------------------------------
+  return null;
+}
 
 /**
  * Load user settings with fallback to defaults.
@@ -126,149 +147,119 @@ export async function saveStoredSettings(settings: CaptureSettings): Promise<voi
   }
 }
 
-// ---------------------------------------------------------------------------
-// History — Metadata (chrome.storage.local) + Images (IndexedDB)
-// ---------------------------------------------------------------------------
-
 /**
- * Load capture history. Metadata comes from chrome.storage.local; images are
- * hydrated from IndexedDB. Items without a stored image get dataUrl: ''.
+ * Load capture history metadata.
  */
 export async function getStoredHistory(): Promise<HistoryItem[]> {
-  let metaList: Omit<HistoryItem, 'dataUrl'>[] = [];
-
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       const result = await chrome.storage.local.get([HISTORY_KEY]);
       if (result && Array.isArray(result[HISTORY_KEY])) {
-        metaList = result[HISTORY_KEY];
+        return result[HISTORY_KEY];
       }
     }
   } catch (e) {
     console.warn('Chrome local storage history fetch failed', e);
   }
 
-  if (metaList.length === 0) {
-    // Fallback: try localStorage (dev/browser mode)
-    try {
-      const raw = localStorage.getItem(HISTORY_KEY);
-      if (raw) return JSON.parse(raw);
-    } catch (e) {
-      console.warn('localStorage history fetch failed', e);
-    }
-    return [];
-  }
-
-  // Hydrate dataUrls from IndexedDB
-  const hydrated = await Promise.all(
-    metaList.map(async (meta) => {
-      const dataUrl = (await getImageFromDb(meta.id).catch(() => null)) ?? '';
-      return { ...meta, dataUrl } as HistoryItem;
-    })
-  );
-
-  return hydrated;
-}
-
-/**
- * Save a new item: image → IndexedDB, metadata → chrome.storage.local.
- */
-export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> {
-  // Persist the image separately so it stays out of chrome.storage.local
-  if (item.dataUrl) {
-    try {
-      await saveImageToDb(item.id, item.dataUrl);
-    } catch (e) {
-      console.warn('IndexedDB image save failed', e);
-    }
-  }
-
-  // Build a metadata-only record (no dataUrl)
-  const { dataUrl: _stripped, ...meta } = item;
-
-  try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      const result = await chrome.storage.local.get([HISTORY_KEY]);
-      const list: Omit<HistoryItem, 'dataUrl'>[] = Array.isArray(result[HISTORY_KEY])
-        ? result[HISTORY_KEY]
-        : [];
-      const updated = [meta, ...list.filter((i) => i.id !== meta.id)].slice(0, MAX_HISTORY_ITEMS);
-      await chrome.storage.local.set({ [HISTORY_KEY]: updated });
-      // Return hydrated list for the calling component
-      return updated.map((m) => ({ ...m, dataUrl: m.id === meta.id ? (item.dataUrl ?? '') : '' }));
-    }
-  } catch (e) {
-    console.warn('Chrome local storage history save failed', e);
-  }
-
-  // Dev fallback
   try {
     const raw = localStorage.getItem(HISTORY_KEY);
-    const list: HistoryItem[] = raw ? JSON.parse(raw) : [];
-    const updated = [item, ...list.filter((i) => i.id !== item.id)].slice(0, MAX_HISTORY_ITEMS);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-    return updated;
-  } catch (e) {
-    console.warn('localStorage history save failed', e);
-  }
-
-  return [item];
-}
-
-/**
- * Delete a single history item from both metadata store and image store.
- */
-export async function deleteStoredHistoryItem(id: string): Promise<HistoryItem[]> {
-  // Remove image from IndexedDB
-  try {
-    await deleteImageFromDb(id);
-  } catch (e) {
-    console.warn('IndexedDB image delete failed', e);
-  }
-
-  try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      const result = await chrome.storage.local.get([HISTORY_KEY]);
-      const list: Omit<HistoryItem, 'dataUrl'>[] = Array.isArray(result[HISTORY_KEY])
-        ? result[HISTORY_KEY]
-        : [];
-      const updated = list.filter((i) => i.id !== id);
-      await chrome.storage.local.set({ [HISTORY_KEY]: updated });
-      // Return without dataUrls — caller will reload full history if needed
-      return updated.map((m) => ({ ...m, dataUrl: '' }));
+    if (raw) {
+      return JSON.parse(raw);
     }
   } catch (e) {
-    console.warn('Chrome local storage history delete failed', e);
-  }
-
-  // Dev fallback
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    const list: HistoryItem[] = raw ? JSON.parse(raw) : [];
-    const updated = list.filter((i) => i.id !== id);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-    return updated;
-  } catch (e) {
-    console.warn('localStorage history delete failed', e);
+    console.warn('localStorage history fetch failed', e);
   }
 
   return [];
 }
 
 /**
- * Clear all history — removes both metadata and all stored images.
+ * Save new item to history with lightweight indexing and separated full image storage.
  */
-export async function clearStoredHistory(): Promise<void> {
-  // Wipe all images from IndexedDB
-  try {
-    await clearImageDb();
-  } catch (e) {
-    console.warn('IndexedDB image clear failed', e);
+export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> {
+  // 1. Save full resolution image separately to avoid inflating history index
+  if (item.dataUrl) {
+    await saveFullResolutionImage(item.id, item.dataUrl);
   }
+
+  // 2. Generate thumbnail if needed
+  let thumb = item.thumbnailUrl;
+  if (!thumb && item.dataUrl) {
+    thumb = await createThumbnail(item.dataUrl);
+  }
+
+  const indexItem: HistoryItem = {
+    ...item,
+    thumbnailUrl: thumb,
+    // Keep dataUrl if small (< 50KB) or use thumbnail to prevent massive storage bloat
+    dataUrl: item.dataUrl && item.dataUrl.length < 50000 ? item.dataUrl : (thumb || ''),
+  };
+
+  const current = await getStoredHistory();
+  const updated = [indexItem, ...current.filter((i) => i.id !== item.id)].slice(0, MAX_HISTORY_ITEMS);
 
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      await chrome.storage.local.remove([HISTORY_KEY]);
+      await chrome.storage.local.set({ [HISTORY_KEY]: updated });
+    }
+  } catch (e) {
+    console.warn('Chrome local storage history save failed', e);
+  }
+
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+  } catch (e) {
+    console.warn('localStorage history save failed', e);
+  }
+
+  return updated;
+}
+
+/**
+ * Delete single history item and its full-resolution cache.
+ */
+export async function deleteStoredHistoryItem(id: string): Promise<HistoryItem[]> {
+  const key = `${FULL_IMAGE_PREFIX}${id}`;
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.remove([key]);
+    }
+  } catch {}
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+
+  const current = await getStoredHistory();
+  const updated = current.filter((i) => i.id !== id);
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ [HISTORY_KEY]: updated });
+    }
+  } catch (e) {
+    console.warn('Chrome local storage history delete failed', e);
+  }
+
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+  } catch (e) {
+    console.warn('localStorage history delete failed', e);
+  }
+
+  return updated;
+}
+
+/**
+ * Clear all history items and full-resolution image caches.
+ */
+export async function clearStoredHistory(): Promise<void> {
+  const current = await getStoredHistory();
+  const fullKeys = current.map((i) => `${FULL_IMAGE_PREFIX}${i.id}`);
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.remove([HISTORY_KEY, ...fullKeys]);
     }
   } catch (e) {
     console.warn('Chrome local storage history clear failed', e);
@@ -276,14 +267,11 @@ export async function clearStoredHistory(): Promise<void> {
 
   try {
     localStorage.removeItem(HISTORY_KEY);
+    fullKeys.forEach((k) => localStorage.removeItem(k));
   } catch (e) {
     console.warn('localStorage history clear failed', e);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Clipboard & Download Utilities
-// ---------------------------------------------------------------------------
 
 /**
  * Copy a base64 / dataUrl image to the user's clipboard as PNG blob.
@@ -292,7 +280,7 @@ export async function copyImageToClipboard(dataUrl: string): Promise<boolean> {
   try {
     const res = await fetch(dataUrl);
     const blob = await res.blob();
-
+    
     // Ensure it is image/png for ClipboardItem compatibility across browsers
     let pngBlob = blob;
     if (blob.type !== 'image/png') {
@@ -300,7 +288,9 @@ export async function copyImageToClipboard(dataUrl: string): Promise<boolean> {
     }
 
     await navigator.clipboard.write([
-      new ClipboardItem({ 'image/png': pngBlob }),
+      new ClipboardItem({
+        'image/png': pngBlob,
+      }),
     ]);
     return true;
   } catch (err) {
@@ -310,7 +300,7 @@ export async function copyImageToClipboard(dataUrl: string): Promise<boolean> {
 }
 
 /**
- * Convert non-PNG blob to PNG blob for clipboard.
+ * Convert non-PNG blob to PNG blob for clipboard
  */
 function convertBlobToPng(blob: Blob): Promise<Blob> {
   return new Promise((resolve, reject) => {
@@ -333,11 +323,15 @@ function convertBlobToPng(blob: Blob): Promise<Blob> {
 }
 
 /**
- * Trigger file download directly from dataUrl.
+ * Trigger file download directly from dataUrl
  */
 export function downloadDataUrl(dataUrl: string, filename: string): void {
   if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.download) {
-    chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
+    chrome.downloads.download({
+      url: dataUrl,
+      filename: filename,
+      saveAs: false,
+    });
   } else {
     const link = document.createElement('a');
     link.href = dataUrl;

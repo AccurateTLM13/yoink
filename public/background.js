@@ -1,57 +1,33 @@
 // background.js - Yoink Service Worker
-import { DEFAULT_SETTINGS, formatFilename, getSettings } from './shared.js';
-
-// ---------------------------------------------------------------------------
-// IndexedDB — Image Storage
-// Images are stored here instead of chrome.storage.local to avoid serialising
-// large base64 strings through the JSON-based storage API.
-// ---------------------------------------------------------------------------
-
-const IDB_NAME = 'yoink_db';
-const IDB_STORE = 'images';
-const IDB_VERSION = 1;
-
-function openImageDb() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-    req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore(IDB_STORE);
-    };
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function saveImageToDb(id, dataUrl) {
-  const db = await openImageDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).put(dataUrl, id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function deleteImageFromDb(id) {
-  const db = await openImageDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(IDB_STORE, 'readwrite');
-    tx.objectStore(IDB_STORE).delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Offscreen Document Setup
-// ---------------------------------------------------------------------------
 
 let creatingOffscreen = null;
+let offscreenIdleTimer = null;
+
+function resetOffscreenIdleTimer() {
+  if (offscreenIdleTimer) clearTimeout(offscreenIdleTimer);
+  // Auto-close offscreen document after 45 seconds of idle inactivity to release GPU/RAM
+  offscreenIdleTimer = setTimeout(async () => {
+    try {
+      const offscreenUrl = chrome.runtime.getURL('offscreen.html');
+      const existingContexts = await chrome.runtime.getContexts({
+        contextTypes: ['OFFSCREEN_DOCUMENT'],
+        documentUrls: [offscreenUrl],
+      });
+      if (existingContexts.length > 0) {
+        await chrome.offscreen.closeDocument();
+        console.log('Offscreen document closed after idle timeout.');
+      }
+    } catch (e) {
+      console.warn('Error during offscreen idle cleanup:', e);
+    }
+  }, 45000);
+}
 
 /**
  * Ensures offscreen document is created and ready for heavy lifting.
  */
 async function setupOffscreenDocument() {
+  resetOffscreenIdleTimer();
   const offscreenUrl = chrome.runtime.getURL('offscreen.html');
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ['OFFSCREEN_DOCUMENT'],
@@ -73,17 +49,13 @@ async function setupOffscreenDocument() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Capture Tab Helper
-// ---------------------------------------------------------------------------
-
 /**
- * Captures the visible tab and optionally converts to WebP.
+ * Capture Tab and Process Format (WebP/JPEG/PNG)
  */
 async function captureAndProcessTab(winId, settings) {
   const format = settings?.format || 'png';
   const quality = settings?.quality || 0.92;
-
+  
   if (format === 'jpeg') {
     return await chrome.tabs.captureVisibleTab(winId, { format: 'jpeg', quality: Math.round(quality * 100) });
   } else {
@@ -93,7 +65,7 @@ async function captureAndProcessTab(winId, settings) {
       return new Promise((resolve) => {
         chrome.runtime.sendMessage({
           action: 'CONVERT_FORMAT',
-          payload: { dataUrl, format: 'webp', quality },
+          payload: { dataUrl, format: 'webp', quality }
         }, (response) => {
           resolve(response?.dataUrl || dataUrl);
         });
@@ -103,10 +75,9 @@ async function captureAndProcessTab(winId, settings) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Global Keyboard Shortcut Listener
-// ---------------------------------------------------------------------------
-
+/**
+ * Global Keyboard Shortcut Listener
+ */
 chrome.commands.onCommand.addListener(async (command) => {
   console.log('Received shortcut command:', command);
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -123,10 +94,9 @@ chrome.commands.onCommand.addListener(async (command) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Message Dispatcher
-// ---------------------------------------------------------------------------
-
+/**
+ * Message Dispatcher
+ */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('Background received message:', message.action);
 
@@ -206,10 +176,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// 1. Capture Visible Viewport
-// ---------------------------------------------------------------------------
-
+/**
+ * 1. Capture Visible Viewport
+ */
 async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings }) {
   const currentSettings = settings || (await getSettings());
   const winId = windowId || (await chrome.windows.getCurrent()).id;
@@ -221,6 +190,7 @@ async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings 
     id: `vis_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     title: title || 'Visible Viewport',
     url: url || '',
+    dataUrl,
     timestamp: Date.now(),
     width: 0,
     height: 0,
@@ -228,7 +198,7 @@ async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings 
     format: currentSettings.format || 'png',
   };
 
-  await saveHistoryItem(item, dataUrl);
+  await saveHistoryItem(item);
 
   if (currentSettings.autoDownload !== false) {
     const filename = formatFilename(
@@ -238,16 +208,19 @@ async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings 
       'visible',
       currentSettings.format || 'png'
     );
-    chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
+    chrome.downloads.download({
+      url: dataUrl,
+      filename,
+      saveAs: false,
+    });
   }
 
-  return { success: true, dataUrl, item: { ...item, dataUrl } };
+  return { success: true, dataUrl, item };
 }
 
-// ---------------------------------------------------------------------------
-// 2. Selection Capture Start
-// ---------------------------------------------------------------------------
-
+/**
+ * 2. Selection Capture Start
+ */
 async function handleCaptureSelectionStart({ tabId, settings }) {
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: false },
@@ -258,10 +231,9 @@ async function handleCaptureSelectionStart({ tabId, settings }) {
   return { success: true };
 }
 
-// ---------------------------------------------------------------------------
-// 3. Selection Capture Finish (Crop & Process)
-// ---------------------------------------------------------------------------
-
+/**
+ * 3. Selection Capture Finish (Crop & Process)
+ */
 async function handleCaptureSelectionFinish(payload, sender) {
   await setupOffscreenDocument();
 
@@ -271,16 +243,19 @@ async function handleCaptureSelectionFinish(payload, sender) {
 
   chrome.runtime.sendMessage({
     action: 'CROP_SELECTION',
-    payload: { dataUrl: rawDataUrl, ...payload, settings },
+    payload: {
+      dataUrl: rawDataUrl,
+      ...payload,
+      settings,
+    },
   });
 
   return { success: true };
 }
 
-// ---------------------------------------------------------------------------
-// 4. Full Page Capture
-// ---------------------------------------------------------------------------
-
+/**
+ * 4. Full Page Capture
+ */
 async function handleCaptureFullPage({ tabId, title, url, settings }) {
   await setupOffscreenDocument();
 
@@ -301,17 +276,18 @@ async function handleCaptureFullPage({ tabId, title, url, settings }) {
   return { success: true };
 }
 
-// ---------------------------------------------------------------------------
-// 5. Handle Final Processed Capture (from Offscreen document)
-// ---------------------------------------------------------------------------
-
+/**
+ * 5. Handle Final Processed Capture (from Offscreen document)
+ */
 async function handleCaptureCompleted({ dataUrl, width, height, mode, title, url, settings }) {
+  resetOffscreenIdleTimer();
   const currentSettings = settings || (await getSettings());
 
   const item = {
     id: `${mode}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     title: title || 'Screenshot Capture',
     url: url || '',
+    dataUrl,
     timestamp: Date.now(),
     width: width || 0,
     height: height || 0,
@@ -319,7 +295,7 @@ async function handleCaptureCompleted({ dataUrl, width, height, mode, title, url
     format: currentSettings.format || 'png',
   };
 
-  await saveHistoryItem(item, dataUrl);
+  await saveHistoryItem(item);
 
   if (currentSettings.autoDownload !== false) {
     const filename = formatFilename(
@@ -329,14 +305,18 @@ async function handleCaptureCompleted({ dataUrl, width, height, mode, title, url
       mode || 'capture',
       currentSettings.format || 'png'
     );
-    chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
+
+    chrome.downloads.download({
+      url: dataUrl,
+      filename,
+      saveAs: false,
+    });
   }
 }
 
-// ---------------------------------------------------------------------------
-// 6. Capture All Tabs in Current Window
-// ---------------------------------------------------------------------------
-
+/**
+ * 6. Capture All Tabs in Current Window
+ */
 async function handleCaptureAllTabs({ settings }) {
   const currentSettings = settings || (await getSettings());
   const tabs = await chrome.tabs.query({ currentWindow: true });
@@ -355,6 +335,7 @@ async function handleCaptureAllTabs({ settings }) {
           id: `tab_${Date.now()}_${tab.id}`,
           title: tab.title || 'Tab Capture',
           url: tab.url,
+          dataUrl,
           timestamp: Date.now(),
           width: 0,
           height: 0,
@@ -362,7 +343,7 @@ async function handleCaptureAllTabs({ settings }) {
           format: currentSettings.format || 'png',
         };
 
-        await saveHistoryItem(item, dataUrl);
+        await saveHistoryItem(item);
 
         if (currentSettings.autoDownload !== false) {
           const filename = formatFilename(
@@ -375,13 +356,14 @@ async function handleCaptureAllTabs({ settings }) {
           await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
         }
 
-        results.push({ ...item, dataUrl });
+        results.push(item);
       }
     } catch (e) {
       console.error(`Failed to capture tab ${tab.id}:`, e);
     }
   }
 
+  // Persist pending view for the popup
   try {
     await chrome.storage.local.set({
       pending_view: 'history',
@@ -391,6 +373,7 @@ async function handleCaptureAllTabs({ settings }) {
     console.error('Failed to set pending_view:', err);
   }
 
+  // Pull the user directly into the History Gallery tab
   if (results.length > 0) {
     try {
       const galleryUrl = chrome.runtime.getURL(`index.html?view=history&batch=${results.length}`);
@@ -403,10 +386,9 @@ async function handleCaptureAllTabs({ settings }) {
   return { success: true, results };
 }
 
-// ---------------------------------------------------------------------------
-// 7. Capture List of URLs
-// ---------------------------------------------------------------------------
-
+/**
+ * 7. Capture List of URLs
+ */
 async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
   const currentSettings = settings || (await getSettings());
   const results = [];
@@ -416,9 +398,17 @@ async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
     if (!url || !url.startsWith('http')) continue;
 
     try {
-      const win = await chrome.windows.create({ url, width: 1440, height: 900, focused: true });
+      // Create temporary window
+      const win = await chrome.windows.create({
+        url,
+        width: 1440,
+        height: 900,
+        focused: true,
+      });
+
       const tabId = win.tabs[0].id;
 
+      // Wait for complete loading
       await new Promise((resolve) => {
         const timeout = setTimeout(resolve, 15000);
         function listener(tId, info) {
@@ -431,6 +421,7 @@ async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
         chrome.tabs.onUpdated.addListener(listener);
       });
 
+      // Extra hydration delay
       await new Promise((r) => setTimeout(r, delayMs));
 
       const dataUrl = await captureAndProcessTab(win.id, currentSettings);
@@ -441,6 +432,7 @@ async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
           id: `url_${Date.now()}_${i}`,
           title: `URL Capture ${i + 1}`,
           url,
+          dataUrl,
           timestamp: Date.now(),
           width: 1440,
           height: 900,
@@ -448,7 +440,7 @@ async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
           format: currentSettings.format || 'png',
         };
 
-        await saveHistoryItem(item, dataUrl);
+        await saveHistoryItem(item);
 
         if (currentSettings.autoDownload !== false) {
           const filename = formatFilename(
@@ -461,13 +453,14 @@ async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
           await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
         }
 
-        results.push({ ...item, dataUrl });
+        results.push(item);
       }
     } catch (err) {
       console.error(`Failed to capture URL ${url}:`, err);
     }
   }
 
+  // Persist pending view for the popup
   try {
     await chrome.storage.local.set({
       pending_view: 'history',
@@ -477,6 +470,7 @@ async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
     console.error('Failed to set pending_view:', err);
   }
 
+  // Pull the user directly into the History Gallery tab
   if (results.length > 0) {
     try {
       const galleryUrl = chrome.runtime.getURL(`index.html?view=history&batch=${results.length}`);
@@ -489,10 +483,9 @@ async function handleCaptureUrlList({ urls, settings, delayMs = 3000 }) {
   return { success: true, results };
 }
 
-// ---------------------------------------------------------------------------
-// 8. Multi-Resolution Capture
-// ---------------------------------------------------------------------------
-
+/**
+ * 8. Multi-Resolution Capture
+ */
 async function handleCaptureMultiSize({ url, resolutions, settings }) {
   const currentSettings = settings || (await getSettings());
   const results = [];
@@ -510,6 +503,7 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
 
   const tabId = win.tabs[0].id;
 
+  // Wait for initial load
   await new Promise((resolve) => {
     const timeout = setTimeout(resolve, 15000);
     function listener(tId, info) {
@@ -528,7 +522,11 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
     const res = resolutions[i];
 
     if (i > 0) {
-      await chrome.windows.update(win.id, { width: res.width, height: res.height, state: 'normal' });
+      await chrome.windows.update(win.id, {
+        width: res.width,
+        height: res.height,
+        state: 'normal',
+      });
       await new Promise((r) => setTimeout(r, 1000));
     }
 
@@ -539,6 +537,7 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
           id: `ms_${Date.now()}_${res.width}x${res.height}`,
           title: `Responsive ${res.name || `${res.width}x${res.height}`}`,
           url,
+          dataUrl,
           timestamp: Date.now(),
           width: res.width,
           height: res.height,
@@ -546,7 +545,7 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
           format: currentSettings.format || 'png',
         };
 
-        await saveHistoryItem(item, dataUrl);
+        await saveHistoryItem(item);
 
         if (currentSettings.autoDownload !== false) {
           const filename = formatFilename(
@@ -559,7 +558,7 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
           await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
         }
 
-        results.push({ ...item, dataUrl });
+        results.push(item);
       }
     } catch (captureError) {
       console.error(`Failed capture at ${res.width}x${res.height}:`, captureError);
@@ -573,28 +572,73 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
   return { success: true, results };
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /**
- * Saves an item's metadata to chrome.storage.local and its dataUrl to IndexedDB.
- * The dataUrl is intentionally excluded from the metadata object stored in
- * chrome.storage.local — binary data belongs in IndexedDB.
+ * Helpers
  */
-async function saveHistoryItem(item, dataUrl) {
+async function getSettings() {
+  const DEFAULT = {
+    format: 'png',
+    quality: 0.92,
+    scrollDelayMs: 600,
+    hideStickyElements: true,
+    autoDownload: true,
+    copyToClipboard: false,
+    filenameTemplate: '{title}_{date}_{time}',
+  };
+
   try {
-    // Persist the image separately in IndexedDB
-    if (dataUrl) {
-      await saveImageToDb(item.id, dataUrl);
+    const res = await chrome.storage.sync.get(['omnicapture_settings']);
+    return { ...DEFAULT, ...(res?.omnicapture_settings || {}) };
+  } catch (e) {
+    return DEFAULT;
+  }
+}
+
+async function saveHistoryItem(item) {
+  try {
+    // 1. Separate full resolution dataUrl under dedicated key to keep index lightweight
+    if (item.dataUrl) {
+      await chrome.storage.local.set({ [`yoink_full_${item.id}`]: item.dataUrl });
     }
 
-    // Persist lightweight metadata (no dataUrl) to storage.local
+    // 2. In history index list, avoid storing 40 multi-MB base64 images in one JSON array
+    const metaItem = {
+      ...item,
+      thumbnailUrl: item.thumbnailUrl || (item.dataUrl && item.dataUrl.length < 50000 ? item.dataUrl : undefined),
+      dataUrl: item.dataUrl && item.dataUrl.length < 50000 ? item.dataUrl : '', // strip giant string from index array
+    };
+
     const res = await chrome.storage.local.get(['omnicapture_history']);
     const list = Array.isArray(res?.omnicapture_history) ? res.omnicapture_history : [];
-    const updated = [item, ...list.filter((x) => x.id !== item.id)].slice(0, 40);
+    const updated = [metaItem, ...list.filter((x) => x.id !== item.id)].slice(0, 40);
     await chrome.storage.local.set({ omnicapture_history: updated });
   } catch (e) {
     console.error('History save error in background:', e);
   }
+}
+
+function formatFilename(template, title, url, mode, format) {
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10);
+  const timeStr = `${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}${now.getSeconds().toString().padStart(2, '0')}`;
+
+  let domain = 'page';
+  try {
+    if (url) domain = new URL(url).hostname.replace(/[^a-zA-Z0-9]/g, '_');
+  } catch {}
+
+  const cleanTitle = (title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+
+  let filename = template
+    .replace('{title}', cleanTitle)
+    .replace('{date}', dateStr)
+    .replace('{time}', timeStr)
+    .replace('{domain}', domain)
+    .replace('{type}', mode);
+
+  if (!filename.toLowerCase().endsWith(`.${format}`)) {
+    filename += `.${format}`;
+  }
+
+  return filename;
 }

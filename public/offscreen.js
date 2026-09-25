@@ -1,6 +1,4 @@
 // offscreen.js - Yoink Image Processing Engine
-// Each operation creates its own OffscreenCanvas so concurrent calls cannot
-// overwrite each other's in-progress canvas state.
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'STITCH_CHUNKS') {
@@ -18,37 +16,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 /**
- * 1. Stitch Full Page Chunks into Single Canvas
- * Creates a dedicated OffscreenCanvas — safe to run concurrently.
+ * 1. Stitch Full Page Chunks into Single Canvas with VRAM Reclamation
  */
 async function stitchChunks({ chunks, totalWidth, totalHeight, title, url, settings }) {
+  const canvas = document.getElementById('stitchCanvas');
   const MAX_DIMENSION = 16000;
-  const canvasWidth = totalWidth;
-  const canvasHeight = Math.min(totalHeight, MAX_DIMENSION);
 
-  const canvas = new OffscreenCanvas(canvasWidth, canvasHeight);
+  canvas.width = totalWidth;
+  canvas.height = Math.min(totalHeight, MAX_DIMENSION);
+
   const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   for (const chunk of chunks) {
     if (chunk.yOffset >= MAX_DIMENSION) break;
-    const img = await loadImage(chunk.dataUrl);
+
+    const img = await loadBitmap(chunk.dataUrl);
     ctx.drawImage(img, 0, chunk.yOffset);
+    if (img.close) img.close(); // Close ImageBitmap to free native memory
   }
 
   const format = settings?.format || 'png';
   const quality = settings?.quality || 0.92;
   const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
 
-  const blob = await canvas.convertToBlob({ type: mime, quality });
-  const finalDataUrl = await blobToDataUrl(blob);
+  const finalDataUrl = canvas.toDataURL(mime, quality);
+
+  // Immediately release canvas graphics memory
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  canvas.width = 0;
+  canvas.height = 0;
 
   chrome.runtime.sendMessage({
     action: 'CAPTURE_COMPLETED',
     payload: {
       dataUrl: finalDataUrl,
-      width: canvasWidth,
-      height: canvasHeight,
+      width: totalWidth,
+      height: Math.min(totalHeight, MAX_DIMENSION),
       mode: 'full',
       title: title || 'Full Page Capture',
       url: url || '',
@@ -58,28 +62,36 @@ async function stitchChunks({ chunks, totalWidth, totalHeight, title, url, setti
 }
 
 /**
- * 2. Crop Selection Region
- * Creates a dedicated OffscreenCanvas — safe to run concurrently.
+ * 2. Crop Selection Region with VRAM Reclamation
  */
 async function cropSelection({ dataUrl, x, y, width, height, dpr = 1, title, url, settings }) {
+  const canvas = document.getElementById('stitchCanvas');
+  const img = await loadBitmap(dataUrl);
+
   const cropX = Math.round(x * dpr);
   const cropY = Math.round(y * dpr);
   const cropWidth = Math.round(width * dpr);
   const cropHeight = Math.round(height * dpr);
 
-  const canvas = new OffscreenCanvas(cropWidth, cropHeight);
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, cropWidth, cropHeight);
+  canvas.width = cropWidth;
+  canvas.height = cropHeight;
 
-  const img = await loadImage(dataUrl);
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
   ctx.drawImage(img, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+  if (img.close) img.close();
 
   const format = settings?.format || 'png';
   const quality = settings?.quality || 0.92;
   const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
 
-  const blob = await canvas.convertToBlob({ type: mime, quality });
-  const finalDataUrl = await blobToDataUrl(blob);
+  const finalDataUrl = canvas.toDataURL(mime, quality);
+
+  // Immediately release canvas graphics memory
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  canvas.width = 0;
+  canvas.height = 0;
 
   chrome.runtime.sendMessage({
     action: 'CAPTURE_COMPLETED',
@@ -96,42 +108,52 @@ async function cropSelection({ dataUrl, x, y, width, height, dpr = 1, title, url
 }
 
 /**
- * 3. Convert Image Format / Compression
- * Creates a dedicated OffscreenCanvas — safe to run concurrently.
+ * 3. Convert Image Format / Compression with VRAM Reclamation
  */
 async function convertFormat({ dataUrl, format = 'png', quality = 0.92 }) {
-  const img = await loadImage(dataUrl);
-  const canvas = new OffscreenCanvas(img.width, img.height);
+  const canvas = document.getElementById('stitchCanvas');
+  const img = await loadBitmap(dataUrl);
+
+  canvas.width = img.width;
+  canvas.height = img.height;
+
   const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, img.width, img.height);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, 0, 0);
+  if (img.close) img.close();
 
   const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-  const blob = await canvas.convertToBlob({ type: mime, quality });
-  return blobToDataUrl(blob);
-}
+  const result = canvas.toDataURL(mime, quality);
 
-// ---------------------------------------------------------------------------
-// Utilities
-// ---------------------------------------------------------------------------
+  // Release canvas graphics memory
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  canvas.width = 0;
+  canvas.height = 0;
 
-/**
- * Loads a dataUrl into an ImageBitmap (works in offscreen / worker contexts).
- */
-async function loadImage(src) {
-  const res = await fetch(src);
-  const blob = await res.blob();
-  return createImageBitmap(blob);
+  return result;
 }
 
 /**
- * Converts a Blob to a base64 dataUrl string.
+ * High-performance off-thread ImageBitmap decoder
  */
-function blobToDataUrl(blob) {
+async function loadBitmap(src) {
+  if (typeof createImageBitmap !== 'undefined') {
+    try {
+      const res = await fetch(src);
+      const blob = await res.blob();
+      return await createImageBitmap(blob);
+    } catch {
+      // Fallback to Image element
+    }
+  }
+  return await loadImage(src);
+}
+
+function loadImage(src) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
   });
 }

@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   FileText,
-  File,
+  Monitor,
   Crop,
   Layers,
   Globe,
@@ -10,6 +10,7 @@ import {
   Smartphone,
   ChevronRight,
   Loader2,
+  Sparkles,
 } from 'lucide-react';
 
 interface Props {
@@ -39,216 +40,227 @@ export const QuickMenu: React.FC<Props> = React.memo(({
   isCapturing,
   activeAction,
 }) => {
-  const [selectedKey, setSelectedKey] = useState<string>('selection');
-
   return (
-    <div className="flex flex-col h-full bg-white text-zinc-900 select-none font-sans">
-      {/* Centered Top Brand Logo */}
-      <div className="pt-4 pb-3 px-4 flex items-center justify-center gap-2.5">
-        <img
-          src="/yoink-symbol.png"
-          alt="Yoink"
-          className="h-8 w-8 object-contain"
-        />
-        <img
-          src="/yoink-text.png"
-          alt="Yoink"
-          className="h-7 w-auto object-contain"
-        />
-      </div>
-
-      <div className="border-b border-zinc-150" />
-
-      {/* Main Body */}
-      <div className="flex-1 px-4 py-3 flex flex-col justify-between space-y-2.5 overflow-hidden">
-        {/* Card 1: Capture Actions */}
-        <div className="rounded-2xl border border-zinc-200/90 bg-white p-1 space-y-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
-          {/* Item 1: Capture entire page */}
-          <button
-            onClick={onCaptureFullPage}
-            disabled={isCapturing}
-            onMouseEnter={() => setSelectedKey('fullpage')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer text-left ${
-              selectedKey === 'fullpage'
-                ? 'border border-[#3b82f6] bg-[#eff6ff] text-blue-600'
-                : 'border border-transparent hover:bg-zinc-50 text-zinc-800'
-            }`}
-          >
-            <div className="flex items-center space-x-3">
-              <FileText size={18} className="text-blue-600 shrink-0" />
-              <span className={`text-[13px] ${selectedKey === 'fullpage' ? 'font-semibold text-blue-600' : 'font-medium text-zinc-800'}`}>
-                Capture entire page
-              </span>
-            </div>
-            <span className={`text-xs ${selectedKey === 'fullpage' ? 'font-medium text-blue-600' : 'text-zinc-400'}`}>
-              Alt+Shift+1
-            </span>
-          </button>
-
-          {/* Item 2: Capture visible part */}
-          <button
-            onClick={onCaptureVisible}
-            disabled={isCapturing}
-            onMouseEnter={() => setSelectedKey('visible')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer text-left ${
-              selectedKey === 'visible'
-                ? 'border border-[#3b82f6] bg-[#eff6ff] text-blue-600'
-                : 'border border-transparent hover:bg-zinc-50 text-zinc-800'
-            }`}
-          >
-            <div className="flex items-center space-x-3">
-              <File size={18} className="text-blue-600 shrink-0" />
-              <span className={`text-[13px] ${selectedKey === 'visible' ? 'font-semibold text-blue-600' : 'font-medium text-zinc-800'}`}>
-                Capture visible part
-              </span>
-            </div>
-            <span className={`text-xs ${selectedKey === 'visible' ? 'font-medium text-blue-600' : 'text-zinc-400'}`}>
-              Alt+Shift+3
-            </span>
-          </button>
-
-          {/* Item 3: Capture selection (Active in mock) */}
-          <button
-            onClick={onCaptureSelection}
-            disabled={isCapturing}
-            onMouseEnter={() => setSelectedKey('selection')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer text-left ${
-              selectedKey === 'selection'
-                ? 'border border-[#3b82f6] bg-[#eff6ff] text-blue-600'
-                : 'border border-transparent hover:bg-zinc-50 text-zinc-800'
-            }`}
-          >
-            <div className="flex items-center space-x-3">
-              <Crop size={18} className="text-blue-600 shrink-0" />
-              <span className={`text-[13px] ${selectedKey === 'selection' ? 'font-semibold text-blue-600' : 'font-medium text-zinc-800'}`}>
-                Capture selection
-              </span>
-            </div>
-            <span className={`text-xs ${selectedKey === 'selection' ? 'font-medium text-blue-600' : 'text-zinc-400'}`}>
-              Alt+Shift+4
-            </span>
-          </button>
-
-          {/* Item 4: Capture all tabs */}
-          <button
-            onClick={onCaptureAllTabs}
-            disabled={isCapturing}
-            onMouseEnter={() => setSelectedKey('alltabs')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer text-left ${
-              selectedKey === 'alltabs'
-                ? 'border border-[#3b82f6] bg-[#eff6ff] text-blue-600'
-                : 'border border-transparent hover:bg-zinc-50 text-zinc-800'
-            }`}
-          >
-            <div className="flex items-center space-x-3">
-              <Layers size={18} className="text-blue-600 shrink-0" />
-              <span className={`text-[13px] ${selectedKey === 'alltabs' ? 'font-semibold text-blue-600' : 'font-medium text-zinc-800'}`}>
-                Capture all tabs
-              </span>
-            </div>
-            <span className="text-[10px] font-bold text-blue-600 bg-blue-100/90 px-2.5 py-0.5 rounded-full tracking-wide">
-              BATCH
-            </span>
-          </button>
-
-          {/* Item 5: Capture list of URLs ... */}
-          <button
-            onClick={onOpenUrlBatch}
-            disabled={isCapturing}
-            onMouseEnter={() => setSelectedKey('urllist')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer text-left ${
-              selectedKey === 'urllist'
-                ? 'border border-[#3b82f6] bg-[#eff6ff] text-blue-600'
-                : 'border border-transparent hover:bg-zinc-50 text-zinc-800'
-            }`}
-          >
-            <div className="flex items-center space-x-3">
-              <Globe size={18} className="text-blue-600 shrink-0" />
-              <span className={`text-[13px] ${selectedKey === 'urllist' ? 'font-semibold text-blue-600' : 'font-medium text-zinc-800'}`}>
-                Capture list of URLs ...
-              </span>
-            </div>
-            <ChevronRight size={16} className="text-zinc-700 shrink-0" />
-          </button>
+    <div className="flex flex-col h-full bg-[#fbfbfd] text-zinc-900 select-none font-sans overflow-hidden">
+      {/* Brand Header */}
+      <div className="pt-3 pb-2 px-3.5 flex items-center justify-between border-b border-zinc-200/80 bg-white/80 backdrop-blur-xs shrink-0">
+        <div className="flex items-center gap-2">
+          <div className="relative flex items-center justify-center w-7 h-7 rounded-lg bg-blue-50/80 border border-blue-200/60 shadow-[0_1px_3px_rgba(37,99,235,0.08)]">
+            <img
+              src="/yoink-symbol.png"
+              alt="Yoink"
+              className="h-4.5 w-4.5 object-contain"
+            />
+          </div>
+          <img
+            src="/yoink-text.png"
+            alt="Yoink"
+            className="h-4.5 w-auto object-contain"
+          />
         </div>
 
-        {/* Card 2: Utilities (History & Options) */}
-        <div className="rounded-2xl border border-zinc-200/90 bg-white p-1 space-y-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
+        <div className="flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide uppercase bg-blue-50 text-blue-700 border border-blue-200/60 font-mono">
+            <Sparkles size={10} className="text-blue-600" />
+            <span>v1.1</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Main Action Body */}
+      <div className="flex-1 px-3 py-2 flex flex-col justify-between space-y-1.5 overflow-hidden">
+        {/* Card 1: Core Capture Actions */}
+        <div className="space-y-1">
+          <div className="flex items-center justify-between px-1 mb-1">
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-600">
+              Direct Capture
+            </span>
+          </div>
+
+          <div className="rounded-xl border border-zinc-200/80 bg-white p-1 space-y-0.5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
+            {/* Capture Entire Page */}
+            <button
+              onClick={onCaptureFullPage}
+              disabled={isCapturing}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-blue-50/60 border border-transparent hover:border-blue-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="flex items-center space-x-2.5 min-w-0">
+                <div className="w-6.5 h-6.5 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 group-hover:bg-blue-600 group-hover:text-white transition-colors duration-150">
+                  <FileText size={14} />
+                </div>
+                <span className="text-[12.5px] font-medium text-zinc-800 group-hover:text-blue-900 truncate">
+                  Capture entire page
+                </span>
+              </div>
+              <kbd className="px-1.5 py-0.5 text-[9.5px] font-mono font-medium text-zinc-600 bg-zinc-100 group-hover:bg-blue-100/70 group-hover:text-blue-700 rounded border border-zinc-200/80 group-hover:border-blue-200 transition-colors">
+                Alt+Shift+1
+              </kbd>
+            </button>
+
+            {/* Capture Visible Part */}
+            <button
+              onClick={onCaptureVisible}
+              disabled={isCapturing}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-blue-50/60 border border-transparent hover:border-blue-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="flex items-center space-x-2.5 min-w-0">
+                <div className="w-6.5 h-6.5 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 group-hover:bg-blue-600 group-hover:text-white transition-colors duration-150">
+                  <Monitor size={14} />
+                </div>
+                <span className="text-[12.5px] font-medium text-zinc-800 group-hover:text-blue-900 truncate">
+                  Capture visible part
+                </span>
+              </div>
+              <kbd className="px-1.5 py-0.5 text-[9.5px] font-mono font-medium text-zinc-600 bg-zinc-100 group-hover:bg-blue-100/70 group-hover:text-blue-700 rounded border border-zinc-200/80 group-hover:border-blue-200 transition-colors">
+                Alt+Shift+3
+              </kbd>
+            </button>
+
+            {/* Capture Selection */}
+            <button
+              onClick={onCaptureSelection}
+              disabled={isCapturing}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-blue-50/60 border border-transparent hover:border-blue-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="flex items-center space-x-2.5 min-w-0">
+                <div className="w-6.5 h-6.5 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 group-hover:bg-blue-600 group-hover:text-white transition-colors duration-150">
+                  <Crop size={14} />
+                </div>
+                <span className="text-[12.5px] font-medium text-zinc-800 group-hover:text-blue-900 truncate">
+                  Capture selection area
+                </span>
+              </div>
+              <kbd className="px-1.5 py-0.5 text-[9.5px] font-mono font-medium text-zinc-600 bg-zinc-100 group-hover:bg-blue-100/70 group-hover:text-blue-700 rounded border border-zinc-200/80 group-hover:border-blue-200 transition-colors">
+                Alt+Shift+4
+              </kbd>
+            </button>
+          </div>
+        </div>
+
+        {/* Card 2: Batch & Multi-Viewport Actions */}
+        <div className="space-y-1">
+          <div className="flex items-center justify-between px-1 mb-0.5">
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-600">
+              Workflows
+            </span>
+          </div>
+
+          <div className="rounded-xl border border-zinc-200/80 bg-white p-1 space-y-0.5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
+            {/* Capture All Tabs */}
+            <button
+              onClick={onCaptureAllTabs}
+              disabled={isCapturing}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-zinc-50 border border-transparent hover:border-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99] disabled:opacity-50"
+            >
+              <div className="flex items-center space-x-2.5 min-w-0">
+                <div className="w-6.5 h-6.5 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 group-hover:bg-indigo-600 group-hover:text-white transition-colors duration-150">
+                  <Layers size={14} />
+                </div>
+                <span className="text-[12.5px] font-medium text-zinc-800 truncate">
+                  Capture all open tabs
+                </span>
+              </div>
+              <span className="text-[9.5px] font-bold font-mono text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200/70 tracking-wide">
+                WINDOW
+              </span>
+            </button>
+
+            {/* Batch URL list */}
+            <button
+              onClick={onOpenUrlBatch}
+              disabled={isCapturing}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-zinc-50 border border-transparent hover:border-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99] disabled:opacity-50"
+            >
+              <div className="flex items-center space-x-2.5 min-w-0">
+                <div className="w-6.5 h-6.5 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 group-hover:bg-emerald-600 group-hover:text-white transition-colors duration-150">
+                  <Globe size={14} />
+                </div>
+                <span className="text-[12.5px] font-medium text-zinc-800 truncate">
+                  Batch capture URLs ...
+                </span>
+              </div>
+              <ChevronRight size={14} className="text-zinc-600 group-hover:text-zinc-900 group-hover:translate-x-0.5 transition-all" />
+            </button>
+
+            {/* Multi-Device Capture */}
+            <button
+              onClick={onOpenMultiSize}
+              disabled={isCapturing}
+              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-zinc-50 border border-transparent hover:border-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99] disabled:opacity-50"
+            >
+              <div className="flex items-center space-x-2.5 min-w-0">
+                <div className="w-6.5 h-6.5 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center shrink-0 group-hover:bg-sky-600 group-hover:text-white transition-colors duration-150">
+                  <Smartphone size={14} />
+                </div>
+                <span className="text-[12.5px] font-medium text-zinc-800 truncate">
+                  Multi-device viewports ...
+                </span>
+              </div>
+              <span className="text-[9.5px] font-mono font-medium text-sky-700 bg-sky-50 px-2 py-0.5 rounded-full border border-sky-200/70">
+                Responsive
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Card 3: Gallery & Settings Navigation */}
+        <div className="rounded-xl border border-zinc-200/80 bg-white p-1 space-y-0.5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
           {/* History */}
           <button
             onClick={onOpenHistory}
             disabled={isCapturing}
-            onMouseEnter={() => setSelectedKey('history')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer text-left ${
-              selectedKey === 'history'
-                ? 'border border-[#3b82f6] bg-[#eff6ff] text-blue-600'
-                : 'border border-transparent hover:bg-zinc-50 text-zinc-800'
-            }`}
+            className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-zinc-50 border border-transparent hover:border-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99]"
           >
-            <div className="flex items-center space-x-3">
-              <History size={18} className="text-zinc-700 shrink-0" />
-              <span className={`text-[13px] ${selectedKey === 'history' ? 'font-semibold text-blue-600' : 'font-medium text-zinc-800'}`}>
-                History ...
+            <div className="flex items-center space-x-2.5 min-w-0">
+              <div className="w-6.5 h-6.5 rounded-lg bg-zinc-100 text-zinc-600 flex items-center justify-center shrink-0 group-hover:bg-zinc-800 group-hover:text-white transition-colors duration-150">
+                <History size={14} />
+              </div>
+              <span className="text-[12.5px] font-medium text-zinc-800">
+                Gallery & History ...
               </span>
             </div>
-            <span className="text-xs font-semibold text-zinc-600 bg-zinc-100 px-2.5 py-0.5 rounded-full min-w-[20px] text-center">
-              {historyCount}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-semibold font-mono tabular-nums text-zinc-700 bg-zinc-100 px-2 py-0.5 rounded-full border border-zinc-200/60 min-w-[20px] text-center">
+                {historyCount}
+              </span>
+              <ChevronRight size={14} className="text-zinc-600 group-hover:text-zinc-900 group-hover:translate-x-0.5 transition-all" />
+            </div>
           </button>
 
           {/* Options */}
           <button
             onClick={onOpenOptions}
             disabled={isCapturing}
-            onMouseEnter={() => setSelectedKey('options')}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl transition-all cursor-pointer text-left ${
-              selectedKey === 'options'
-                ? 'border border-[#3b82f6] bg-[#eff6ff] text-blue-600'
-                : 'border border-transparent hover:bg-zinc-50 text-zinc-800'
-            }`}
+            className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-zinc-50 border border-transparent hover:border-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 active:scale-[0.99]"
           >
-            <div className="flex items-center space-x-3">
-              <Settings size={18} className="text-zinc-700 shrink-0" />
-              <span className={`text-[13px] ${selectedKey === 'options' ? 'font-semibold text-blue-600' : 'font-medium text-zinc-800'}`}>
-                Options ...
+            <div className="flex items-center space-x-2.5 min-w-0">
+              <div className="w-6.5 h-6.5 rounded-lg bg-zinc-100 text-zinc-600 flex items-center justify-center shrink-0 group-hover:bg-zinc-800 group-hover:text-white transition-colors duration-150">
+                <Settings size={14} />
+              </div>
+              <span className="text-[12.5px] font-medium text-zinc-800">
+                Options & Shortcuts ...
               </span>
             </div>
-            <ChevronRight size={16} className="text-zinc-700 shrink-0" />
+            <ChevronRight size={14} className="text-zinc-600 group-hover:text-zinc-900 group-hover:translate-x-0.5 transition-all" />
           </button>
         </div>
-
-        {/* Card 3: Multi-Device Capture */}
-        <button
-          onClick={onOpenMultiSize}
-          disabled={isCapturing}
-          onMouseEnter={() => setSelectedKey('multisize')}
-          className="w-full rounded-2xl border border-blue-200/80 bg-[#eff6ff]/70 hover:bg-blue-100/60 transition-all p-3 flex items-center justify-between cursor-pointer text-left"
-        >
-          <div className="flex items-center space-x-3 min-w-0">
-            <Smartphone size={18} className="text-blue-600 shrink-0" />
-            <span className="text-[13px] font-semibold text-blue-600 truncate whitespace-nowrap">
-              Multi-Device Capture ...
-            </span>
-          </div>
-          <span className="text-xs font-semibold text-blue-600 bg-blue-100/90 px-2.5 py-0.5 rounded-full shrink-0 whitespace-nowrap ml-2">
-            3 sizes
-          </span>
-        </button>
       </div>
 
       {/* Footer Status Bar */}
-      <div className="border-t border-zinc-150 px-4 py-2.5 flex items-center justify-between bg-white text-xs">
-        <span className="text-[11px] font-bold tracking-widest text-zinc-400 uppercase font-mono">
-          STATUS
+      <div className="border-t border-zinc-200/80 px-3 py-2 flex items-center justify-between bg-white text-xs shrink-0">
+        <span className="text-[9.5px] font-bold tracking-widest text-zinc-600 uppercase font-mono">
+          ENGINE
         </span>
-        <div className="flex items-center gap-2">
-          {isCapturing && <Loader2 size={12} className="animate-spin text-blue-600" />}
-          <span className="text-xs font-medium text-zinc-800">
-            {activeAction || (isCapturing ? 'Processing...' : 'Ready')}
+        <div className="flex items-center gap-2 min-w-0">
+          {isCapturing && <Loader2 size={11} className="animate-spin text-blue-600 shrink-0" />}
+          <span className="text-[11.5px] font-medium text-zinc-700 truncate max-w-[190px]">
+            {activeAction || (isCapturing ? 'Processing capture...' : 'Ready')}
           </span>
           <span
-            className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-              isCapturing ? 'bg-amber-400 animate-ping' : 'bg-[#22c55e]'
+            className={`w-2 h-2 rounded-full shrink-0 ${
+              isCapturing
+                ? 'bg-amber-400 ring-4 ring-amber-100 animate-pulse'
+                : 'bg-emerald-500 ring-4 ring-emerald-50'
             }`}
           />
         </div>
@@ -256,4 +268,3 @@ export const QuickMenu: React.FC<Props> = React.memo(({
     </div>
   );
 });
-

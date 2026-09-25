@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
     "pack": "vite build && powershell -Command \"Compress-Archive -Path dist/* -DestinationPath yoink.zip -Force\""
   },
   "dependencies": {

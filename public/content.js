@@ -42,9 +42,21 @@
     // Suppress fixed/sticky headers during scrolling to prevent visual artifacts
     let originalStyles = [];
     if (hideSticky) {
-      const fixedElements = Array.from(document.querySelectorAll('*')).filter((el) => {
-        const style = window.getComputedStyle(el);
-        return style.position === 'fixed' || style.position === 'sticky';
+      // High-performance candidate selector avoids querying thousands of leaf DOM nodes
+      const candidateSelector = 'header, nav, aside, [class*="header" i], [class*="nav" i], [class*="sticky" i], [class*="fixed" i], [style*="fixed"], [style*="sticky"], [data-sticky], [data-fixed]';
+      const candidates = new Set([
+        ...Array.from(document.querySelectorAll(candidateSelector)),
+        ...Array.from(document.body.children)
+      ]);
+
+      const fixedElements = Array.from(candidates).filter((el) => {
+        if (!el || el === document.body || el === document.documentElement) return false;
+        try {
+          const pos = window.getComputedStyle(el).position;
+          return pos === 'fixed' || pos === 'sticky';
+        } catch {
+          return false;
+        }
       });
 
       originalStyles = fixedElements.map((el) => {
