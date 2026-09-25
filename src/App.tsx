@@ -13,6 +13,8 @@ import {
   ExternalLink,
   ChevronRight,
   Loader2,
+  Check,
+  Copy,
 } from 'lucide-react';
 import { CaptureSettings, HistoryItem } from './types';
 import {
@@ -69,6 +71,7 @@ export default function App() {
   const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('Ready');
+  const [copiedShortcut, setCopiedShortcut] = useState<string | null>(null);
 
   const [windowWidth, setWindowWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 370
@@ -240,6 +243,15 @@ export default function App() {
     }
   }, []);
 
+  const handleCopyShortcut = useCallback((shortcut: string, label: string) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(shortcut);
+    }
+    setCopiedShortcut(shortcut);
+    setStatusMessage(`Shortcut ${shortcut} copied! Navigate to any tab and press it to ${label.toLowerCase()}.`);
+    setTimeout(() => setCopiedShortcut(null), 2500);
+  }, []);
+
   // Full Tab Gallery Hub View
   if (isFullTab) {
     return (
@@ -355,158 +367,294 @@ export default function App() {
                 <div className="bg-gradient-to-br from-blue-50/70 via-white to-indigo-50/40 p-6 rounded-2xl border border-blue-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <span className="inline-flex items-center gap-1 text-[11px] font-mono font-bold tracking-wider uppercase text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded-md">
-                      <Sparkles size={11} /> High Precision Offline Capture
+                      <Sparkles size={11} /> Studio Command Hub
                     </span>
                     <h2 className="text-xl md:text-2xl font-bold text-zinc-900 font-display tracking-tight">
                       Capture, Stitch & Organize with Yoink
                     </h2>
-                    <p className="text-xs md:text-sm text-zinc-600 max-w-xl">
-                      Ultra-fast screenshot pipeline operating entirely in your browser using Chrome Offscreen Canvas.
+                    <p className="text-xs md:text-sm text-zinc-600 max-w-xl leading-relaxed">
+                      All your screenshots, stitches, and batch workflows save directly to this central studio. Use keyboard shortcuts or the toolbar popup on any target tab.
                     </p>
                   </div>
 
-                  <button
-                    onClick={() => setView('history')}
-                    className="self-start md:self-auto px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs transition flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <span>View Gallery ({history.length})</span>
-                    <ArrowRight size={14} />
-                  </button>
+                  <div className="flex items-center gap-2.5">
+                    <button
+                      onClick={() => setView('history')}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span>Open Gallery ({history.length})</span>
+                      <ArrowRight size={14} />
+                    </button>
+                  </div>
                 </div>
 
-                {/* Direct Capture Options Grid */}
+                {/* 3-Step Quick Start Workflow */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 p-4 bg-white rounded-2xl border border-zinc-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
+                  <div className="flex items-start gap-3 p-1">
+                    <div className="w-6 h-6 rounded-lg bg-blue-50 text-blue-700 font-mono font-bold flex items-center justify-center shrink-0 text-xs border border-blue-200/60">
+                      1
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-semibold text-zinc-900">Browse to Target</h4>
+                      <p className="text-[11.5px] text-zinc-600 mt-0.5 leading-snug">
+                        Open the website, dashboard, or app you want to capture in any Chrome tab.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-3 p-1">
+                    <div className="w-6 h-6 rounded-lg bg-blue-50 text-blue-700 font-mono font-bold flex items-center justify-center shrink-0 text-xs border border-blue-200/60">
+                      2
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-semibold text-zinc-900">Trigger on Webpage</h4>
+                      <p className="text-[11.5px] text-zinc-600 mt-0.5 leading-snug">
+                        Press the global shortcut (<kbd className="px-1 py-0.2 bg-zinc-100 rounded border border-zinc-200 font-mono text-[10px]">Alt+Shift+1</kbd>) or click the Yoink toolbar popup.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-3 p-1">
+                    <div className="w-6 h-6 rounded-lg bg-blue-50 text-blue-700 font-mono font-bold flex items-center justify-center shrink-0 text-xs border border-blue-200/60">
+                      3
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-semibold text-zinc-900">Review in Studio</h4>
+                      <p className="text-[11.5px] text-zinc-600 mt-0.5 leading-snug">
+                        Screenshots land automatically right here in your Gallery to zoom, copy, and export.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Core Capture Capabilities & Global Shortcuts */}
                 <div className="space-y-3">
-                  <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-600">
-                    Instant Capture Triggers
-                  </h3>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-700">
+                        Capture Capabilities & Shortcuts
+                      </h3>
+                      <p className="text-xs text-zinc-600 mt-0.5">
+                        These tools operate on any active webpage. Click a shortcut to copy it to your clipboard.
+                      </p>
+                    </div>
+                  </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     {/* Full Page */}
                     <div
-                      onClick={handleCaptureFullPage}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3"
+                      onClick={() => handleCopyShortcut('Alt+Shift+1', 'Full Page Capture')}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3 relative"
                     >
-                      <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
-                        <FileText size={20} />
+                      <div className="flex items-center justify-between">
+                        <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
+                          <FileText size={20} />
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCopyShortcut('Alt+Shift+1', 'Full Page Capture');
+                          }}
+                          className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition"
+                          title="Click to copy shortcut"
+                        >
+                          {copiedShortcut === 'Alt+Shift+1' ? (
+                            <>
+                              <Check size={11} className="text-emerald-600" />
+                              <span className="text-emerald-700">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy size={11} className="text-zinc-500" />
+                              <span>Alt+Shift+1</span>
+                            </>
+                          )}
+                        </button>
                       </div>
                       <div>
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
-                            Full Page Capture
-                          </h4>
-                          <kbd className="text-[10px] font-mono px-1.5 py-0.5 bg-zinc-100 rounded border border-zinc-200 text-zinc-600">
-                            Alt+Shift+1
-                          </kbd>
-                        </div>
+                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
+                          Full Page Capture
+                        </h4>
                         <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Scrolls the entire webpage seamlessly, hiding sticky navbars, and stitches into one crisp high-res image.
+                          Scrolls the entire webpage automatically, suppresses sticky navbars to avoid duplication, and stitches DOM chunks into one seamless image.
                         </p>
+                      </div>
+                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span>Trigger: Anywhere on Web</span>
+                        <span className="text-blue-600 font-semibold group-hover:underline">Copy Shortcut →</span>
                       </div>
                     </div>
 
                     {/* Visible Viewport */}
                     <div
-                      onClick={handleCaptureVisible}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3"
+                      onClick={() => handleCopyShortcut('Alt+Shift+3', 'Visible Viewport')}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3 relative"
                     >
-                      <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
-                        <Monitor size={20} />
+                      <div className="flex items-center justify-between">
+                        <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
+                          <Monitor size={20} />
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCopyShortcut('Alt+Shift+3', 'Visible Viewport');
+                          }}
+                          className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition"
+                          title="Click to copy shortcut"
+                        >
+                          {copiedShortcut === 'Alt+Shift+3' ? (
+                            <>
+                              <Check size={11} className="text-emerald-600" />
+                              <span className="text-emerald-700">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy size={11} className="text-zinc-500" />
+                              <span>Alt+Shift+3</span>
+                            </>
+                          )}
+                        </button>
                       </div>
                       <div>
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
-                            Visible Viewport
-                          </h4>
-                          <kbd className="text-[10px] font-mono px-1.5 py-0.5 bg-zinc-100 rounded border border-zinc-200 text-zinc-600">
-                            Alt+Shift+3
-                          </kbd>
-                        </div>
+                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
+                          Visible Viewport
+                        </h4>
                         <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Instantly takes a snapshot of whatever is currently displayed on screen at 1:1 hardware device pixel ratio.
+                          Instant 1:1 hardware pixel ratio snapshot of whatever is currently displayed on your active screen with zero compression delay.
                         </p>
+                      </div>
+                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span>Trigger: Anywhere on Web</span>
+                        <span className="text-blue-600 font-semibold group-hover:underline">Copy Shortcut →</span>
                       </div>
                     </div>
 
                     {/* Selection Area */}
                     <div
-                      onClick={handleCaptureSelection}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3"
+                      onClick={() => handleCopyShortcut('Alt+Shift+4', 'Selection Region')}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3 relative"
                     >
-                      <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
-                        <Crop size={20} />
+                      <div className="flex items-center justify-between">
+                        <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
+                          <Crop size={20} />
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCopyShortcut('Alt+Shift+4', 'Selection Region');
+                          }}
+                          className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition"
+                          title="Click to copy shortcut"
+                        >
+                          {copiedShortcut === 'Alt+Shift+4' ? (
+                            <>
+                              <Check size={11} className="text-emerald-600" />
+                              <span className="text-emerald-700">Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy size={11} className="text-zinc-500" />
+                              <span>Alt+Shift+4</span>
+                            </>
+                          )}
+                        </button>
                       </div>
                       <div>
-                        <div className="flex items-center justify-between">
-                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
-                            Selection Region
-                          </h4>
-                          <kbd className="text-[10px] font-mono px-1.5 py-0.5 bg-zinc-100 rounded border border-zinc-200 text-zinc-600">
-                            Alt+Shift+4
-                          </kbd>
-                        </div>
+                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
+                          Selection Region
+                        </h4>
                         <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Launches interactive crop overlay with 8-point resize handles and real-time pixel dimension counters.
+                          Launches an interactive semi-transparent crop overlay on your target page with 8-point resize handles and real-time pixel dimensions.
                         </p>
+                      </div>
+                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span>Trigger: Anywhere on Web</span>
+                        <span className="text-blue-600 font-semibold group-hover:underline">Copy Shortcut →</span>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Workflow Cards Grid */}
-                <div className="space-y-3 pt-2">
-                  <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-600">
-                    Advanced Workflows
-                  </h3>
+                {/* In-Studio Automation Tools */}
+                <div className="space-y-3 pt-1">
+                  <div>
+                    <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-700">
+                      In-Studio Automation Tools
+                    </h3>
+                    <p className="text-xs text-zinc-600 mt-0.5">
+                      Batch workflows you can configure and execute directly from this dashboard.
+                    </p>
+                  </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div
-                      onClick={handleCaptureAllTabs}
-                      className="p-4 bg-zinc-50/70 hover:bg-zinc-100/80 rounded-xl border border-zinc-200/80 transition cursor-pointer flex items-center justify-between group"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
-                          <Layers size={16} />
-                        </div>
-                        <div>
-                          <h4 className="font-semibold text-xs text-zinc-900">All Window Tabs</h4>
-                          <p className="text-[11px] text-zinc-600">Batch capture all open tabs</p>
-                        </div>
-                      </div>
-                      <ChevronRight size={16} className="text-zinc-600 group-hover:translate-x-0.5 transition" />
-                    </div>
-
-                    <div
                       onClick={() => setView('urllist')}
-                      className="p-4 bg-zinc-50/70 hover:bg-zinc-100/80 rounded-xl border border-zinc-200/80 transition cursor-pointer flex items-center justify-between group"
+                      className="p-4 bg-white hover:bg-emerald-50/50 rounded-xl border border-zinc-200 hover:border-emerald-300 transition cursor-pointer flex items-center justify-between group shadow-2xs"
                     >
                       <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                        <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 group-hover:bg-emerald-600 group-hover:text-white transition">
                           <Globe size={16} />
                         </div>
                         <div>
-                          <h4 className="font-semibold text-xs text-zinc-900">Batch URL Capture</h4>
-                          <p className="text-[11px] text-zinc-600">Queue list of target websites</p>
+                          <h4 className="font-semibold text-xs text-zinc-900 group-hover:text-emerald-900 transition">Batch URL Capture</h4>
+                          <p className="text-[11px] text-zinc-600">Queue & capture a list of websites</p>
                         </div>
                       </div>
-                      <ChevronRight size={16} className="text-zinc-600 group-hover:translate-x-0.5 transition" />
+                      <ChevronRight size={16} className="text-zinc-600 group-hover:translate-x-0.5 group-hover:text-emerald-700 transition" />
                     </div>
 
                     <div
                       onClick={() => setView('multisize')}
-                      className="p-4 bg-zinc-50/70 hover:bg-zinc-100/80 rounded-xl border border-zinc-200/80 transition cursor-pointer flex items-center justify-between group"
+                      className="p-4 bg-white hover:bg-sky-50/50 rounded-xl border border-zinc-200 hover:border-sky-300 transition cursor-pointer flex items-center justify-between group shadow-2xs"
                     >
                       <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
+                        <div className="w-8 h-8 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center shrink-0 group-hover:bg-sky-600 group-hover:text-white transition">
                           <Smartphone size={16} />
                         </div>
                         <div>
-                          <h4 className="font-semibold text-xs text-zinc-900">Multi-Device Breakpoints</h4>
-                          <p className="text-[11px] text-zinc-600">Mobile, Tablet, Desktop 4K</p>
+                          <h4 className="font-semibold text-xs text-zinc-900 group-hover:text-sky-900 transition">Multi-Device Breakpoints</h4>
+                          <p className="text-[11px] text-zinc-600">Mobile, Tablet, and Desktop viewports</p>
                         </div>
                       </div>
-                      <ChevronRight size={16} className="text-zinc-600 group-hover:translate-x-0.5 transition" />
+                      <ChevronRight size={16} className="text-zinc-600 group-hover:translate-x-0.5 group-hover:text-sky-700 transition" />
+                    </div>
+
+                    <div
+                      onClick={handleCaptureAllTabs}
+                      className="p-4 bg-white hover:bg-indigo-50/50 rounded-xl border border-zinc-200 hover:border-indigo-300 transition cursor-pointer flex items-center justify-between group shadow-2xs"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 group-hover:bg-indigo-600 group-hover:text-white transition">
+                          <Layers size={16} />
+                        </div>
+                        <div>
+                          <h4 className="font-semibold text-xs text-zinc-900 group-hover:text-indigo-900 transition">Capture All Window Tabs</h4>
+                          <p className="text-[11px] text-zinc-600">Snapshot every tab currently open</p>
+                        </div>
+                      </div>
+                      <ChevronRight size={16} className="text-zinc-600 group-hover:translate-x-0.5 group-hover:text-indigo-700 transition" />
                     </div>
                   </div>
+                </div>
+
+                {/* Future Expansion Callout */}
+                <div className="p-4 bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-white rounded-2xl border border-blue-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                      <Sparkles size={16} />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-zinc-900">
+                        Studio Hub Workspace Roadmap
+                      </h4>
+                      <p className="text-[11.5px] text-zinc-600 leading-snug">
+                        Upcoming updates will expand this studio area with live in-tab URL rendering, canvas annotations, and multi-capture collage builders.
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-mono font-bold text-blue-700 bg-blue-100/80 px-2.5 py-1 rounded-full uppercase tracking-wider shrink-0 self-start sm:self-auto border border-blue-200">
+                    Active Development
+                  </span>
                 </div>
 
                 {/* Storage & Engine Info Footer */}
