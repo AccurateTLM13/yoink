@@ -232,6 +232,14 @@ export default function App() {
     setHistory((prev) => [...items, ...prev]);
   }, []);
 
+  const handleOpenStudio = useCallback(() => {
+    if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
+      chrome.tabs.create({ url: chrome.runtime.getURL('index.html?tab=true') });
+    } else {
+      window.open('/?tab=true', '_blank');
+    }
+  }, []);
+
   // Full Tab Gallery Hub View
   if (isFullTab) {
     return (
@@ -569,6 +577,7 @@ export default function App() {
             onOpenMultiSize={() => setView('multisize')}
             onOpenHistory={() => setView('history')}
             onOpenOptions={() => setView('options')}
+            onOpenStudio={handleOpenStudio}
             historyCount={history.length}
             isCapturing={isCapturing}
             activeAction={statusMessage}
@@ -605,6 +614,7 @@ export default function App() {
             onSelectPreview={(item) => setPreviewItem(item)}
             onDeleteItem={handleDeleteHistoryItem}
             onClearAll={handleClearHistory}
+            onOpenStudio={handleOpenStudio}
             isFullTab={false}
           />
         )}

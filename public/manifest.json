@@ -36,6 +36,10 @@
       "128": "icons/icon-128.png"
     }
   },
+  "options_ui": {
+    "page": "index.html?tab=true",
+    "open_in_tab": true
+  },
   "commands": {
     "capture_full_page": {
       "suggested_key": {

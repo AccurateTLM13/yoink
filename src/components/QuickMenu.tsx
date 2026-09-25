@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Loader2,
   Sparkles,
+  ExternalLink,
 } from 'lucide-react';
 
 interface Props {
@@ -22,6 +23,7 @@ interface Props {
   onOpenMultiSize: () => void;
   onOpenHistory: () => void;
   onOpenOptions: () => void;
+  onOpenStudio?: () => void;
   historyCount: number;
   isCapturing: boolean;
   activeAction: string | null;
@@ -36,6 +38,7 @@ export const QuickMenu: React.FC<Props> = React.memo(({
   onOpenMultiSize,
   onOpenHistory,
   onOpenOptions,
+  onOpenStudio,
   historyCount,
   isCapturing,
   activeAction,
@@ -60,6 +63,16 @@ export const QuickMenu: React.FC<Props> = React.memo(({
         </div>
 
         <div className="flex items-center gap-1.5">
+          {onOpenStudio && (
+            <button
+              onClick={onOpenStudio}
+              title="Open full Studio Hub in a browser tab"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-zinc-600 hover:text-blue-700 bg-zinc-100 hover:bg-blue-50 border border-zinc-200/80 hover:border-blue-200 transition cursor-pointer"
+            >
+              <span>Studio</span>
+              <ExternalLink size={10} className="text-zinc-500" />
+            </button>
+          )}
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide uppercase bg-blue-50 text-blue-700 border border-blue-200/60 font-mono">
             <Sparkles size={10} className="text-blue-600" />
             <span>v1.1</span>

@@ -22,6 +22,7 @@ interface Props {
   onSelectPreview: (item: HistoryItem) => void;
   onDeleteItem: (id: string) => void;
   onClearAll: () => void;
+  onOpenStudio?: () => void;
   recentBatchBanner?: number | null;
   onDismissBatchBanner?: () => void;
   isFullTab?: boolean;
@@ -42,6 +43,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   onSelectPreview,
   onDeleteItem,
   onClearAll,
+  onOpenStudio,
   recentBatchBanner,
   onDismissBatchBanner,
   isFullTab,
@@ -137,7 +139,18 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
           <span>Back to Menu</span>
         </button>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          {!isFullTab && onOpenStudio && (
+            <button
+              onClick={onOpenStudio}
+              title="Open full gallery in Studio Hub"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100/70 border border-blue-200/70 transition cursor-pointer"
+            >
+              <span>Studio</span>
+              <ExternalLink size={10} />
+            </button>
+          )}
+
           <span className="text-[11px] font-mono tabular-nums text-zinc-600 bg-zinc-100 px-2 py-0.5 rounded-full border border-zinc-200/60">
             {history.length} {history.length === 1 ? 'item' : 'items'}
           </span>
