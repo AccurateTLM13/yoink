@@ -73,6 +73,7 @@
       document.body.offsetHeight,
       document.documentElement.offsetHeight
     );
+    const maxScroll = Math.max(0, totalHeight - viewportHeight);
     let currentTop = 0;
     const chunks = [];
 
@@ -80,30 +81,49 @@
     window.scrollTo(0, 0);
     await new Promise((r) => setTimeout(r, 400));
 
-    while (currentTop < totalHeight) {
-      // Request background script to capture the visible tab
-      const response = await chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB' });
-      if (response && response.dataUrl) {
-        chunks.push({
-          dataUrl: response.dataUrl,
-          yOffset: currentTop,
-        });
+    try {
+      while (true) {
+        const actualY = window.scrollY || document.documentElement.scrollTop || 0;
+        
+        // Request background script to capture the visible tab
+        const response = await chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB' });
+        if (response && response.dataUrl) {
+          chunks.push({
+            dataUrl: response.dataUrl,
+            yOffset: actualY,
+          });
+        }
+
+        // Notify progress to popup/hub
+        const pct = Math.min(99, Math.round(((actualY + viewportHeight) / totalHeight) * 100));
+        chrome.runtime.sendMessage({
+          action: 'CAPTURE_PROGRESS',
+          payload: { message: `Scanning page... (${pct}%)`, percent: pct },
+        }).catch(() => {});
+
+        if (actualY >= maxScroll || chunks.length >= 80) {
+          break;
+        }
+
+        currentTop = Math.min(maxScroll, currentTop + viewportHeight);
+        window.scrollTo(0, currentTop);
+
+        // Pause for lazy-loading to catch up
+        await new Promise((r) => setTimeout(r, scrollDelay));
+
+        const nextY = window.scrollY || document.documentElement.scrollTop || 0;
+        if (nextY === actualY && actualY > 0) {
+          // Bottom reached
+          break;
+        }
       }
-
-      currentTop += viewportHeight;
-      if (currentTop >= totalHeight) break;
-
-      window.scrollTo(0, currentTop);
-
-      // Pause for lazy-loading to catch up
-      await new Promise((r) => setTimeout(r, scrollDelay));
+    } finally {
+      // Restore original styles
+      document.body.style.overflow = originalOverflow;
+      originalStyles.forEach(({ el, orig }) => {
+        el.style.position = orig;
+      });
     }
-
-    // Restore original styles
-    document.body.style.overflow = originalOverflow;
-    originalStyles.forEach(({ el, orig }) => {
-      el.style.position = orig;
-    });
 
     // Send chunks to Offscreen document for stitching
     await chrome.runtime.sendMessage({
@@ -111,7 +131,8 @@
       payload: {
         chunks,
         totalWidth: window.innerWidth,
-        totalHeight,
+        totalHeight: Math.max(totalHeight, (window.scrollY || 0) + viewportHeight),
+        dpr: window.devicePixelRatio || 1,
         title: document.title,
         url: window.location.href,
       },
@@ -364,6 +385,7 @@
   function onKeyDown(e) {
     if (e.key === 'Escape') {
       removeSelectionOverlay();
+      chrome.runtime.sendMessage({ action: 'CAPTURE_CANCELLED' }).catch(() => {});
     } else if (e.key === 'Enter') {
       finalizeSelectionCapture();
     }

@@ -294,7 +294,7 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
                   className="group relative bg-white border border-zinc-200/80 hover:border-blue-400 rounded-lg p-1.5 cursor-pointer shadow-2xs hover:shadow-xs transition"
                 >
                   <img
-                    src={item.dataUrl}
+                    src={item.thumbnailUrl || item.dataUrl}
                     alt={item.title}
                     className="w-full h-16 object-cover rounded bg-zinc-100"
                   />

@@ -22,7 +22,12 @@ interface Props {
 export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
   const [copied, setCopied] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
-  const [fullImage, setFullImage] = useState<string | null>(item?.dataUrl || item?.thumbnailUrl || null);
+  const initial = (item?.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item?.dataUrl || item?.thumbnailUrl || null);
+  const [fullImage, setFullImage] = useState<string | null>(initial);
+  const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
+    width: item?.width || 0,
+    height: item?.height || 0,
+  });
 
   // Close on Escape key
   const handleKeyDown = useCallback(
@@ -43,6 +48,13 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
   useEffect(() => {
     if (!item) return;
     let isMounted = true;
+    const init = (item.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item.dataUrl || item.thumbnailUrl);
+    if (init) {
+      setFullImage(init);
+    }
+    if (item.width && item.height) {
+      setDimensions({ width: item.width, height: item.height });
+    }
     getFullResolutionImage(item.id).then((full) => {
       if (isMounted && full) {
         setFullImage(full);
@@ -51,7 +63,7 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
     return () => {
       isMounted = false;
     };
-  }, [item]);
+  }, [item?.id, item?.dataUrl, item?.thumbnailUrl, item?.width, item?.height]);
 
   if (!item) return null;
 
@@ -96,7 +108,7 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
               {item.title}
             </h3>
             <p className="text-[10px] text-zinc-400 font-mono truncate tabular-nums">
-              {item.width > 0 ? `${item.width} × ${item.height}px • ` : ''}
+              {dimensions.width > 0 ? `${dimensions.width} × ${dimensions.height}px • ` : ''}
               {item.mode.toUpperCase()} • {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </p>
           </div>
@@ -179,6 +191,12 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
             <img
               src={currentImage}
               alt={item.title}
+              onLoad={(e) => {
+                const target = e.currentTarget;
+                if (!dimensions.width || !dimensions.height) {
+                  setDimensions({ width: target.naturalWidth, height: target.naturalHeight });
+                }
+              }}
               className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg border border-zinc-800 shadow-[0_20px_50px_rgba(0,0,0,0.6)]"
             />
           ) : (

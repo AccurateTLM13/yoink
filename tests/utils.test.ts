@@ -223,4 +223,132 @@ describe('Storage Utilities', () => {
     assert.ok(typeof thumb === 'string');
     assert.ok(thumb.length > 0);
   });
+
+  test('auto-repairs items with empty thumbnail and dataUrl from full resolution storage', async () => {
+    const fullImage = 'data:image/png;base64,rescued_full_resolution_image_data';
+    await saveFullResolutionImage('repaired_item_1', fullImage);
+
+    // Simulate an item previously saved with wiped image fields
+    const corruptedItem: HistoryItem = {
+      id: 'repaired_item_1',
+      title: 'Corrupted Item',
+      url: 'https://example.com/lost',
+      dataUrl: '',
+      thumbnailUrl: '',
+      timestamp: Date.now(),
+      width: 1920,
+      height: 1080,
+      mode: 'full',
+      format: 'png',
+    };
+
+    mockStorage.setItem('omnicapture_history', JSON.stringify([corruptedItem]));
+
+    // getStoredHistory should automatically detect and repair the missing images
+    const history = await getStoredHistory();
+    assert.equal(history.length, 1);
+    assert.equal(history[0].id, 'repaired_item_1');
+    assert.equal(history[0].dataUrl, fullImage);
+    assert.equal(history[0].thumbnailUrl, fullImage);
+  });
+
+  test('addHistoryItem never writes empty string to dataUrl or thumbnailUrl', async () => {
+    const item: HistoryItem = {
+      id: 'safety_check',
+      title: 'Safety Check',
+      url: 'https://example.com/safety',
+      dataUrl: 'data:image/png;base64,' + 'X'.repeat(60000), // > 50KB to trigger indexing logic
+      timestamp: Date.now(),
+      width: 1000,
+      height: 1000,
+      mode: 'visible',
+      format: 'png',
+    };
+
+    const history = await addHistoryItem(item);
+    assert.equal(history.length, 1);
+    assert.ok(history[0].dataUrl.length > 0, 'dataUrl must not be empty');
+    assert.ok((history[0].thumbnailUrl?.length ?? 0) > 0, 'thumbnailUrl must not be empty');
+  });
+});
+
+describe('Coordinate Clamping & Boundary Guards', () => {
+  function clampSelection(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    dpr: number,
+    imgWidth: number,
+    imgHeight: number
+  ) {
+    const safeDpr = dpr || 1;
+    const cropX = Math.max(0, Math.min(imgWidth - 1, Math.round(x * safeDpr)));
+    const cropY = Math.max(0, Math.min(imgHeight - 1, Math.round(y * safeDpr)));
+    const cropWidth = Math.max(1, Math.min(Math.round(width * safeDpr), imgWidth - cropX));
+    const cropHeight = Math.max(1, Math.min(Math.round(height * safeDpr), imgHeight - cropY));
+    return { cropX, cropY, cropWidth, cropHeight };
+  }
+
+  test('prevents IndexSizeError by strictly clamping crop rectangle inside image bounds', () => {
+    // Selection coordinates that exceed image by 10px on right and bottom
+    const imgW = 1920;
+    const imgH = 1080;
+    const result = clampSelection(100, 100, 1900, 1050, 1, imgW, imgH);
+
+    assert.equal(result.cropX, 100);
+    assert.equal(result.cropY, 100);
+    assert.ok(result.cropX + result.cropWidth <= imgW);
+    assert.ok(result.cropY + result.cropHeight <= imgH);
+    assert.equal(result.cropWidth, 1820);
+    assert.equal(result.cropHeight, 980);
+  });
+
+  test('correctly handles fractional devicePixelRatio (e.g. 1.25x / 1.5x) near screen edges', () => {
+    const imgW = 1250;
+    const imgH = 1000;
+    // CSS viewport is 1000x800 with DPR=1.25 -> 1250x1000
+    const result = clampSelection(0, 0, 1000, 800, 1.25, imgW, imgH);
+
+    assert.equal(result.cropX, 0);
+    assert.equal(result.cropY, 0);
+    assert.equal(result.cropWidth, 1250);
+    assert.equal(result.cropHeight, 1000);
+    assert.ok(result.cropX + result.cropWidth <= imgW);
+    assert.ok(result.cropY + result.cropHeight <= imgH);
+  });
+
+  test('guards against negative coordinates', () => {
+    const result = clampSelection(-50, -30, 200, 200, 1, 1000, 800);
+    assert.equal(result.cropX, 0);
+    assert.equal(result.cropY, 0);
+    assert.ok(result.cropWidth > 0);
+    assert.ok(result.cropHeight > 0);
+  });
+});
+
+describe('URL Safety Utilities', () => {
+  function safeHostname(url?: string): string {
+    if (!url) return 'capture';
+    try {
+      return new URL(url).hostname || 'capture';
+    } catch {
+      return 'capture';
+    }
+  }
+
+  test('extracts valid domain names correctly', () => {
+    assert.equal(safeHostname('https://github.com/google/project'), 'github.com');
+    assert.equal(safeHostname('http://localhost:3000/dashboard'), 'localhost');
+  });
+
+  test('does not throw on invalid, malformed, or empty URLs and falls back safely', () => {
+    assert.doesNotThrow(() => {
+      assert.equal(safeHostname(''), 'capture');
+      assert.equal(safeHostname(undefined), 'capture');
+      assert.equal(safeHostname('not-a-valid-url'), 'capture');
+      assert.equal(safeHostname('///bad-slashes'), 'capture');
+      assert.equal(safeHostname('javascript:void(0)'), 'capture');
+    });
+  });
 });

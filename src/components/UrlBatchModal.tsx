@@ -24,6 +24,15 @@ const DEFAULT_SAMPLE_URLS = `https://news.ycombinator.com
 https://github.com
 https://developer.chrome.com`;
 
+function safeHostname(url?: string): string {
+  if (!url) return 'capture';
+  try {
+    return new URL(url).hostname || 'capture';
+  } catch {
+    return 'capture';
+  }
+}
+
 export const UrlBatchModal: React.FC<Props> = React.memo(({
   settings,
   onBack,
@@ -206,12 +215,12 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
                   className="group relative bg-white border border-zinc-200/80 hover:border-blue-400 rounded-lg p-1.5 cursor-pointer shadow-2xs hover:shadow-xs transition"
                 >
                   <img
-                    src={item.dataUrl}
+                    src={item.thumbnailUrl || item.dataUrl}
                     alt={item.title}
                     className="w-full h-16 object-cover rounded bg-zinc-100"
                   />
                   <p className="text-[10px] text-zinc-700 truncate mt-1 font-medium font-mono">
-                    {item.url ? new URL(item.url).hostname : 'capture'}
+                    {safeHostname(item.url)}
                   </p>
                 </div>
               ))}

@@ -212,6 +212,35 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
           return reject(new Error('No active tab found.'));
         }
 
+        let cleanupTimer: any = null;
+
+        const messageListener = (msg: any) => {
+          if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item?.mode === 'selection') {
+            chrome.runtime.onMessage.removeListener(messageListener);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
+            resolve(msg.payload.item as HistoryItem);
+          } else if (msg.action === 'CAPTURE_COMPLETED' && msg.payload?.mode === 'selection') {
+            chrome.runtime.onMessage.removeListener(messageListener);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
+            resolve(msg.payload as HistoryItem);
+          } else if (msg.action === 'CAPTURE_FAILED' && msg.payload?.mode === 'selection') {
+            chrome.runtime.onMessage.removeListener(messageListener);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
+            reject(new Error(msg.payload.error || 'Selection capture failed.'));
+          } else if (msg.action === 'CAPTURE_CANCELLED') {
+            chrome.runtime.onMessage.removeListener(messageListener);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
+            reject(new Error('Selection capture cancelled.'));
+          }
+        };
+
+        chrome.runtime.onMessage.addListener(messageListener);
+
+        cleanupTimer = setTimeout(() => {
+          chrome.runtime.onMessage.removeListener(messageListener);
+          reject(new Error('Selection capture timed out.'));
+        }, 90000);
+
         chrome.runtime.sendMessage(
           {
             action: 'CAPTURE_SELECTION_START',
@@ -222,20 +251,10 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
           },
           (response) => {
             if (response?.error) {
+              chrome.runtime.onMessage.removeListener(messageListener);
+              if (cleanupTimer) clearTimeout(cleanupTimer);
               return reject(new Error(response.error));
             }
-            // Background will trigger selection overlay in content script and close popup if needed
-            resolve({
-              id: `sel_${Date.now()}`,
-              title: activeTab.title || 'Selected Region',
-              url: activeTab.url || '',
-              dataUrl: '',
-              timestamp: Date.now(),
-              width: 0,
-              height: 0,
-              mode: 'selection',
-              format: settings.format,
-            });
           }
         );
       });
@@ -268,7 +287,10 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
 /**
  * Capture Entire Page (Full Scroll & Stitch)
  */
-export async function captureFullPage(settings: CaptureSettings): Promise<HistoryItem> {
+export async function captureFullPage(
+  settings: CaptureSettings,
+  onProgress?: (message: string) => void
+): Promise<HistoryItem> {
   if (isChromeExtension()) {
     return new Promise((resolve, reject) => {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -276,6 +298,33 @@ export async function captureFullPage(settings: CaptureSettings): Promise<Histor
         if (!activeTab || !activeTab.id) {
           return reject(new Error('No active tab found.'));
         }
+
+        let cleanupTimer: any = null;
+
+        const messageListener = (msg: any) => {
+          if (msg.action === 'CAPTURE_PROGRESS' && msg.payload?.message && onProgress) {
+            onProgress(msg.payload.message);
+          } else if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item?.mode === 'full') {
+            chrome.runtime.onMessage.removeListener(messageListener);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
+            resolve(msg.payload.item as HistoryItem);
+          } else if (msg.action === 'CAPTURE_COMPLETED' && msg.payload?.mode === 'full') {
+            chrome.runtime.onMessage.removeListener(messageListener);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
+            resolve(msg.payload as HistoryItem);
+          } else if (msg.action === 'CAPTURE_FAILED' && msg.payload?.mode === 'full') {
+            chrome.runtime.onMessage.removeListener(messageListener);
+            if (cleanupTimer) clearTimeout(cleanupTimer);
+            reject(new Error(msg.payload.error || 'Full page capture failed.'));
+          }
+        };
+
+        chrome.runtime.onMessage.addListener(messageListener);
+
+        cleanupTimer = setTimeout(() => {
+          chrome.runtime.onMessage.removeListener(messageListener);
+          reject(new Error('Full page capture timed out after 60 seconds.'));
+        }, 60000);
 
         chrome.runtime.sendMessage(
           {
@@ -289,19 +338,10 @@ export async function captureFullPage(settings: CaptureSettings): Promise<Histor
           },
           (response) => {
             if (response?.error) {
+              chrome.runtime.onMessage.removeListener(messageListener);
+              if (cleanupTimer) clearTimeout(cleanupTimer);
               return reject(new Error(response.error));
             }
-            resolve({
-              id: `full_${Date.now()}`,
-              title: activeTab.title || 'Full Page',
-              url: activeTab.url || '',
-              dataUrl: '',
-              timestamp: Date.now(),
-              width: 0,
-              height: 0,
-              mode: 'full',
-              format: settings.format,
-            });
           }
         );
       });
@@ -340,12 +380,20 @@ export async function captureAllTabs(
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
     return new Promise((resolve, reject) => {
+      const progressListener = (msg: any) => {
+        if (msg.action === 'CAPTURE_PROGRESS' && onProgress && msg.payload) {
+          onProgress(msg.payload.current || msg.payload.step || 1, msg.payload.total || 1, msg.payload.message || '');
+        }
+      };
+      chrome.runtime.onMessage.addListener(progressListener);
+
       chrome.runtime.sendMessage(
         {
           action: 'CAPTURE_ALL_TABS',
           payload: { settings },
         },
         (response) => {
+          chrome.runtime.onMessage.removeListener(progressListener);
           if (response?.error) return reject(new Error(response.error));
           resolve(response?.results || []);
         }
@@ -400,12 +448,20 @@ export async function captureUrlList(
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
     return new Promise((resolve, reject) => {
+      const progressListener = (msg: any) => {
+        if (msg.action === 'CAPTURE_PROGRESS' && onProgress && msg.payload) {
+          onProgress(msg.payload.current || 1, msg.payload.total || urls.length, msg.payload.url || msg.payload.message || '');
+        }
+      };
+      chrome.runtime.onMessage.addListener(progressListener);
+
       chrome.runtime.sendMessage(
         {
           action: 'CAPTURE_URL_LIST',
           payload: { urls, settings, delayMs },
         },
         (response) => {
+          chrome.runtime.onMessage.removeListener(progressListener);
           if (response?.error) return reject(new Error(response.error));
           resolve(response?.results || []);
         }
@@ -457,6 +513,13 @@ export async function captureMultiSize(
         const activeTab = tabs[0];
         if (!activeTab || !activeTab.url) return reject(new Error('No active tab URL.'));
 
+        const progressListener = (msg: any) => {
+          if (msg.action === 'CAPTURE_PROGRESS' && onProgress && msg.payload) {
+            onProgress(msg.payload.current || 1, msg.payload.total || resolutions.length, msg.payload.name || msg.payload.message || '');
+          }
+        };
+        chrome.runtime.onMessage.addListener(progressListener);
+
         chrome.runtime.sendMessage(
           {
             action: 'CAPTURE_MULTI_SIZE',
@@ -467,6 +530,7 @@ export async function captureMultiSize(
             },
           },
           (response) => {
+            chrome.runtime.onMessage.removeListener(progressListener);
             if (response?.error) return reject(new Error(response.error));
             resolve(response?.results || []);
           }

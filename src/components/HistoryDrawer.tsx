@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ChevronLeft,
   Trash2,
@@ -36,6 +36,79 @@ const MODE_LABELS: Record<string, { label: string; color: string }> = {
   urllist: { label: 'URL List', color: 'bg-purple-50 text-purple-700 border-purple-200/70' },
   multisize: { label: 'Responsive', color: 'bg-sky-50 text-sky-700 border-sky-200/70' },
 };
+
+function safeHostname(url?: string): string {
+  if (!url) return 'capture';
+  try {
+    return new URL(url).hostname || 'capture';
+  } catch {
+    return 'capture';
+  }
+}
+
+const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = React.memo(({ item, isFullTab }) => {
+  // If item has a full-resolution dataUrl (> 50KB), use it directly for crisp rendering
+  const initial = (item.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item.thumbnailUrl || item.dataUrl || null);
+  const [src, setSrc] = useState<string | null>(initial);
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    // If item.dataUrl is already the full high-res image, use it!
+    if (item.dataUrl && item.dataUrl.length > 50000) {
+      setSrc(item.dataUrl);
+      setLoadFailed(false);
+      return;
+    }
+
+    // Set immediate preview
+    if (item.thumbnailUrl || item.dataUrl) {
+      setSrc(item.thumbnailUrl || item.dataUrl);
+      setLoadFailed(false);
+    }
+
+    // Always fetch the razor-sharp original image from storage
+    getFullResolutionImage(item.id).then((full) => {
+      if (isMounted) {
+        if (full) {
+          setSrc(full);
+          setLoadFailed(false);
+        } else if (!item.thumbnailUrl && !item.dataUrl) {
+          setLoadFailed(true);
+        }
+      }
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [item.id, item.dataUrl, item.thumbnailUrl]);
+
+  if (!src || loadFailed) {
+    return <ImageIcon size={isFullTab ? 24 : 18} className="text-zinc-400" />;
+  }
+
+  return (
+    <img
+      src={src}
+      alt={item.title}
+      onError={() => {
+        getFullResolutionImage(item.id).then((full) => {
+          if (full && full !== src) {
+            setSrc(full);
+          } else {
+            setLoadFailed(true);
+          }
+        });
+      }}
+      className={`w-full h-full object-cover object-top transition-transform duration-200 ${
+        isFullTab ? 'group-hover:scale-102' : 'group-hover:scale-105'
+      }`}
+      loading="lazy"
+    />
+  );
+});
 
 export const HistoryDrawer: React.FC<Props> = React.memo(({
   history,
@@ -335,16 +408,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                 >
                   {isFullTab && (
                     <div className="w-full h-40 rounded-lg bg-zinc-100/80 border border-zinc-200/60 overflow-hidden mb-2.5 flex items-center justify-center relative">
-                      {(item.thumbnailUrl || item.dataUrl) ? (
-                        <img
-                          src={item.thumbnailUrl || item.dataUrl}
-                          alt={item.title}
-                          className="w-full h-full object-cover group-hover:scale-102 transition-transform duration-200"
-                          loading="lazy"
-                        />
-                      ) : (
-                        <ImageIcon size={24} className="text-zinc-400" />
-                      )}
+                      <HistoryThumbnail item={item} isFullTab={true} />
                       <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
                     </div>
                   )}
@@ -352,16 +416,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                   <div className="flex items-start gap-2.5">
                     {!isFullTab && (
                       <div className="w-14 h-14 rounded-lg bg-zinc-100 border border-zinc-200/70 overflow-hidden flex items-center justify-center shrink-0 relative">
-                        {(item.thumbnailUrl || item.dataUrl) ? (
-                          <img
-                            src={item.thumbnailUrl || item.dataUrl}
-                            alt={item.title}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                            loading="lazy"
-                          />
-                        ) : (
-                          <ImageIcon size={18} className="text-zinc-400" />
-                        )}
+                        <HistoryThumbnail item={item} isFullTab={false} />
                       </div>
                     )}
 
@@ -390,7 +445,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                   {/* Quick Card Toolbar */}
                   <div className="flex items-center justify-between gap-1.5 mt-2 pt-2 border-t border-zinc-100">
                     <span className="text-[10px] text-zinc-600 truncate max-w-[120px] font-mono">
-                      {item.url ? new URL(item.url).hostname : 'capture'}
+                      {safeHostname(item.url)}
                     </span>
 
                     <div className="flex items-center gap-1">

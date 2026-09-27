@@ -18,7 +18,7 @@ const MAX_HISTORY_ITEMS = 40;
 /**
  * Generate a downscaled thumbnail from full dataUrl for fast index rendering
  */
-export async function createThumbnail(dataUrl: string, maxDim: number = 320): Promise<string> {
+export async function createThumbnail(dataUrl: string, targetWidth: number = 720): Promise<string> {
   if (!dataUrl) return '';
   if (typeof document === 'undefined' || typeof Image === 'undefined') {
     return dataUrl;
@@ -29,9 +29,11 @@ export async function createThumbnail(dataUrl: string, maxDim: number = 320): Pr
     img.onload = () => {
       try {
         const { width, height } = img;
-        const scale = Math.min(1, maxDim / Math.max(width, height));
+        // For tall pages, capture top hero region so preview is crisp and recognizable
+        const cropHeight = Math.min(height, Math.round(width * 0.75));
+        const scale = Math.min(1, targetWidth / width);
         const targetW = Math.max(1, Math.round(width * scale));
-        const targetH = Math.max(1, Math.round(height * scale));
+        const targetH = Math.max(1, Math.round(cropHeight * scale));
 
         const canvas = document.createElement('canvas');
         canvas.width = targetW;
@@ -39,8 +41,10 @@ export async function createThumbnail(dataUrl: string, maxDim: number = 320): Pr
         const ctx = canvas.getContext('2d');
         if (!ctx) return resolve(dataUrl);
 
-        ctx.drawImage(img, 0, 0, targetW, targetH);
-        resolve(canvas.toDataURL('image/jpeg', 0.8));
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, width, cropHeight, 0, 0, targetW, targetH);
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
       } catch {
         resolve(dataUrl);
       }
@@ -79,7 +83,7 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       const res = await chrome.storage.local.get([key]);
-      if (res && typeof res[key] === 'string') return res[key] as string;
+      if (res && typeof res[key] === 'string' && res[key].length > 0) return res[key] as string;
     }
   } catch (e) {
     console.warn('Chrome storage full image fetch failed', e);
@@ -87,15 +91,15 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
 
   try {
     const local = localStorage.getItem(key);
-    if (local) return local;
+    if (local && local.length > 0) return local;
   } catch {}
 
   // Fallback to checking the history item directly
   try {
     const history = await getStoredHistory();
     const item = history.find((i) => i.id === id);
-    if (item && item.dataUrl) return item.dataUrl;
-    if (item && item.thumbnailUrl) return item.thumbnailUrl;
+    if (item && item.dataUrl && item.dataUrl.length > 0) return item.dataUrl;
+    if (item && item.thumbnailUrl && item.thumbnailUrl.length > 0) return item.thumbnailUrl;
   } catch {}
 
   return null;
@@ -148,14 +152,38 @@ export async function saveStoredSettings(settings: CaptureSettings): Promise<voi
 }
 
 /**
- * Load capture history metadata.
+ * Load capture history metadata with automatic repair for missing or low-res previews.
  */
 export async function getStoredHistory(): Promise<HistoryItem[]> {
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       const result = await chrome.storage.local.get([HISTORY_KEY]);
       if (result && Array.isArray(result[HISTORY_KEY])) {
-        return result[HISTORY_KEY];
+        const history: HistoryItem[] = result[HISTORY_KEY];
+        
+        // Auto-repair any items that lost full dataUrl or have low-res previews
+        const needRepair = history.filter((i) => !i.dataUrl || i.dataUrl.length < 50000 || !i.thumbnailUrl);
+        if (needRepair.length > 0) {
+          const keys = needRepair.map((i) => `${FULL_IMAGE_PREFIX}${i.id}`);
+          const fulls = await chrome.storage.local.get(keys);
+          let repaired = false;
+          for (const item of history) {
+            const full = fulls[`${FULL_IMAGE_PREFIX}${item.id}`];
+            if (full && typeof full === 'string' && (full.length > 50000 || !item.dataUrl)) {
+              item.dataUrl = full;
+              if (!item.thumbnailUrl) item.thumbnailUrl = full;
+              repaired = true;
+            } else if (!item.dataUrl && item.thumbnailUrl) {
+              item.dataUrl = item.thumbnailUrl;
+              repaired = true;
+            }
+          }
+          if (repaired) {
+            chrome.storage.local.set({ [HISTORY_KEY]: history }).catch(() => {});
+          }
+        }
+
+        return history;
       }
     }
   } catch (e) {
@@ -165,7 +193,25 @@ export async function getStoredHistory(): Promise<HistoryItem[]> {
   try {
     const raw = localStorage.getItem(HISTORY_KEY);
     if (raw) {
-      return JSON.parse(raw);
+      const history: HistoryItem[] = JSON.parse(raw);
+      if (Array.isArray(history)) {
+        let repaired = false;
+        for (const item of history) {
+          const local = localStorage.getItem(`${FULL_IMAGE_PREFIX}${item.id}`);
+          if (local && (local.length > 50000 || !item.dataUrl)) {
+            item.dataUrl = local;
+            if (!item.thumbnailUrl) item.thumbnailUrl = local;
+            repaired = true;
+          } else if (!item.dataUrl && item.thumbnailUrl) {
+            item.dataUrl = item.thumbnailUrl;
+            repaired = true;
+          }
+        }
+        if (repaired) {
+          localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+        }
+        return history;
+      }
     }
   } catch (e) {
     console.warn('localStorage history fetch failed', e);
@@ -189,11 +235,13 @@ export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> 
     thumb = await createThumbnail(item.dataUrl);
   }
 
+  const effectiveThumb = thumb || item.dataUrl || '';
+
   const indexItem: HistoryItem = {
     ...item,
-    thumbnailUrl: thumb,
-    // Keep dataUrl if small (< 50KB) or use thumbnail to prevent massive storage bloat
-    dataUrl: item.dataUrl && item.dataUrl.length < 50000 ? item.dataUrl : (thumb || ''),
+    thumbnailUrl: effectiveThumb,
+    // Preserve full-resolution pristine dataUrl
+    dataUrl: item.dataUrl || effectiveThumb,
   };
 
   const current = await getStoredHistory();

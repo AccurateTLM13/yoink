@@ -122,6 +122,7 @@ export default function App() {
     }
 
     // Listen for storage changes from background worker
+    let storageCleanup: (() => void) | undefined;
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
       const listener = (changes: any, area: string) => {
         if (area === 'local') {
@@ -139,18 +140,41 @@ export default function App() {
         }
       };
       chrome.storage.onChanged.addListener(listener);
-      return () => chrome.storage.onChanged.removeListener(listener);
+      storageCleanup = () => chrome.storage.onChanged.removeListener(listener);
     }
+
+    // Listen for runtime capture finished broadcasts
+    let runtimeCleanup: (() => void) | undefined;
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      const msgListener = (msg: any) => {
+        if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item) {
+          const item = msg.payload.item;
+          setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+          setPreviewItem(item);
+          setIsCapturing(false);
+          setStatusMessage('Capture complete!');
+        }
+      };
+      chrome.runtime.onMessage.addListener(msgListener);
+      runtimeCleanup = () => chrome.runtime.onMessage.removeListener(msgListener);
+    }
+
+    return () => {
+      if (storageCleanup) storageCleanup();
+      if (runtimeCleanup) runtimeCleanup();
+    };
   }, []);
 
   const handleCaptureFullPage = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Capturing entire page...');
+    setStatusMessage('Scanning page...');
     try {
-      const item = await captureFullPage(settings);
+      const item = await captureFullPage(settings, (msg) => {
+        setStatusMessage(msg);
+      });
       setStatusMessage('Full page capture complete!');
-      if (item.dataUrl) {
-        setHistory((prev) => [item, ...prev]);
+      if (item && item.dataUrl) {
+        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -167,6 +191,7 @@ export default function App() {
       const item = await captureVisible(settings);
       setStatusMessage('Visible viewport captured!');
       if (item && item.dataUrl) {
+        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -178,12 +203,16 @@ export default function App() {
 
   const handleCaptureSelection = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Starting selection overlay...');
+    setStatusMessage('Select region on page...');
     try {
+      // In popup mode, close popup after brief delay so user can draw rectangle on webpage
+      if (!isFullTab && typeof window !== 'undefined') {
+        setTimeout(() => window.close(), 300);
+      }
       const item = await captureSelection(settings);
-      setStatusMessage('Selection initiated. Select region on page.');
-      if (item.dataUrl) {
-        setHistory((prev) => [item, ...prev]);
+      setStatusMessage('Selection captured!');
+      if (item && item.dataUrl) {
+        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -191,7 +220,7 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings]);
+  }, [settings, isFullTab]);
 
   const handleCaptureAllTabs = useCallback(async () => {
     setIsCapturing(true);
