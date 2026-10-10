@@ -10,17 +10,35 @@ import {
   FileImage,
   ExternalLink,
   RotateCcw,
+  Pencil,
+  FileText,
+  ScanText,
 } from 'lucide-react';
 import { HistoryItem } from '../types';
-import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage } from '../utils/storage';
+import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage, updateStoredHistoryItem } from '../utils/storage';
+import { exportPdf } from '../utils/pdf';
+import { AnnotationEditor } from './AnnotationEditor';
+import { OcrDrawer } from './OcrDrawer';
 
 interface Props {
   item: HistoryItem | null;
   onClose: () => void;
+  onSaved?: (newItem: HistoryItem) => void;
+  initialAnnotating?: boolean;
+  initialOcr?: boolean;
 }
 
-export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
+export const ImagePreviewModal: React.FC<Props> = ({
+  item,
+  onClose,
+  onSaved,
+  initialAnnotating = false,
+  initialOcr = false,
+}) => {
   const [copied, setCopied] = useState(false);
+  const [isAnnotating, setIsAnnotating] = useState(initialAnnotating);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const [showOcr, setShowOcr] = useState(initialOcr);
   const [zoomLevel, setZoomLevel] = useState(1);
   const initial = (item?.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item?.dataUrl || item?.thumbnailUrl || null);
   const [fullImage, setFullImage] = useState<string | null>(initial);
@@ -28,6 +46,15 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
     width: item?.width || 0,
     height: item?.height || 0,
   });
+
+  const handleSaveOcrText = async (newText: string) => {
+    if (!item) return;
+    item.ocrText = newText;
+    await updateStoredHistoryItem(item.id, { ocrText: newText });
+    if (onSaved) {
+      onSaved({ ...item, ocrText: newText });
+    }
+  };
 
   // Close on Escape key
   const handleKeyDown = useCallback(
@@ -69,6 +96,20 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
 
   const currentImage = fullImage || item.dataUrl || item.thumbnailUrl;
 
+  if (isAnnotating && currentImage) {
+    return (
+      <AnnotationEditor
+        item={item}
+        imageSrc={currentImage}
+        onClose={() => setIsAnnotating(false)}
+        onSaved={(newItem) => {
+          if (onSaved) onSaved(newItem);
+          setIsAnnotating(false);
+        }}
+      />
+    );
+  }
+
   const handleCopy = async () => {
     if (!currentImage) return;
     const success = await copyImageToClipboard(currentImage);
@@ -84,6 +125,18 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
     const filename = `${cleanTitle}_${Date.now()}.${ext}`;
     downloadDataUrl(currentImage, filename);
+  };
+
+  const handleExportPdf = async () => {
+    if (!currentImage || exportingPdf) return;
+    setExportingPdf(true);
+    try {
+      await exportPdf([currentImage], item.title || 'capture');
+    } catch (err) {
+      console.error('PDF export failed:', err);
+    } finally {
+      setExportingPdf(false);
+    }
   };
 
   const zoomIn = () => setZoomLevel((z) => Math.min(z + 0.25, 3));
@@ -116,6 +169,16 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
 
         {/* Action Controls */}
         <div className="flex items-center space-x-1.5 shrink-0">
+          {/* Annotate / Redact Button */}
+          <button
+            onClick={() => setIsAnnotating(true)}
+            className="flex items-center gap-1 px-2.5 py-1 bg-orange-600 hover:bg-orange-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-xs mr-1"
+            title="Open Annotation & Redaction Studio (P0-1 // P0-3)"
+          >
+            <Pencil size={13} />
+            <span>Annotate & Redact</span>
+          </button>
+
           {/* Zoom Controls */}
           <div className="flex items-center bg-zinc-800/90 rounded-lg p-0.5 border border-zinc-700/60 mr-1 text-zinc-300">
             <button
@@ -158,6 +221,31 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
               <Copy size={13} />
             )}
             <span>{copied ? 'Copied' : 'Copy'}</span>
+          </button>
+
+          {/* PDF Export Button (P0-2) */}
+          <button
+            onClick={handleExportPdf}
+            disabled={exportingPdf}
+            className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
+            title="Export as PDF (tall pages split across A4 pages)"
+          >
+            <FileText size={13} />
+            <span>{exportingPdf ? 'Building…' : 'PDF'}</span>
+          </button>
+
+          {/* Extract Text / OCR Button (P2-9) */}
+          <button
+            onClick={() => setShowOcr(true)}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
+              showOcr
+                ? 'bg-indigo-600 text-white border-indigo-500'
+                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
+            }`}
+            title="Extract text from capture (Offline OCR // Shape Detection API)"
+          >
+            <ScanText size={13} />
+            <span>OCR</span>
           </button>
 
           {/* Download Button */}
@@ -219,6 +307,16 @@ export const ImagePreviewModal: React.FC<Props> = ({ item, onClose }) => {
           <span>Press ESC to close</span>
         </div>
       </div>
+
+      {/* OCR Drawer (P2-9) */}
+      {showOcr && currentImage && (
+        <OcrDrawer
+          dataUrl={currentImage}
+          initialText={item.ocrText}
+          onSaveText={handleSaveOcrText}
+          onClose={() => setShowOcr(false)}
+        />
+      )}
     </div>
   );
 };

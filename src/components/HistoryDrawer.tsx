@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   ChevronLeft,
   Trash2,
@@ -12,29 +12,41 @@ import {
   X,
   AlertTriangle,
   ExternalLink,
+  Pencil,
+  FileText,
+  Upload,
+  ScanText,
 } from 'lucide-react';
 import { HistoryItem, CaptureMode } from '../types';
 import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage } from '../utils/storage';
+import { exportPdf } from '../utils/pdf';
 
 interface Props {
   history: HistoryItem[];
   onBack: () => void;
   onSelectPreview: (item: HistoryItem) => void;
+  onSelectAnnotate?: (item: HistoryItem) => void;
+  onSelectOcr?: (item: HistoryItem) => void;
   onDeleteItem: (id: string) => void;
   onClearAll: () => void;
   onOpenStudio?: () => void;
   recentBatchBanner?: number | null;
   onDismissBatchBanner?: () => void;
   isFullTab?: boolean;
+  onImportFiles?: (files: File[]) => void;
 }
 
 const MODE_LABELS: Record<string, { label: string; color: string }> = {
   full: { label: 'Full Page', color: 'bg-indigo-50 text-indigo-700 border-indigo-200/70' },
   visible: { label: 'Visible', color: 'bg-emerald-50 text-emerald-700 border-emerald-200/70' },
   selection: { label: 'Selection', color: 'bg-blue-50 text-blue-700 border-blue-200/70' },
+  element: { label: 'Scroll Element', color: 'bg-cyan-50 text-cyan-700 border-cyan-200/70' },
   alltabs: { label: 'Tab Batch', color: 'bg-amber-50 text-amber-800 border-amber-200/70' },
   urllist: { label: 'URL List', color: 'bg-purple-50 text-purple-700 border-purple-200/70' },
   multisize: { label: 'Responsive', color: 'bg-sky-50 text-sky-700 border-sky-200/70' },
+  annotated: { label: 'Annotated', color: 'bg-orange-50 text-orange-700 border-orange-200/70' },
+  upload: { label: 'Uploaded', color: 'bg-teal-50 text-teal-700 border-teal-200/70' },
+  desktop: { label: 'Desktop', color: 'bg-emerald-50 text-emerald-800 border-emerald-200/70' },
 };
 
 function safeHostname(url?: string): string {
@@ -114,18 +126,23 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   history,
   onBack,
   onSelectPreview,
+  onSelectAnnotate,
+  onSelectOcr,
   onDeleteItem,
   onClearAll,
   onOpenStudio,
   recentBatchBanner,
   onDismissBatchBanner,
   isFullTab,
+  onImportFiles,
 }) => {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [activeFilter, setActiveFilter] = useState<'all' | CaptureMode>('all');
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   const filtered = useMemo(() => {
     let list = history;
@@ -190,6 +207,27 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
     setDownloadingAll(false);
   };
 
+  const handleExportAllPdf = async (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const items = filtered.length > 0 ? filtered : history;
+    if (items.length === 0 || exportingPdf) return;
+    setExportingPdf(true);
+    try {
+      const sources: string[] = [];
+      for (const item of items) {
+        const src = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
+        if (src) sources.push(src);
+      }
+      if (sources.length > 0) {
+        await exportPdf(sources, `yoink_gallery_${sources.length}_captures`);
+      }
+    } catch (err) {
+      console.error('Gallery PDF export failed:', err);
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     onDeleteItem(id);
@@ -213,6 +251,31 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
         </button>
 
         <div className="flex items-center gap-1.5">
+          {onImportFiles && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  const files = Array.from(e.target.files || []);
+                  e.target.value = '';
+                  if (files.length > 0) onImportFiles(files);
+                }}
+              />
+              <button
+                id="gallery-upload-button"
+                onClick={() => fileInputRef.current?.click()}
+                title="Upload images to annotate (or drag-drop / paste anywhere)"
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold text-teal-700 hover:text-teal-800 bg-teal-50 hover:bg-teal-100/70 border border-teal-200/70 transition cursor-pointer"
+              >
+                <Upload size={10} />
+                <span>Upload</span>
+              </button>
+            </>
+          )}
           {!isFullTab && onOpenStudio && (
             <button
               onClick={onOpenStudio}
@@ -342,7 +405,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
               All ({history.length})
             </button>
 
-            {(['visible', 'selection', 'full', 'alltabs', 'urllist', 'multisize'] as CaptureMode[]).map((mode) => {
+            {(['visible', 'selection', 'full', 'element', 'desktop', 'alltabs', 'urllist', 'multisize', 'annotated', 'upload'] as CaptureMode[]).map((mode) => {
               const count = history.filter((h) => h.mode === mode).length;
               if (count === 0) return null;
               const meta = MODE_LABELS[mode] || { label: mode };
@@ -370,6 +433,18 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
               >
                 <Download size={10} />
                 <span>Export ({filtered.length})</span>
+              </button>
+            )}
+
+            {filtered.length > 0 && (
+              <button
+                onClick={handleExportAllPdf}
+                disabled={exportingPdf}
+                className={`${filtered.length > 1 ? '' : 'ml-auto '}px-2 py-0.5 rounded-full bg-zinc-100 hover:bg-zinc-200 disabled:opacity-60 text-zinc-700 text-[10px] font-semibold transition cursor-pointer shrink-0 flex items-center gap-1 border border-zinc-200`}
+                title="Combine all filtered captures into 1 PDF"
+              >
+                <FileText size={10} />
+                <span>{exportingPdf ? 'Building…' : `PDF (${filtered.length})`}</span>
               </button>
             )}
           </div>
@@ -425,6 +500,14 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                         <span className={`px-1.5 py-0.5 text-[9px] font-bold uppercase rounded-md border font-mono tracking-wide ${meta.color}`}>
                           {meta.label}
                         </span>
+                        {item.ocrText && (
+                          <span
+                            className="px-1.5 py-0.5 text-[9px] font-bold text-indigo-700 bg-indigo-50 rounded border border-indigo-200/70 font-mono tracking-wide"
+                            title="Text extracted from capture"
+                          >
+                            OCR
+                          </span>
+                        )}
                         <span className="text-[10px] text-zinc-600 font-mono flex items-center gap-1 tabular-nums">
                           <Clock size={10} />
                           {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
@@ -449,6 +532,34 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                     </span>
 
                     <div className="flex items-center gap-1">
+                      {onSelectAnnotate && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectAnnotate(item);
+                          }}
+                          className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-orange-700 hover:text-orange-800 bg-orange-50 hover:bg-orange-100/80 rounded-md border border-orange-200 transition cursor-pointer"
+                          title="Open in Annotation & Redaction Studio"
+                        >
+                          <Pencil size={11} />
+                          <span>Annotate</span>
+                        </button>
+                      )}
+
+                      {onSelectOcr && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectOcr(item);
+                          }}
+                          className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-indigo-700 hover:text-indigo-800 bg-indigo-50 hover:bg-indigo-100/80 rounded-md border border-indigo-200 transition cursor-pointer"
+                          title="Extract text from capture (OCR)"
+                        >
+                          <ScanText size={11} />
+                          <span>OCR</span>
+                        </button>
+                      )}
+
                       <button
                         onClick={(e) => handleCopy(e, item)}
                         className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-zinc-700 hover:text-blue-600 bg-zinc-50 hover:bg-blue-50 rounded-md border border-zinc-200 hover:border-blue-200 transition cursor-pointer"

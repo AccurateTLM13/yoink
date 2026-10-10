@@ -11,7 +11,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { CaptureSettings, HistoryItem } from '../types';
-import { captureUrlList, getOpenTabUrls } from '../utils/capture';
+import { captureUrlList, getOpenTabUrls, ensureAllSitesAccess } from '../utils/capture';
 
 interface Props {
   settings: CaptureSettings;
@@ -69,10 +69,18 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
   const handleStart = async () => {
     if (validUrls.length === 0) return;
 
-    setIsRunning(true);
-    setProgressStep({ current: 0, total: validUrls.length });
-    setProgressMsg('Starting batch URL capture sequence...');
-    setCompletedItems([]);
+    try {
+      if (!(await ensureAllSitesAccess())) {
+        setProgressMsg('Yoink needs access to all sites for batch URL capture.');
+        return;
+      }
+      setIsRunning(true);
+      setProgressStep({ current: 0, total: validUrls.length });
+      setProgressMsg('Starting batch URL capture sequence...');
+      setCompletedItems([]);
+    } catch {
+      return;
+    }
 
     try {
       const results = await captureUrlList(

@@ -1,300 +1,321 @@
 // offscreen.js - Yoink Image Processing Engine
+//
+// Accepts tasks only from Yoink extension contexts (never content scripts).
+// Every task answers via sendResponse. Nothing is broadcast.
+
+const EXT_ORIGIN = chrome.runtime.getURL('');
+const MAX_DIMENSION = 16000;
+// Stay under Chrome's maximum canvas area (~268M px) with headroom.
+const MAX_AREA = 16000 * 8192;
+const JOB_TTL_MS = 2 * 60 * 1000;
+const DATA_IMAGE_RE = /^data:image\/(png|jpeg|webp);base64,/;
+
+/** jobId -> stitch job */
+const jobs = new Map();
+
+const HANDLERS = {
+  STITCH_BEGIN: stitchBegin,
+  STITCH_ADD: stitchAdd,
+  STITCH_END: stitchEnd,
+  CROP_SELECTION: cropSelection,
+  CONVERT_FORMAT: convertFormat,
+  COPY_TO_CLIPBOARD: writeToClipboard,
+  CAPTURE_DESKTOP_FRAME: captureDesktopFrame,
+};
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'STITCH_CHUNKS') {
-    stitchChunks(message.payload);
-  }
+  if (!message || message.target !== 'offscreen') return false;
+  if (sender.id !== chrome.runtime.id || sender.tab || !(sender.url || '').startsWith(EXT_ORIGIN)) return false;
 
-  if (message.action === 'CROP_SELECTION') {
-    cropSelection(message.payload);
-  }
-
-  if (message.action === 'CONVERT_FORMAT') {
-    convertFormat(message.payload).then((dataUrl) => sendResponse({ dataUrl }));
-    return true;
-  }
-
-  if (message.action === 'GENERATE_THUMBNAIL') {
-    generateThumbnail(message.payload).then((res) => sendResponse(res));
-    return true;
-  }
-
-  if (message.action === 'COPY_TO_CLIPBOARD') {
-    writeToClipboard(message.payload).then((success) => sendResponse({ success }));
-    return true;
-  }
-});
-
-/**
- * 1. Stitch Full Page Chunks into Single Canvas with DPR Scaling & VRAM Reclamation
- */
-async function stitchChunks({ chunks, totalWidth, totalHeight, dpr = 1, title, url, settings }) {
-  const canvas = document.getElementById('stitchCanvas');
-  const MAX_DIMENSION = 16000;
-
-  try {
-    if (!chunks || chunks.length === 0) {
-      throw new Error('No image chunks received for stitching');
-    }
-
-    // Load first chunk to detect actual physical DPR
-    const firstImg = await loadBitmap(chunks[0].dataUrl);
-    const detectedDpr = (totalWidth > 0 && firstImg.width > 0)
-      ? (firstImg.width / totalWidth)
-      : (dpr || 1);
-
-    const physicalWidth = firstImg.width || Math.round(totalWidth * detectedDpr);
-    const physicalHeight = Math.min(Math.round(totalHeight * detectedDpr), MAX_DIMENSION);
-
-    canvas.width = physicalWidth;
-    canvas.height = physicalHeight;
-
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // Draw first chunk
-    ctx.drawImage(firstImg, 0, 0);
-    if (firstImg.close) firstImg.close();
-
-    // Draw remaining chunks
-    for (let i = 1; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const yPos = Math.round(chunk.yOffset * detectedDpr);
-      if (yPos >= MAX_DIMENSION) break;
-
-      const img = await loadBitmap(chunk.dataUrl);
-      ctx.drawImage(img, 0, yPos);
-      if (img.close) img.close();
-    }
-
-    const format = settings?.format || 'png';
-    const quality = settings?.quality || 0.92;
-    const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-
-    const thumbnailUrl = createThumbnailFromCanvas(canvas);
-    const finalDataUrl = canvas.toDataURL(mime, quality);
-
-    // Release canvas memory
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    canvas.width = 0;
-    canvas.height = 0;
-
-    chrome.runtime.sendMessage({
-      action: 'CAPTURE_COMPLETED',
-      payload: {
-        dataUrl: finalDataUrl,
-        thumbnailUrl,
-        width: physicalWidth,
-        height: physicalHeight,
-        mode: 'full',
-        title: title || 'Full Page Capture',
-        url: url || '',
-        settings,
-      },
-    });
-  } catch (err) {
-    console.error('stitchChunks error:', err);
-    chrome.runtime.sendMessage({
-      action: 'CAPTURE_FAILED',
-      payload: { error: err.message || 'Stitching failed', mode: 'full' },
-    });
-  }
-}
-
-/**
- * 2. Crop Selection Region with Clamping & VRAM Reclamation
- */
-async function cropSelection({ dataUrl, x, y, width, height, dpr = 1, title, url, settings }) {
-  const canvas = document.getElementById('stitchCanvas');
-  try {
-    const img = await loadBitmap(dataUrl);
-    const safeDpr = dpr || 1;
-
-    // Guard coordinates and clamp strictly against image boundaries to prevent IndexSizeError
-    const cropX = Math.max(0, Math.min(img.width - 1, Math.round(x * safeDpr)));
-    const cropY = Math.max(0, Math.min(img.height - 1, Math.round(y * safeDpr)));
-    const cropWidth = Math.max(1, Math.min(Math.round(width * safeDpr), img.width - cropX));
-    const cropHeight = Math.max(1, Math.min(Math.round(height * safeDpr), img.height - cropY));
-
-    canvas.width = cropWidth;
-    canvas.height = cropHeight;
-
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    ctx.drawImage(img, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-    if (img.close) img.close();
-
-    const format = settings?.format || 'png';
-    const quality = settings?.quality || 0.92;
-    const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-
-    const thumbnailUrl = createThumbnailFromCanvas(canvas);
-    const finalDataUrl = canvas.toDataURL(mime, quality);
-
-    // Release canvas memory
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    canvas.width = 0;
-    canvas.height = 0;
-
-    chrome.runtime.sendMessage({
-      action: 'CAPTURE_COMPLETED',
-      payload: {
-        dataUrl: finalDataUrl,
-        thumbnailUrl,
-        width: cropWidth,
-        height: cropHeight,
-        mode: 'selection',
-        title: title || 'Selection Capture',
-        url: url || '',
-        settings,
-      },
-    });
-  } catch (err) {
-    console.error('cropSelection error:', err);
-    chrome.runtime.sendMessage({
-      action: 'CAPTURE_FAILED',
-      payload: { error: err.message || 'Crop selection failed', mode: 'selection' },
-    });
-  }
-}
-
-/**
- * 3. Convert Image Format / Compression with VRAM Reclamation
- */
-async function convertFormat({ dataUrl, format = 'png', quality = 0.92 }) {
-  const canvas = document.getElementById('stitchCanvas');
-  const img = await loadBitmap(dataUrl);
-
-  canvas.width = img.width;
-  canvas.height = img.height;
-
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(img, 0, 0);
-  if (img.close) img.close();
-
-  const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-  const result = canvas.toDataURL(mime, quality);
-
-  // Release canvas graphics memory
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  canvas.width = 0;
-  canvas.height = 0;
-
-  return result;
-}
-
-/**
- * 4. Generate downscaled thumbnail and return image dimensions
- */
-async function generateThumbnail({ dataUrl, maxDim = 320 }) {
-  try {
-    const img = await loadBitmap(dataUrl);
-    const origWidth = img.width;
-    const origHeight = img.height;
-
-    const scale = Math.min(1, maxDim / Math.max(origWidth, origHeight));
-    const tw = Math.max(1, Math.round(origWidth * scale));
-    const th = Math.max(1, Math.round(origHeight * scale));
-
-    const canvas = document.createElement('canvas');
-    canvas.width = tw;
-    canvas.height = th;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0, tw, th);
-    if (img.close) img.close();
-
-    const thumbnailUrl = canvas.toDataURL('image/jpeg', 0.8);
-    return { thumbnailUrl, width: origWidth, height: origHeight };
-  } catch (e) {
-    console.warn('generateThumbnail failed:', e);
-    return { thumbnailUrl: '', width: 0, height: 0 };
-  }
-}
-
-/**
- * 5. Write image directly to user clipboard
- */
-async function writeToClipboard({ dataUrl }) {
-  try {
-    const res = await fetch(dataUrl);
-    const blob = await res.blob();
-    let pngBlob = blob;
-
-    if (blob.type !== 'image/png') {
-      const img = await loadBitmap(dataUrl);
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      if (img.close) img.close();
-      pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
-    }
-
-    await navigator.clipboard.write([
-      new ClipboardItem({ 'image/png': pngBlob }),
-    ]);
-    return true;
-  } catch (e) {
-    console.warn('writeToClipboard failed in offscreen:', e);
+  const handler = Object.prototype.hasOwnProperty.call(HANDLERS, message.type) ? HANDLERS[message.type] : null;
+  if (!handler) {
+    sendResponse({ error: `Unknown offscreen task "${message.type}"` });
     return false;
   }
+
+  Promise.resolve()
+    .then(() => handler(message.payload || {}))
+    .then(sendResponse, (err) => sendResponse({ error: err?.message || String(err) }));
+  return true;
+});
+
+// ---------------------------------------------------------------------------
+// Incremental stitching (1 chunk per message keeps each message small)
+// ---------------------------------------------------------------------------
+function stitchBegin({ jobId, kind, totalWidth, totalHeight, dpr, cropRect, settings }) {
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    if (now - job.createdAt > JOB_TTL_MS) {
+      releaseCanvas(job.canvas);
+      jobs.delete(id);
+    }
+  }
+  if (typeof jobId !== 'string' || !jobId) throw new Error('Missing job id');
+  jobs.set(jobId, {
+    createdAt: now,
+    kind: kind === 'element' ? 'element' : 'full',
+    totalWidth: Number(totalWidth) || 0,
+    totalHeight: Number(totalHeight) || 0,
+    dpr: Number(dpr) || 1,
+    cropRect,
+    settings,
+    canvas: null,
+    ctx: null,
+    scale: 1,
+    src: null,
+    bottom: 0,
+  });
+  return { ok: true };
 }
 
-/**
- * Quick helper to downscale canvas to thumbnail dataUrl
- */
-function createThumbnailFromCanvas(sourceCanvas, targetWidth = 720) {
-  try {
-    const sw = sourceCanvas.width;
-    const sh = sourceCanvas.height;
-    if (sw === 0 || sh === 0) return '';
+function initJobCanvas(job, img) {
+  job.scale = job.totalWidth > 0 && img.width > 0 ? img.width / job.totalWidth : job.dpr;
+  let width;
+  let height;
 
-    // For tall pages (e.g. full-page scrolls), capture the top hero region so thumbnail is sharp and informative
+  if (job.kind === 'full') {
+    width = img.width;
+    height = Math.round(job.totalHeight * job.scale) || img.height;
+  } else {
+    const r = job.cropRect;
+    if (!r) throw new Error('Missing crop rectangle for element capture');
+    const x = clamp(Math.round(r.x * job.scale), 0, img.width - 1);
+    const y = clamp(Math.round(r.y * job.scale), 0, img.height - 1);
+    const w = Math.max(1, Math.min(Math.round(r.width * job.scale), img.width - x));
+    const h = Math.max(1, Math.min(Math.round(r.height * job.scale), img.height - y));
+    job.src = { x, y, w, h };
+    width = w;
+    height = Math.max(h, Math.round(job.totalHeight * job.scale));
+  }
+
+  height = Math.max(1, Math.min(height, MAX_DIMENSION, Math.floor(MAX_AREA / width)));
+  job.canvas = new OffscreenCanvas(width, height);
+  job.ctx = job.canvas.getContext('2d');
+}
+
+async function stitchAdd({ jobId, dataUrl, yOffset }) {
+  const job = jobs.get(jobId);
+  if (!job) throw new Error('Unknown stitch job');
+
+  const img = await loadBitmap(dataUrl);
+  try {
+    if (!job.canvas) initJobCanvas(job, img);
+    const destY = Math.round((Number(yOffset) || 0) * job.scale);
+    if (destY < job.canvas.height) {
+      if (job.kind === 'full') {
+        job.ctx.drawImage(img, 0, destY);
+        job.bottom = Math.max(job.bottom, Math.min(job.canvas.height, destY + img.height));
+      } else {
+        const h = Math.min(job.src.h, job.canvas.height - destY);
+        job.ctx.drawImage(img, job.src.x, job.src.y, job.src.w, h, 0, destY, job.src.w, h);
+        job.bottom = Math.max(job.bottom, destY + h);
+      }
+    }
+  } finally {
+    img.close?.();
+  }
+  return { ok: true };
+}
+
+async function stitchEnd({ jobId }) {
+  const job = jobs.get(jobId);
+  jobs.delete(jobId);
+  if (!job?.canvas) throw new Error('No image chunks received for stitching');
+
+  let canvas = job.canvas;
+  // Trim blank space when the chunk limit stopped the scan early.
+  if (job.bottom > 0 && job.bottom < canvas.height) {
+    const trimmed = new OffscreenCanvas(canvas.width, job.bottom);
+    trimmed.getContext('2d').drawImage(canvas, 0, 0);
+    releaseCanvas(canvas);
+    canvas = trimmed;
+  }
+
+  try {
+    return await encodeCanvas(canvas, job.settings);
+  } finally {
+    releaseCanvas(canvas);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Crop, convert, clipboard
+// ---------------------------------------------------------------------------
+async function cropSelection({ dataUrl, x, y, width, height, dpr, settings }) {
+  const img = await loadBitmap(dataUrl);
+  const scale = Number(dpr) || 1;
+  let canvas = null;
+  try {
+    const cx = clamp(Math.round(x * scale), 0, img.width - 1);
+    const cy = clamp(Math.round(y * scale), 0, img.height - 1);
+    const cw = Math.max(1, Math.min(Math.round(width * scale), img.width - cx));
+    const ch = Math.max(1, Math.min(Math.round(height * scale), img.height - cy));
+    canvas = new OffscreenCanvas(cw, ch);
+    canvas.getContext('2d').drawImage(img, cx, cy, cw, ch, 0, 0, cw, ch);
+  } finally {
+    img.close?.();
+  }
+  try {
+    return await encodeCanvas(canvas, settings);
+  } finally {
+    releaseCanvas(canvas);
+  }
+}
+
+async function convertFormat({ dataUrl, format, quality }) {
+  const img = await loadBitmap(dataUrl);
+  const canvas = new OffscreenCanvas(img.width, img.height);
+  canvas.getContext('2d').drawImage(img, 0, 0);
+  img.close?.();
+  try {
+    const { mime, q } = encoding({ format, quality });
+    const blob = await canvas.convertToBlob({ type: mime, quality: q });
+    return { dataUrl: await blobToDataUrl(blob) };
+  } finally {
+    releaseCanvas(canvas);
+  }
+}
+
+async function writeToClipboard({ dataUrl }) {
+  try {
+    let blob = await (await fetch(assertImageDataUrl(dataUrl))).blob();
+    if (blob.type !== 'image/png') {
+      const img = await createImageBitmap(blob);
+      const canvas = new OffscreenCanvas(img.width, img.height);
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      img.close();
+      blob = await canvas.convertToBlob({ type: 'image/png' });
+      releaseCanvas(canvas);
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    return { success: true };
+  } catch (e) {
+    console.warn('writeToClipboard failed in offscreen document:', e);
+    return { success: false, error: e?.message || 'Clipboard write failed' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Desktop capture
+// ---------------------------------------------------------------------------
+async function captureDesktopFrame({ streamId, settings }) {
+  if (typeof streamId !== 'string' || !streamId) throw new Error('Missing desktop stream id');
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: {
+      mandatory: {
+        chromeMediaSource: 'desktop',
+        chromeMediaSourceId: streamId,
+        maxWidth: 7680,
+        maxHeight: 4320,
+      },
+    },
+  });
+
+  const video = document.createElement('video');
+  let timer = null;
+  try {
+    video.muted = true;
+    video.srcObject = stream;
+    await new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('Desktop stream timeout')), 10000);
+      video.onloadedmetadata = () => video.play().then(resolve, reject);
+      video.onerror = () => reject(new Error('Video stream failed to load'));
+    });
+    await new Promise((r) => setTimeout(r, 120));
+
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h) throw new Error('Desktop stream returned no frames');
+
+    const canvas = new OffscreenCanvas(w, h);
+    canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+    try {
+      return await encodeCanvas(canvas, settings);
+    } finally {
+      releaseCanvas(canvas);
+    }
+  } finally {
+    clearTimeout(timer);
+    stream.getTracks().forEach((t) => t.stop());
+    video.onloadedmetadata = null;
+    video.onerror = null;
+    video.srcObject = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Encoding helpers
+// ---------------------------------------------------------------------------
+function encoding(settings) {
+  const format = settings?.format;
+  const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
+  const qn = Number(settings?.quality);
+  return { mime, q: Number.isFinite(qn) ? clamp(qn, 0.1, 1) : 0.92 };
+}
+
+async function encodeCanvas(canvas, settings) {
+  const { mime, q } = encoding(settings);
+  const blob = await canvas.convertToBlob({ type: mime, quality: q });
+  return {
+    dataUrl: await blobToDataUrl(blob),
+    thumbnailUrl: await makeThumbnail(canvas),
+    width: canvas.width,
+    height: canvas.height,
+  };
+}
+
+async function makeThumbnail(source, targetWidth = 720) {
+  try {
+    const sw = source.width;
+    const sh = source.height;
+    if (!sw || !sh) return '';
     const cropHeight = Math.min(sh, Math.round(sw * 0.75));
     const scale = Math.min(1, targetWidth / sw);
     const tw = Math.max(1, Math.round(sw * scale));
     const th = Math.max(1, Math.round(cropHeight * scale));
-
-    const thumbCanvas = document.createElement('canvas');
-    thumbCanvas.width = tw;
-    thumbCanvas.height = th;
-    const tCtx = thumbCanvas.getContext('2d');
-    if (!tCtx) return '';
-
-    tCtx.imageSmoothingEnabled = true;
-    tCtx.imageSmoothingQuality = 'high';
-    tCtx.drawImage(sourceCanvas, 0, 0, sw, cropHeight, 0, 0, tw, th);
-    return thumbCanvas.toDataURL('image/jpeg', 0.92);
+    const thumb = new OffscreenCanvas(tw, th);
+    const ctx = thumb.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(source, 0, 0, sw, cropHeight, 0, 0, tw, th);
+    const blob = await thumb.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+    releaseCanvas(thumb);
+    return await blobToDataUrl(blob);
   } catch (e) {
-    console.warn('createThumbnailFromCanvas error:', e);
+    console.warn('Thumbnail generation failed:', e);
     return '';
   }
 }
 
-/**
- * High-performance off-thread ImageBitmap decoder
- */
-async function loadBitmap(src) {
-  if (typeof createImageBitmap !== 'undefined') {
-    try {
-      const res = await fetch(src);
-      const blob = await res.blob();
-      return await createImageBitmap(blob);
-    } catch {
-      // Fallback to Image element
-    }
-  }
-  return await loadImage(src);
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Failed to encode image'));
+    reader.readAsDataURL(blob);
+  });
 }
 
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
+function assertImageDataUrl(src) {
+  if (typeof src !== 'string' || !DATA_IMAGE_RE.test(src)) {
+    throw new Error('Only data:image URLs are accepted');
+  }
+  return src;
+}
+
+async function loadBitmap(src) {
+  const blob = await (await fetch(assertImageDataUrl(src))).blob();
+  return createImageBitmap(blob);
+}
+
+function releaseCanvas(canvas) {
+  if (!canvas) return;
+  canvas.width = 0;
+  canvas.height = 0;
+}
+
+function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
 }

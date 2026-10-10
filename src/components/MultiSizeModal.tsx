@@ -14,7 +14,7 @@ import {
   Square,
 } from 'lucide-react';
 import { CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
-import { captureMultiSize } from '../utils/capture';
+import { captureMultiSize, ensureAllSitesAccess } from '../utils/capture';
 
 interface Props {
   settings: CaptureSettings;
@@ -87,9 +87,17 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
     const targets = selectedIndices.map((i) => resolutions[i]);
     if (targets.length === 0) return;
 
-    setIsRunning(true);
-    setProgressMsg('Starting responsive multi-device capture...');
-    setCompletedItems([]);
+    try {
+      if (!(await ensureAllSitesAccess())) {
+        setProgressMsg('Yoink needs access to all sites for responsive multi-size capture.');
+        return;
+      }
+      setIsRunning(true);
+      setProgressMsg('Starting responsive multi-device capture...');
+      setCompletedItems([]);
+    } catch {
+      return;
+    }
 
     try {
       const results = await captureMultiSize(targets, settings, (curr, total, name) => {

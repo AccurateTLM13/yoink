@@ -1,11 +1,17 @@
 import { CaptureFormat, CaptureMode, CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
-import { addHistoryItem, downloadDataUrl } from './storage';
+import { addHistoryItem, downloadDataUrl, copyImageToClipboard } from './storage';
 
 /**
  * Checks if running inside an actual Chrome Extension environment with permissions.
  */
 export function isChromeExtension(): boolean {
   return typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.sendMessage && !!chrome.tabs;
+}
+
+/** Must be called directly from a click handler (needs a user gesture). */
+export function ensureAllSitesAccess(): Promise<boolean> {
+  if (typeof chrome === 'undefined' || !chrome.permissions) return Promise.resolve(true);
+  return chrome.permissions.request({ origins: ['<all_urls>'] });
 }
 
 /**
@@ -16,7 +22,9 @@ export function formatFilename(
   title: string,
   url: string,
   mode: CaptureMode,
-  format: CaptureFormat
+  format: CaptureFormat,
+  width?: number,
+  height?: number
 ): string {
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10);
@@ -36,18 +44,78 @@ export function formatFilename(
     .slice(0, 40);
   if (!cleanTitle) cleanTitle = 'capture';
 
-  let filename = template
-    .replace('{title}', cleanTitle)
-    .replace('{date}', dateStr)
-    .replace('{time}', timeStr)
-    .replace('{domain}', domain)
-    .replace('{type}', mode);
+  const w = width ? String(Math.round(width)) : '';
+  const h = height ? String(Math.round(height)) : '';
 
+  // Keep in sync with public/background.js.
+  let filename = template
+    .split('{title}').join(cleanTitle)
+    .split('{date}').join(dateStr)
+    .split('{time}').join(timeStr)
+    .split('{domain}').join(domain)
+    .split('{type}').join(mode)
+    .split('{width}').join(w)
+    .split('{height}').join(h)
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .replace(/^\.+/, '')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 150);
+
+  if (!filename) filename = 'capture';
   if (!filename.toLowerCase().endsWith(`.${format}`)) {
     filename += `.${format}`;
   }
 
   return filename;
+}
+
+function awaitCaptureEvent(
+  mode: CaptureMode,
+  timeoutMs = 90000,
+  onProgress?: (message: string) => void
+): { promise: Promise<HistoryItem>; cleanup: () => void } {
+  let cleanupTimer: any = null;
+  let listener: ((msg: any) => void) | null = null;
+
+  const cleanup = () => {
+    if (cleanupTimer) {
+      clearTimeout(cleanupTimer);
+      cleanupTimer = null;
+    }
+    if (listener && typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+      chrome.runtime.onMessage.removeListener(listener);
+      listener = null;
+    }
+  };
+
+  const promise = new Promise<HistoryItem>((resolve, reject) => {
+    listener = (msg: any) => {
+      if (msg.action === 'CAPTURE_PROGRESS' && msg.payload?.message && onProgress) {
+        onProgress(msg.payload.message);
+      } else if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item?.mode === mode) {
+        cleanup();
+        resolve(msg.payload.item as HistoryItem);
+      } else if (msg.action === 'CAPTURE_FAILED' && msg.payload?.mode === mode) {
+        cleanup();
+        reject(new Error(msg.payload.error || `${mode} capture failed.`));
+      } else if (msg.action === 'CAPTURE_CANCELLED') {
+        cleanup();
+        reject(new Error(`${mode} capture cancelled.`));
+      }
+    };
+
+    if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+      chrome.runtime.onMessage.addListener(listener);
+    }
+
+    cleanupTimer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${mode} capture timed out.`));
+    }, timeoutMs);
+  });
+
+  return { promise, cleanup };
 }
 
 /**
@@ -61,6 +129,9 @@ export function generateMockScreenshot(
   format: CaptureFormat = 'png'
 ): Promise<string> {
   return new Promise((resolve) => {
+    if (typeof document === 'undefined') {
+      return resolve(`data:image/${format};base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==`);
+    }
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -212,34 +283,7 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
           return reject(new Error('No active tab found.'));
         }
 
-        let cleanupTimer: any = null;
-
-        const messageListener = (msg: any) => {
-          if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item?.mode === 'selection') {
-            chrome.runtime.onMessage.removeListener(messageListener);
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            resolve(msg.payload.item as HistoryItem);
-          } else if (msg.action === 'CAPTURE_COMPLETED' && msg.payload?.mode === 'selection') {
-            chrome.runtime.onMessage.removeListener(messageListener);
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            resolve(msg.payload as HistoryItem);
-          } else if (msg.action === 'CAPTURE_FAILED' && msg.payload?.mode === 'selection') {
-            chrome.runtime.onMessage.removeListener(messageListener);
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            reject(new Error(msg.payload.error || 'Selection capture failed.'));
-          } else if (msg.action === 'CAPTURE_CANCELLED') {
-            chrome.runtime.onMessage.removeListener(messageListener);
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            reject(new Error('Selection capture cancelled.'));
-          }
-        };
-
-        chrome.runtime.onMessage.addListener(messageListener);
-
-        cleanupTimer = setTimeout(() => {
-          chrome.runtime.onMessage.removeListener(messageListener);
-          reject(new Error('Selection capture timed out.'));
-        }, 90000);
+        const { promise, cleanup } = awaitCaptureEvent('selection', 90000);
 
         chrome.runtime.sendMessage(
           {
@@ -251,12 +295,13 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
           },
           (response) => {
             if (response?.error) {
-              chrome.runtime.onMessage.removeListener(messageListener);
-              if (cleanupTimer) clearTimeout(cleanupTimer);
+              cleanup();
               return reject(new Error(response.error));
             }
           }
         );
+
+        promise.then(resolve, reject);
       });
     });
   }
@@ -285,6 +330,209 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
 }
 
 /**
+ * Capture Scrolling Element (P1-4)
+ */
+export async function captureScrollingElement(settings: CaptureSettings): Promise<HistoryItem> {
+  if (isChromeExtension()) {
+    return new Promise((resolve, reject) => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const activeTab = tabs[0];
+        if (!activeTab || !activeTab.id) {
+          return reject(new Error('No active tab found.'));
+        }
+
+        const { promise, cleanup } = awaitCaptureEvent('element', 90000);
+
+        chrome.runtime.sendMessage(
+          {
+            action: 'CAPTURE_ELEMENT_SCROLL_START',
+            payload: {
+              tabId: activeTab.id,
+              settings,
+            },
+          },
+          (response) => {
+            if (response?.error) {
+              cleanup();
+              return reject(new Error(response.error));
+            }
+          }
+        );
+
+        promise.then(resolve, reject);
+      });
+    });
+  }
+
+  // Simulated fallback
+  const width = 800;
+  const height = 2400;
+  const dataUrl = await generateMockScreenshot('element', 'Scrolling Element (Chat / Feed)', width, height, settings.format);
+  const item: HistoryItem = {
+    id: `sim_elem_${Date.now()}`,
+    title: 'Scrolling Element (Demo)',
+    url: 'https://example.com/chat',
+    dataUrl,
+    timestamp: Date.now(),
+    width,
+    height,
+    mode: 'element',
+    format: settings.format,
+  };
+  await addHistoryItem(item);
+  if (settings.autoDownload) {
+    const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'element', settings.format);
+    downloadDataUrl(dataUrl, fn);
+  }
+  return item;
+}
+
+/**
+ * Capture MediaStream Frame onto Canvas (P1-5)
+ */
+export async function captureMediaStreamFrame(
+  stream: MediaStream,
+  format: CaptureFormat = 'png',
+  quality: number = 0.92
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  try {
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.muted = true;
+
+    await new Promise<void>((resolve, reject) => {
+      video.onloadedmetadata = () => {
+        video.play().then(resolve).catch(reject);
+      };
+      video.onerror = () => reject(new Error('Video stream failed to load.'));
+      setTimeout(() => reject(new Error('Desktop stream timeout.')), 10000);
+    });
+
+    await new Promise((r) => setTimeout(r, 120));
+
+    const width = video.videoWidth || 1920;
+    const height = video.videoHeight || 1080;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, width, height);
+    }
+
+    const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
+    const dataUrl = canvas.toDataURL(mime, quality);
+
+    return { dataUrl, width, height };
+  } finally {
+    stream.getTracks().forEach((track) => track.stop());
+  }
+}
+
+/**
+ * Capture Desktop / Full Screen (P1-5)
+ */
+export async function captureDesktop(settings: CaptureSettings): Promise<HistoryItem> {
+  // 1. Direct displayMedia capture in extension tab or modern browser window
+  if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getDisplayMedia) {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+
+      const { dataUrl, width, height } = await captureMediaStreamFrame(
+        stream,
+        settings.format,
+        settings.quality
+      );
+
+      const item: HistoryItem = {
+        id: `desktop_${Date.now()}`,
+        title: 'Desktop Screen Capture',
+        url: 'desktop://display',
+        dataUrl,
+        timestamp: Date.now(),
+        width,
+        height,
+        mode: 'desktop',
+        format: settings.format,
+      };
+
+      await addHistoryItem(item);
+
+      if (settings.autoDownload) {
+        const fn = formatFilename(
+          settings.filenameTemplate,
+          item.title,
+          item.url,
+          'desktop',
+          settings.format,
+          width,
+          height
+        );
+        downloadDataUrl(dataUrl, fn);
+      }
+
+      if (settings.copyToClipboard) {
+        await copyImageToClipboard(dataUrl);
+      }
+
+      return item;
+    } catch (err: any) {
+      if (err.name === 'NotAllowedError') {
+        throw new Error('Screen capture cancelled.');
+      }
+      if (!isChromeExtension()) throw err;
+    }
+  }
+
+  // 2. Extension background fallback with chrome.desktopCapture
+  if (isChromeExtension()) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          action: 'CAPTURE_DESKTOP_START',
+          payload: { settings },
+        },
+        (response) => {
+          if (response?.error) {
+            return reject(new Error(response.error));
+          }
+          if (response) {
+            return resolve(response as HistoryItem);
+          }
+          reject(new Error('Desktop capture produced no response.'));
+        }
+      );
+    });
+  }
+
+  // 3. Simulated fallback
+  const width = 1920;
+  const height = 1080;
+  const dataUrl = await generateMockScreenshot('desktop', 'Desktop Screen Capture', width, height, settings.format);
+  const item: HistoryItem = {
+    id: `sim_desktop_${Date.now()}`,
+    title: 'Desktop Screen Capture (Demo)',
+    url: 'desktop://display',
+    dataUrl,
+    timestamp: Date.now(),
+    width,
+    height,
+    mode: 'desktop',
+    format: settings.format,
+  };
+  await addHistoryItem(item);
+  if (settings.autoDownload) {
+    const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'desktop', settings.format, width, height);
+    downloadDataUrl(dataUrl, fn);
+  }
+  return item;
+}
+
+/**
  * Capture Entire Page (Full Scroll & Stitch)
  */
 export async function captureFullPage(
@@ -299,32 +547,8 @@ export async function captureFullPage(
           return reject(new Error('No active tab found.'));
         }
 
-        let cleanupTimer: any = null;
-
-        const messageListener = (msg: any) => {
-          if (msg.action === 'CAPTURE_PROGRESS' && msg.payload?.message && onProgress) {
-            onProgress(msg.payload.message);
-          } else if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item?.mode === 'full') {
-            chrome.runtime.onMessage.removeListener(messageListener);
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            resolve(msg.payload.item as HistoryItem);
-          } else if (msg.action === 'CAPTURE_COMPLETED' && msg.payload?.mode === 'full') {
-            chrome.runtime.onMessage.removeListener(messageListener);
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            resolve(msg.payload as HistoryItem);
-          } else if (msg.action === 'CAPTURE_FAILED' && msg.payload?.mode === 'full') {
-            chrome.runtime.onMessage.removeListener(messageListener);
-            if (cleanupTimer) clearTimeout(cleanupTimer);
-            reject(new Error(msg.payload.error || 'Full page capture failed.'));
-          }
-        };
-
-        chrome.runtime.onMessage.addListener(messageListener);
-
-        cleanupTimer = setTimeout(() => {
-          chrome.runtime.onMessage.removeListener(messageListener);
-          reject(new Error('Full page capture timed out after 60 seconds.'));
-        }, 60000);
+        const delayMs = Math.max(0, (settings.captureDelaySec || 0) * 1000);
+        const { promise, cleanup } = awaitCaptureEvent('full', 60000 + delayMs, onProgress);
 
         chrome.runtime.sendMessage(
           {
@@ -338,12 +562,13 @@ export async function captureFullPage(
           },
           (response) => {
             if (response?.error) {
-              chrome.runtime.onMessage.removeListener(messageListener);
-              if (cleanupTimer) clearTimeout(cleanupTimer);
+              cleanup();
               return reject(new Error(response.error));
             }
           }
         );
+
+        promise.then(resolve, reject);
       });
     });
   }
@@ -379,6 +604,10 @@ export async function captureAllTabs(
   onProgress?: (current: number, total: number, tabTitle: string) => void
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
+    const granted = await ensureAllSitesAccess();
+    if (!granted) {
+      throw new Error('Yoink needs access to all sites to capture multiple tabs.');
+    }
     return new Promise((resolve, reject) => {
       const progressListener = (msg: any) => {
         if (msg.action === 'CAPTURE_PROGRESS' && onProgress && msg.payload) {
@@ -447,6 +676,10 @@ export async function captureUrlList(
   onProgress?: (current: number, total: number, url: string) => void
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
+    const granted = await ensureAllSitesAccess();
+    if (!granted) {
+      throw new Error('Yoink needs access to all sites for batch URL capture.');
+    }
     return new Promise((resolve, reject) => {
       const progressListener = (msg: any) => {
         if (msg.action === 'CAPTURE_PROGRESS' && onProgress && msg.payload) {
@@ -508,6 +741,10 @@ export async function captureMultiSize(
   onProgress?: (current: number, total: number, resName: string) => void
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
+    const granted = await ensureAllSitesAccess();
+    if (!granted) {
+      throw new Error('Yoink needs access to all sites for responsive multi-size capture.');
+    }
     return new Promise((resolve, reject) => {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const activeTab = tabs[0];

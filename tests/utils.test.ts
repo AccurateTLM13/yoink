@@ -65,6 +65,32 @@ describe('Capture Utilities - formatFilename', () => {
     assert.match(result, /^github_com_selection_\d{6}\.jpeg$/);
   });
 
+  test('formats filename with {width} and {height} tokens (P2-8)', () => {
+    const template = '{title}_{width}x{height}';
+    const result = formatFilename(
+      template,
+      'App View',
+      'https://example.com',
+      'visible',
+      'png',
+      1920,
+      1080
+    );
+    assert.equal(result, 'App_View_1920x1080.png');
+  });
+
+  test('replaces multiple occurrences of tokens across the template', () => {
+    const template = '{type}_{title}_{type}';
+    const result = formatFilename(
+      template,
+      'Page',
+      'https://example.com',
+      'full',
+      'png'
+    );
+    assert.equal(result, 'full_Page_full.png');
+  });
+
   test('handles invalid or empty URLs gracefully', () => {
     const template = '{domain}_{title}';
     const result = formatFilename(template, 'Snapshot', 'not-a-valid-url', 'visible', 'webp');
@@ -224,17 +250,13 @@ describe('Storage Utilities', () => {
     assert.ok(thumb.length > 0);
   });
 
-  test('auto-repairs items with empty thumbnail and dataUrl from full resolution storage', async () => {
+  test('separated storage maintains slim history index and on-demand full image retrieval', async () => {
     const fullImage = 'data:image/png;base64,rescued_full_resolution_image_data';
-    await saveFullResolutionImage('repaired_item_1', fullImage);
-
-    // Simulate an item previously saved with wiped image fields
-    const corruptedItem: HistoryItem = {
-      id: 'repaired_item_1',
-      title: 'Corrupted Item',
-      url: 'https://example.com/lost',
-      dataUrl: '',
-      thumbnailUrl: '',
+    const item: HistoryItem = {
+      id: 'slim_item_1',
+      title: 'Slim Item',
+      url: 'https://example.com/test',
+      dataUrl: fullImage,
       timestamp: Date.now(),
       width: 1920,
       height: 1080,
@@ -242,33 +264,15 @@ describe('Storage Utilities', () => {
       format: 'png',
     };
 
-    mockStorage.setItem('omnicapture_history', JSON.stringify([corruptedItem]));
-
-    // getStoredHistory should automatically detect and repair the missing images
-    const history = await getStoredHistory();
-    assert.equal(history.length, 1);
-    assert.equal(history[0].id, 'repaired_item_1');
-    assert.equal(history[0].dataUrl, fullImage);
-    assert.equal(history[0].thumbnailUrl, fullImage);
-  });
-
-  test('addHistoryItem never writes empty string to dataUrl or thumbnailUrl', async () => {
-    const item: HistoryItem = {
-      id: 'safety_check',
-      title: 'Safety Check',
-      url: 'https://example.com/safety',
-      dataUrl: 'data:image/png;base64,' + 'X'.repeat(60000), // > 50KB to trigger indexing logic
-      timestamp: Date.now(),
-      width: 1000,
-      height: 1000,
-      mode: 'visible',
-      format: 'png',
-    };
-
     const history = await addHistoryItem(item);
     assert.equal(history.length, 1);
-    assert.ok(history[0].dataUrl.length > 0, 'dataUrl must not be empty');
-    assert.ok((history[0].thumbnailUrl?.length ?? 0) > 0, 'thumbnailUrl must not be empty');
+    assert.equal(history[0].id, 'slim_item_1');
+    assert.equal(history[0].dataUrl, '', 'dataUrl in index must be empty to prevent storage bloat');
+    assert.ok(history[0].thumbnailUrl && history[0].thumbnailUrl.length > 0, 'thumbnailUrl must be preserved in index');
+
+    // Verify full resolution is accessible via separated storage
+    const retrievedFull = await getFullResolutionImage('slim_item_1');
+    assert.equal(retrievedFull, fullImage);
   });
 });
 

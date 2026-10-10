@@ -15,6 +15,8 @@ import {
   Loader2,
   Check,
   Copy,
+  ScrollText,
+  ScreenShare,
 } from 'lucide-react';
 import { CaptureSettings, HistoryItem } from './types';
 import {
@@ -24,12 +26,17 @@ import {
   getStoredHistory,
   deleteStoredHistoryItem,
   clearStoredHistory,
+  addHistoryItem,
 } from './utils/storage';
+import { fileToHistoryItem } from './utils/upload';
 import {
   captureFullPage,
   captureVisible,
   captureSelection,
+  captureScrollingElement,
+  captureDesktop,
   captureAllTabs,
+  ensureAllSitesAccess,
 } from './utils/capture';
 import { QuickMenu } from './components/QuickMenu';
 import { UrlBatchModal } from './components/UrlBatchModal';
@@ -69,6 +76,8 @@ export default function App() {
   const [settings, setSettings] = useState<CaptureSettings>(DEFAULT_SETTINGS);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
+  const [isAnnotatingDirectly, setIsAnnotatingDirectly] = useState(false);
+  const [isOcrDirectly, setIsOcrDirectly] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('Ready');
   const [copiedShortcut, setCopiedShortcut] = useState<string | null>(null);
@@ -167,8 +176,12 @@ export default function App() {
 
   const handleCaptureFullPage = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Scanning page...');
+    setStatusMessage(settings.captureDelaySec ? `Capturing in ${settings.captureDelaySec}s…` : 'Scanning page...');
     try {
+      // P1-6: close the popup during a countdown so the user can interact with the page.
+      if (!isFullTab && settings.captureDelaySec > 0 && typeof window !== 'undefined') {
+        setTimeout(() => window.close(), 300);
+      }
       const item = await captureFullPage(settings, (msg) => {
         setStatusMessage(msg);
       });
@@ -182,12 +195,15 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings]);
+  }, [settings, isFullTab]);
 
   const handleCaptureVisible = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Capturing visible viewport...');
+    setStatusMessage(settings.captureDelaySec ? `Capturing in ${settings.captureDelaySec}s…` : 'Capturing visible viewport...');
     try {
+      if (!isFullTab && settings.captureDelaySec > 0 && typeof window !== 'undefined') {
+        setTimeout(() => window.close(), 300);
+      }
       const item = await captureVisible(settings);
       setStatusMessage('Visible viewport captured!');
       if (item && item.dataUrl) {
@@ -199,7 +215,7 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings]);
+  }, [settings, isFullTab]);
 
   const handleCaptureSelection = useCallback(async () => {
     setIsCapturing(true);
@@ -222,10 +238,51 @@ export default function App() {
     }
   }, [settings, isFullTab]);
 
-  const handleCaptureAllTabs = useCallback(async () => {
+  const handleCaptureElement = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Capturing all tabs in window...');
+    setStatusMessage('Select scrollable element on page...');
     try {
+      if (!isFullTab && typeof window !== 'undefined') {
+        setTimeout(() => window.close(), 300);
+      }
+      const item = await captureScrollingElement(settings);
+      setStatusMessage('Scrollable element captured!');
+      if (item && item.dataUrl) {
+        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+        setPreviewItem(item);
+      }
+    } catch (err: any) {
+      setStatusMessage(`Error: ${err.message || 'Element capture failed'}`);
+    } finally {
+      setIsCapturing(false);
+    }
+  }, [settings, isFullTab]);
+
+  const handleCaptureDesktop = useCallback(async () => {
+    setIsCapturing(true);
+    setStatusMessage('Select desktop screen or window to capture...');
+    try {
+      const item = await captureDesktop(settings);
+      setStatusMessage('Desktop screen captured!');
+      if (item && item.dataUrl) {
+        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+        setPreviewItem(item);
+      }
+    } catch (err: any) {
+      setStatusMessage(`Error: ${err.message || 'Desktop capture failed'}`);
+    } finally {
+      setIsCapturing(false);
+    }
+  }, [settings]);
+
+  const handleCaptureAllTabs = useCallback(async () => {
+    try {
+      if (!(await ensureAllSitesAccess())) {
+        setStatusMessage('Yoink needs access to all sites to capture multiple tabs.');
+        return;
+      }
+      setIsCapturing(true);
+      setStatusMessage('Capturing all tabs in window...');
       const results = await captureAllTabs(settings, (curr, total, title) => {
         setStatusMessage(`Capturing tab ${curr}/${total}: ${title}`);
       });
@@ -263,6 +320,48 @@ export default function App() {
   const handleBatchResults = useCallback((items: HistoryItem[]) => {
     setHistory((prev) => [...items, ...prev]);
   }, []);
+
+  // P1-7 Upload and Edit: import local images, then open the editor for a single file.
+  const handleImportFiles = useCallback(async (files: File[]) => {
+    const images = files.filter((f) => f.type.startsWith('image/'));
+    if (images.length === 0) {
+      setStatusMessage('Error: No image files found.');
+      return;
+    }
+    const imported: HistoryItem[] = [];
+    for (const file of images) {
+      try {
+        const item = await fileToHistoryItem(file);
+        await addHistoryItem(item);
+        imported.push(item);
+      } catch (err: any) {
+        setStatusMessage(`Error: ${err.message || 'Import failed'}`);
+      }
+    }
+    if (imported.length === 0) return;
+    setHistory((prev) => [...imported, ...prev.filter((p) => !imported.some((i) => i.id === p.id))]);
+    setStatusMessage(`Imported ${imported.length} image${imported.length === 1 ? '' : 's'}`);
+    if (imported.length === 1) {
+      setIsAnnotatingDirectly(true);
+      setPreviewItem(imported[0]);
+    } else {
+      setView('history');
+    }
+  }, []);
+
+  // Paste an image anywhere in the Studio Hub to import it.
+  useEffect(() => {
+    if (!isFullTab) return;
+    const onPaste = (e: ClipboardEvent) => {
+      const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'));
+      if (files.length > 0) {
+        e.preventDefault();
+        handleImportFiles(files);
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [isFullTab, handleImportFiles]);
 
   const handleOpenStudio = useCallback(() => {
     if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
@@ -373,17 +472,43 @@ export default function App() {
           </header>
 
           {/* Content Area */}
-          <main className="flex-1 overflow-hidden relative flex flex-col">
+          <main
+            className="flex-1 overflow-hidden relative flex flex-col"
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+            }}
+            onDrop={(e) => {
+              if (e.dataTransfer.files.length > 0) {
+                e.preventDefault();
+                handleImportFiles(Array.from(e.dataTransfer.files));
+              }
+            }}
+          >
             {view === 'history' && (
               <HistoryDrawer
                 history={history}
+                onImportFiles={handleImportFiles}
                 onBack={() => {
                   setRecentBatchCount(null);
                   setView('menu');
                 }}
                 recentBatchBanner={recentBatchCount}
                 onDismissBatchBanner={() => setRecentBatchCount(null)}
-                onSelectPreview={(item) => setPreviewItem(item)}
+                onSelectPreview={(item) => {
+                  setIsAnnotatingDirectly(false);
+                  setIsOcrDirectly(false);
+                  setPreviewItem(item);
+                }}
+                onSelectAnnotate={(item) => {
+                  setIsAnnotatingDirectly(true);
+                  setIsOcrDirectly(false);
+                  setPreviewItem(item);
+                }}
+                onSelectOcr={(item) => {
+                  setIsAnnotatingDirectly(false);
+                  setIsOcrDirectly(true);
+                  setPreviewItem(item);
+                }}
                 onDeleteItem={handleDeleteHistoryItem}
                 onClearAll={handleClearHistory}
                 isFullTab={true}
@@ -469,7 +594,7 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
                     {/* Full Page */}
                     <div
                       onClick={() => handleCopyShortcut('Alt+Shift+1', 'Full Page Capture')}
@@ -599,6 +724,60 @@ export default function App() {
                       <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
                         <span>Trigger: Anywhere on Web</span>
                         <span className="text-blue-600 font-semibold group-hover:underline">Copy Shortcut →</span>
+                      </div>
+                    </div>
+
+                    {/* Scrollable Element */}
+                    <div
+                      onClick={handleCaptureElement}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-cyan-400 hover:shadow-md transition cursor-pointer space-y-3 relative"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="w-10 h-10 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center group-hover:bg-cyan-600 group-hover:text-white transition">
+                          <ScrollText size={20} />
+                        </div>
+                        <span className="px-2 py-0.5 rounded-lg bg-cyan-50 text-cyan-700 border border-cyan-200 font-mono text-[10.5px] font-semibold">
+                          Click to select
+                        </span>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-cyan-700 transition">
+                          Scrollable Element
+                        </h4>
+                        <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                          Hover and click any scrollable DIV (chat log, side drawer, code snippet, spreadsheet) to scroll and stitch its full overflow content.
+                        </p>
+                      </div>
+                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span>Trigger: Popup or Hub</span>
+                        <span className="text-cyan-700 font-semibold group-hover:underline">Launch Inspector →</span>
+                      </div>
+                    </div>
+
+                    {/* Desktop Screen */}
+                    <div
+                      onClick={handleCaptureDesktop}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-emerald-400 hover:shadow-md transition cursor-pointer space-y-3 relative"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center group-hover:bg-emerald-600 group-hover:text-white transition">
+                          <ScreenShare size={20} />
+                        </div>
+                        <span className="px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-mono text-[10.5px] font-semibold">
+                          Display Media
+                        </span>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-emerald-700 transition">
+                          Desktop / Screen
+                        </h4>
+                        <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                          Capture your entire monitor display, individual desktop application window, or Chrome tab at full hardware display resolution.
+                        </p>
+                      </div>
+                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span>Trigger: System Picker</span>
+                        <span className="text-emerald-700 font-semibold group-hover:underline">Share Screen →</span>
                       </div>
                     </div>
                   </div>
@@ -732,29 +911,46 @@ export default function App() {
 
           {/* Image Preview / Zoom Modal */}
           {previewItem && (
-            <ImagePreviewModal item={previewItem} onClose={() => setPreviewItem(null)} />
+            <ImagePreviewModal
+              item={previewItem}
+              initialAnnotating={isAnnotatingDirectly}
+              initialOcr={isOcrDirectly}
+              onClose={() => {
+                setPreviewItem(null);
+                setIsAnnotatingDirectly(false);
+                setIsOcrDirectly(false);
+              }}
+              onSaved={(newItem) => {
+                setHistory((prev) => [newItem, ...prev.filter((i) => i.id !== newItem.id)]);
+              }}
+            />
           )}
         </div>
       </div>
     );
   }
 
-  // Standard Popup View (370px × 550px)
+  // Standard Popup View (380px × 585px, safe under Chrome 600px limit)
   return (
-    <div className="w-[370px] h-[550px] flex flex-col bg-[#fbfbfd] text-zinc-900 overflow-hidden font-sans border border-zinc-200/80 rounded-2xl shadow-xl">
+    <div className="w-[380px] h-[585px] max-h-[600px] flex flex-col bg-[#fbfbfd] text-zinc-900 overflow-hidden font-sans border border-zinc-200/80 rounded-2xl shadow-xl">
       {/* Primary View Router */}
-      <div className="flex-1 overflow-hidden relative">
+      <div className="flex-1 overflow-hidden relative flex flex-col">
         {view === 'menu' && (
           <QuickMenu
             onCaptureFullPage={handleCaptureFullPage}
             onCaptureVisible={handleCaptureVisible}
             onCaptureSelection={handleCaptureSelection}
+            onCaptureElement={handleCaptureElement}
+            onCaptureDesktop={handleCaptureDesktop}
             onCaptureAllTabs={handleCaptureAllTabs}
             onOpenUrlBatch={() => setView('urllist')}
             onOpenMultiSize={() => setView('multisize')}
             onOpenHistory={() => setView('history')}
             onOpenOptions={() => setView('options')}
             onOpenStudio={handleOpenStudio}
+            onUploadFiles={handleImportFiles}
+            delaySec={settings.captureDelaySec}
+            onSetDelaySec={(sec) => handleSaveSettings({ ...settings, captureDelaySec: sec })}
             historyCount={history.length}
             isCapturing={isCapturing}
             activeAction={statusMessage}
@@ -788,10 +984,25 @@ export default function App() {
             }}
             recentBatchBanner={recentBatchCount}
             onDismissBatchBanner={() => setRecentBatchCount(null)}
-            onSelectPreview={(item) => setPreviewItem(item)}
+            onSelectPreview={(item) => {
+              setIsAnnotatingDirectly(false);
+              setIsOcrDirectly(false);
+              setPreviewItem(item);
+            }}
+            onSelectAnnotate={(item) => {
+              setIsAnnotatingDirectly(true);
+              setIsOcrDirectly(false);
+              setPreviewItem(item);
+            }}
+            onSelectOcr={(item) => {
+              setIsAnnotatingDirectly(false);
+              setIsOcrDirectly(true);
+              setPreviewItem(item);
+            }}
             onDeleteItem={handleDeleteHistoryItem}
             onClearAll={handleClearHistory}
             onOpenStudio={handleOpenStudio}
+            onImportFiles={handleImportFiles}
             isFullTab={false}
           />
         )}
@@ -807,7 +1018,19 @@ export default function App() {
 
       {/* Image Preview / Zoom Modal */}
       {previewItem && (
-        <ImagePreviewModal item={previewItem} onClose={() => setPreviewItem(null)} />
+        <ImagePreviewModal
+          item={previewItem}
+          initialAnnotating={isAnnotatingDirectly}
+          initialOcr={isOcrDirectly}
+          onClose={() => {
+            setPreviewItem(null);
+            setIsAnnotatingDirectly(false);
+            setIsOcrDirectly(false);
+          }}
+          onSaved={(newItem) => {
+            setHistory((prev) => [newItem, ...prev.filter((i) => i.id !== newItem.id)]);
+          }}
+        />
       )}
     </div>
   );

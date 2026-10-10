@@ -1,9 +1,18 @@
 /**
  * Yoink Type Definitions
  */
-
 export type CaptureFormat = 'png' | 'jpeg' | 'webp';
-export type CaptureMode = 'visible' | 'full' | 'selection' | 'multisize' | 'alltabs' | 'urllist';
+export type CaptureMode =
+  | 'visible'
+  | 'full'
+  | 'selection'
+  | 'multisize'
+  | 'alltabs'
+  | 'urllist'
+  | 'annotated'
+  | 'upload'
+  | 'element'
+  | 'desktop';
 
 export interface CaptureSettings {
   format: CaptureFormat;
@@ -13,6 +22,7 @@ export interface CaptureSettings {
   autoDownload: boolean;
   copyToClipboard: boolean;
   filenameTemplate: string; // e.g. "omnicapture_{title}_{date}_{time}"
+  captureDelaySec: number; // P1-6: countdown before visible / full page capture (0 = off)
 }
 
 export interface HistoryItem {
@@ -27,6 +37,7 @@ export interface HistoryItem {
   mode: CaptureMode;
   format: CaptureFormat;
   fileSizeBytes?: number;
+  ocrText?: string;
 }
 
 export interface SelectionRect {
@@ -56,4 +67,29 @@ export interface CaptureProgress {
   percent?: number;
   currentStep?: number;
   totalSteps?: number;
+}
+
+export type AnnotationTool =
+  | 'select'
+  | 'arrow'
+  | 'rect'
+  | 'ellipse'
+  | 'pen'
+  | 'highlighter'
+  | 'text'
+  | 'blur';
+
+export interface AnnotationItem {
+  id: string;
+  tool: AnnotationTool;
+  color: string;
+  strokeWidth: number;
+  startX?: number;
+  startY?: number;
+  endX?: number;
+  endY?: number;
+  points?: { x: number; y: number }[];
+  text?: string;
+  fontSize?: number;
+  fill?: boolean;
 }

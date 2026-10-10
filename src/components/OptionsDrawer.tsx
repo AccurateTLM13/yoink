@@ -9,6 +9,7 @@ import {
   Keyboard,
   FileCode,
   Zap,
+  ScanText,
 } from 'lucide-react';
 import { CaptureSettings, CaptureFormat } from '../types';
 import { DEFAULT_SETTINGS } from '../utils/storage';
@@ -26,7 +27,11 @@ const AVAILABLE_TOKENS = [
   { token: '{time}', label: 'HHMMSS' },
   { token: '{domain}', label: 'Domain Host' },
   { token: '{type}', label: 'Capture Type' },
+  { token: '{width}', label: 'Pixel Width' },
+  { token: '{height}', label: 'Pixel Height' },
 ];
+
+const DELAY_OPTIONS = [0, 3, 5, 10];
 
 export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, onSave }) => {
   const [form, setForm] = useState<CaptureSettings>({ ...settings });
@@ -64,7 +69,9 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
     'Dashboard_Analytics',
     'https://app.yoink.com/reports',
     'full',
-    form.format
+    form.format,
+    1440,
+    900
   );
 
   return (
@@ -269,6 +276,35 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
               <span>Heavy Feeds (1600ms)</span>
             </div>
           </div>
+
+          {/* P1-6 Delayed Capture Timer */}
+          <div className="bg-white p-3 rounded-xl border border-zinc-200/80 space-y-2 shadow-2xs">
+            <div className="flex justify-between items-center text-xs">
+              <span className="font-medium text-zinc-700">Capture Delay Timer</span>
+              <span className="font-mono font-bold text-orange-600 tabular-nums">
+                {form.captureDelaySec ? `${form.captureDelaySec} s` : 'Off'}
+              </span>
+            </div>
+            <div className="grid grid-cols-4 gap-1.5 p-1 bg-zinc-100 rounded-xl border border-zinc-200/80">
+              {DELAY_OPTIONS.map((sec) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => setForm({ ...form, captureDelaySec: sec })}
+                  className={`py-1 text-center rounded-lg font-semibold text-xs transition cursor-pointer ${
+                    (form.captureDelaySec || 0) === sec
+                      ? 'bg-white text-orange-600 shadow-xs border border-zinc-200/60'
+                      : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/50'
+                  }`}
+                >
+                  {sec === 0 ? 'Off' : `${sec}s`}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-zinc-600">
+              Counts down on the toolbar icon before Visible and Full Page captures. Use it to open menus or hover states first.
+            </p>
+          </div>
         </div>
 
         {/* Section 4: Filename Pattern & Token Builder */}
@@ -313,12 +349,39 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
           </div>
         </div>
 
-        {/* Section 5: Keyboard Shortcuts Reference */}
+        {/* Section 5: Offline OCR & Local AI */}
+        <div className="space-y-2.5 pt-3 border-t border-zinc-200/80">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <ScanText size={13} className="text-zinc-600" />
+              <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-600 block">
+                05 // Text Extraction (OCR) & Local AI
+              </label>
+            </div>
+            <span className="text-[9.5px] font-mono font-bold text-indigo-700 bg-indigo-50 border border-indigo-200/70 px-1.5 py-0.5 rounded">
+              100% Offline
+            </span>
+          </div>
+
+          <div className="bg-white border border-zinc-200/80 rounded-xl p-3 space-y-2 shadow-2xs text-xs">
+            <p className="text-zinc-700 leading-relaxed text-[11.5px]">
+              Yoink uses Chromium native <b>Shape Detection API</b> (<code className="bg-zinc-100 px-1 py-0.5 rounded text-[10px] font-mono">window.TextDetector</code>) and Chrome Prompt API (<code className="bg-zinc-100 px-1 py-0.5 rounded text-[10px] font-mono">Gemini Nano</code>) for instant on-device text recognition.
+            </p>
+            <div className="p-2.5 rounded-lg bg-zinc-50 border border-zinc-200/60 text-[11px] text-zinc-600 space-y-1">
+              <div className="font-semibold text-zinc-800">How to use OCR:</div>
+              <div>1. Open any capture in <b>Gallery & History</b> or the <b>Preview Modal</b>.</div>
+              <div>2. Click the <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">OCR</span> button on the card or toolbar.</div>
+              <div>3. Inspect, edit, and copy extracted text to your clipboard.</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Section 6: Keyboard Shortcuts Reference */}
         <div className="space-y-2.5 pt-3 border-t border-zinc-200/80">
           <div className="flex items-center gap-1.5">
             <Keyboard size={13} className="text-zinc-600" />
             <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-600">
-              Active Keyboard Shortcuts
+              06 // Active Keyboard Shortcuts
             </span>
           </div>
 
