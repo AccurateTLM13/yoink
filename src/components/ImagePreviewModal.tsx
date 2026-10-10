@@ -13,10 +13,12 @@ import {
   Pencil,
   FileText,
   ScanText,
+  Layers,
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage, updateStoredHistoryItem } from '../utils/storage';
 import { exportPdf } from '../utils/pdf';
+import { downloadImageSlices } from '../utils/slicer';
 import { AnnotationEditor } from './AnnotationEditor';
 import { OcrDrawer } from './OcrDrawer';
 
@@ -38,6 +40,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
   const [copied, setCopied] = useState(false);
   const [isAnnotating, setIsAnnotating] = useState(initialAnnotating);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [slicing, setSlicing] = useState(false);
   const [showOcr, setShowOcr] = useState(initialOcr);
   const [zoomLevel, setZoomLevel] = useState(1);
   const initial = (item?.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item?.dataUrl || item?.thumbnailUrl || null);
@@ -139,6 +142,19 @@ export const ImagePreviewModal: React.FC<Props> = ({
     }
   };
 
+  const handleDownloadSlices = async () => {
+    if (!currentImage || slicing) return;
+    setSlicing(true);
+    try {
+      const cleanTitle = (item?.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
+      await downloadImageSlices(currentImage, cleanTitle, 4000, item?.format || 'png');
+    } catch (err) {
+      console.error('Image slicing failed:', err);
+    } finally {
+      setSlicing(false);
+    }
+  };
+
   const zoomIn = () => setZoomLevel((z) => Math.min(z + 0.25, 3));
   const zoomOut = () => setZoomLevel((z) => Math.max(z - 0.25, 0.5));
   const resetZoom = () => setZoomLevel(1);
@@ -232,6 +248,17 @@ export const ImagePreviewModal: React.FC<Props> = ({
           >
             <FileText size={13} />
             <span>{exportingPdf ? 'Building…' : 'PDF'}</span>
+          </button>
+
+          {/* Slices Button (Anti-Squish multi-part export) */}
+          <button
+            onClick={handleDownloadSlices}
+            disabled={slicing}
+            className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
+            title="Split tall image into web-friendly parts (max 4,000px per part) so upload platforms don't squash it"
+          >
+            <Layers size={13} />
+            <span>{slicing ? 'Slicing…' : 'Slices'}</span>
           </button>
 
           {/* Extract Text / OCR Button (P2-9) */}

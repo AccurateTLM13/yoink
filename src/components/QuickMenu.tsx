@@ -33,6 +33,7 @@ interface Props {
   onUploadFiles?: (files: File[]) => void;
   delaySec?: number;
   onSetDelaySec?: (sec: number) => void;
+  optimalQualityMode?: boolean;
   historyCount: number;
   isCapturing: boolean;
   activeAction: string | null;
@@ -55,6 +56,7 @@ export const QuickMenu: React.FC<Props> = React.memo(({
   onUploadFiles,
   delaySec = 0,
   onSetDelaySec,
+  optimalQualityMode = false,
   historyCount,
   isCapturing,
   activeAction,
@@ -107,10 +109,21 @@ export const QuickMenu: React.FC<Props> = React.memo(({
               <ExternalLink size={10} className="text-zinc-500" />
             </button>
           )}
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide uppercase bg-blue-50 text-blue-700 border border-blue-200/60 font-mono">
-            <Sparkles size={10} className="text-blue-600" />
-            <span>v1.1</span>
-          </span>
+          {optimalQualityMode ? (
+            <button
+              onClick={onOpenOptions}
+              title="Optimal Quality Mode is Active (2x Retina, Lossless PNG, Anti-Squish)"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold tracking-wide uppercase bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-xs font-mono cursor-pointer"
+            >
+              <Sparkles size={10} className="text-amber-300" />
+              <span>Ultra HD</span>
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide uppercase bg-blue-50 text-blue-700 border border-blue-200/60 font-mono">
+              <Sparkles size={10} className="text-blue-600" />
+              <span>v1.2</span>
+            </span>
+          )}
         </div>
       </div>
 

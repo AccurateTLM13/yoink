@@ -21,6 +21,7 @@ const HANDLERS = {
   CONVERT_FORMAT: convertFormat,
   COPY_TO_CLIPBOARD: writeToClipboard,
   CAPTURE_DESKTOP_FRAME: captureDesktopFrame,
+  SLICE_IMAGE: sliceImageTask,
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -246,13 +247,52 @@ async function captureDesktopFrame({ streamId, settings }) {
 }
 
 // ---------------------------------------------------------------------------
-// Encoding helpers
+// Encoding helpers & Slicing
 // ---------------------------------------------------------------------------
 function encoding(settings) {
   const format = settings?.format;
   const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-  const qn = Number(settings?.quality);
+  let qn = Number(settings?.quality);
+  if (settings?.losslessWebp && format === 'webp') {
+    qn = 1.0;
+  }
   return { mime, q: Number.isFinite(qn) ? clamp(qn, 0.1, 1) : 0.92 };
+}
+
+async function sliceImageTask({ dataUrl, maxSliceHeight = 4000, settings }) {
+  const img = await loadBitmap(dataUrl);
+  try {
+    const w = img.width;
+    const h = img.height;
+    const limit = Math.max(500, Math.min(Number(maxSliceHeight) || 4000, 16000));
+    if (h <= limit) {
+      return { slices: [{ dataUrl, part: 1, total: 1 }] };
+    }
+    const slices = [];
+    const totalParts = Math.ceil(h / limit);
+    for (let part = 0; part < totalParts; part++) {
+      const y = part * limit;
+      const sliceHeight = Math.min(limit, h - y);
+      const canvas = new OffscreenCanvas(w, sliceHeight);
+      const ctx = canvas.getContext('2d');
+      if (settings?.format === 'jpeg') {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, sliceHeight);
+      }
+      ctx.drawImage(img, 0, y, w, sliceHeight, 0, 0, w, sliceHeight);
+      const { mime, q } = encoding(settings);
+      const blob = await canvas.convertToBlob({ type: mime, quality: q });
+      releaseCanvas(canvas);
+      slices.push({
+        dataUrl: await blobToDataUrl(blob),
+        part: part + 1,
+        total: totalParts,
+      });
+    }
+    return { slices };
+  } finally {
+    img.close?.();
+  }
 }
 
 async function encodeCanvas(canvas, settings) {

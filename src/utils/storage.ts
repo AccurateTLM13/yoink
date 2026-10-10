@@ -9,7 +9,36 @@ export const DEFAULT_SETTINGS: CaptureSettings = {
   copyToClipboard: false,
   filenameTemplate: '{title}_{date}_{time}',
   captureDelaySec: 0,
+  optimalQualityMode: false,
+  scaleFactor: 1,
+  autoSliceLongPages: false,
+  maxSliceHeight: 4000,
+  losslessWebp: false,
 };
+
+/**
+ * Optimal Quality Configuration Preset
+ * Automatically sets lossless PNG, 2x Retina scale, 900ms scroll delay,
+ * and anti-squish slicing for ultra-crisp results that won't be crushed by upload platforms.
+ */
+export const OPTIMAL_QUALITY_PRESET: Partial<CaptureSettings> = {
+  optimalQualityMode: true,
+  format: 'png',
+  scaleFactor: 2,
+  scrollDelayMs: 900,
+  autoSliceLongPages: true,
+  maxSliceHeight: 4000,
+  losslessWebp: true,
+  quality: 1.0,
+};
+
+export function applyOptimalQualityPreset(current: CaptureSettings): CaptureSettings {
+  return {
+    ...current,
+    ...OPTIMAL_QUALITY_PRESET,
+    scrollDelayMs: Math.max(current.scrollDelayMs || 600, 900),
+  };
+}
 
 const SETTINGS_KEY = 'omnicapture_settings';
 const HISTORY_KEY = 'omnicapture_history';

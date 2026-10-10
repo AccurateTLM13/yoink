@@ -2,6 +2,8 @@ import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS,
+  OPTIMAL_QUALITY_PRESET,
+  applyOptimalQualityPreset,
   getStoredSettings,
   saveStoredSettings,
   getStoredHistory,
@@ -159,6 +161,26 @@ describe('Storage Utilities', () => {
     assert.equal(retrieved.quality, 0.85);
     assert.equal(retrieved.scrollDelayMs, 900);
     assert.equal(retrieved.autoDownload, false);
+  });
+
+  test('applyOptimalQualityPreset configures lossless PNG, 2x Retina scale, and anti-squish slicing', () => {
+    const baseline: CaptureSettings = {
+      ...DEFAULT_SETTINGS,
+      format: 'webp',
+      quality: 0.8,
+      scrollDelayMs: 400,
+      scaleFactor: 1,
+      optimalQualityMode: false,
+    };
+
+    const optimal = applyOptimalQualityPreset(baseline);
+    assert.equal(optimal.optimalQualityMode, true);
+    assert.equal(optimal.format, 'png');
+    assert.equal(optimal.scaleFactor, 2);
+    assert.equal(optimal.autoSliceLongPages, true);
+    assert.equal(optimal.maxSliceHeight, 4000);
+    assert.equal(optimal.scrollDelayMs, 900);
+    assert.equal(optimal.losslessWebp, true);
   });
 
   test('history operations: add, retrieve, delete, and clear', async () => {

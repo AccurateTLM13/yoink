@@ -23,6 +23,11 @@ export interface CaptureSettings {
   copyToClipboard: boolean;
   filenameTemplate: string; // e.g. "omnicapture_{title}_{date}_{time}"
   captureDelaySec: number; // P1-6: countdown before visible / full page capture (0 = off)
+  optimalQualityMode?: boolean; // P2-10: Master toggle for maximum quality configuration
+  scaleFactor?: number; // 1, 1.5, or 2 (High-DPI / Retina capture)
+  autoSliceLongPages?: boolean; // Split tall captures into anti-squish chunks on download
+  maxSliceHeight?: number; // Max slice height in px (e.g. 4000)
+  losslessWebp?: boolean; // Lossless encoding for WebP
 }
 
 export interface HistoryItem {

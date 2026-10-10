@@ -12,7 +12,7 @@ import {
   ScanText,
 } from 'lucide-react';
 import { CaptureSettings, CaptureFormat } from '../types';
-import { DEFAULT_SETTINGS } from '../utils/storage';
+import { DEFAULT_SETTINGS, applyOptimalQualityPreset } from '../utils/storage';
 import { formatFilename } from '../utils/capture';
 
 interface Props {
@@ -40,6 +40,9 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
   const autoDownloadId = useId();
   const hideStickyId = useId();
   const clipboardId = useId();
+  const autoSliceId = useId();
+  const losslessWebpId = useId();
+  const optimalQualityId = useId();
 
   const handleSave = () => {
     onSave(form);
@@ -130,6 +133,77 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
 
       {/* Options Body */}
       <div className="flex-1 overflow-y-auto p-4 space-y-5 text-xs">
+        {/* Featured: Optimal Quality Mode */}
+        <div
+          className={`p-3.5 rounded-xl border transition-all ${
+            form.optimalQualityMode
+              ? 'bg-gradient-to-br from-blue-50/90 to-indigo-50/80 border-blue-300 shadow-xs'
+              : 'bg-white border-zinc-200/80 shadow-2xs'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                  form.optimalQualityMode ? 'bg-blue-600 text-white shadow-xs' : 'bg-zinc-100 text-zinc-600'
+                }`}
+              >
+                <Sparkles size={14} />
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-zinc-900 text-xs">
+                    Optimal Quality Mode (Ultra HD)
+                  </span>
+                  {form.optimalQualityMode && (
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold uppercase bg-blue-600 text-white tracking-wider">
+                      ACTIVE
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-600 leading-snug mt-0.5">
+                  Lossless PNG • 2x Retina Resolution • Anti-Squish Slicing (4,000px)
+                </p>
+              </div>
+            </div>
+
+            <label htmlFor={optimalQualityId} className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                id={optimalQualityId}
+                type="checkbox"
+                checked={!!form.optimalQualityMode}
+                onChange={(e) => {
+                  const active = e.target.checked;
+                  if (active) {
+                    setForm(applyOptimalQualityPreset(form));
+                  } else {
+                    setForm({ ...form, optimalQualityMode: false });
+                  }
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
+            </label>
+          </div>
+
+          {form.optimalQualityMode && (
+            <div className="mt-2.5 pt-2 border-t border-blue-200/60 flex flex-wrap gap-1.5">
+              <span className="px-2 py-0.5 rounded-md bg-blue-100/70 text-blue-800 font-mono text-[9.5px] font-medium">
+                ✓ Lossless PNG
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-indigo-100/70 text-indigo-800 font-mono text-[9.5px] font-medium">
+                ✓ 2x Retina Scale
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-emerald-100/70 text-emerald-800 font-mono text-[9.5px] font-medium">
+                ✓ Anti-Squish Slicing
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-purple-100/70 text-purple-800 font-mono text-[9.5px] font-medium">
+                ✓ 900ms Delay
+              </span>
+            </div>
+          )}
+        </div>
+
         {/* Section 1: Output Format */}
         <div className="space-y-2.5">
           <div className="flex items-center justify-between">
@@ -137,7 +211,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
               01 // Output Format & Quality
             </label>
             <span className="text-[10px] font-mono text-zinc-600 uppercase">
-              {form.format} • {form.format === 'png' ? 'Lossless' : `${Math.round(form.quality * 100)}%`}
+              {form.format} • {form.format === 'png' ? 'Lossless' : form.losslessWebp && form.format === 'webp' ? 'Lossless (100%)' : `${Math.round(form.quality * 100)}%`}
             </span>
           </div>
 
@@ -163,7 +237,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
               <div className="flex justify-between items-center text-xs">
                 <span className="font-medium text-zinc-700">Image Compression Level</span>
                 <span className="font-mono font-bold text-blue-600 tabular-nums">
-                  {Math.round(form.quality * 100)}%
+                  {form.losslessWebp && form.format === 'webp' ? '100% (Lossless)' : `${Math.round(form.quality * 100)}%`}
                 </span>
               </div>
               <input
@@ -171,15 +245,67 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 min="0.4"
                 max="1.0"
                 step="0.05"
-                value={form.quality}
+                disabled={form.losslessWebp && form.format === 'webp'}
+                value={form.losslessWebp && form.format === 'webp' ? 1.0 : form.quality}
                 onChange={(e) => setForm({ ...form, quality: parseFloat(e.target.value) })}
-                className="w-full h-1.5 bg-zinc-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                className="w-full h-1.5 bg-zinc-100 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-50"
               />
               <p className="text-[10px] text-zinc-600">
                 Balances image fidelity against storage and file transfer footprint.
               </p>
+
+              {form.format === 'webp' && (
+                <label htmlFor={losslessWebpId} className="flex items-center gap-2 pt-2 border-t border-zinc-100 cursor-pointer">
+                  <input
+                    id={losslessWebpId}
+                    type="checkbox"
+                    checked={!!form.losslessWebp}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        losslessWebp: e.target.checked,
+                        quality: e.target.checked ? 1.0 : form.quality,
+                      })
+                    }
+                    className="rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                  />
+                  <div>
+                    <span className="font-semibold text-zinc-800 block text-[11px]">Lossless WebP Encoding</span>
+                    <span className="text-[10px] text-zinc-500 block">Preserves sharp vector text without lossy DCT compression.</span>
+                  </div>
+                </label>
+              )}
             </div>
           )}
+
+          {/* Capture Scale Factor */}
+          <div className="bg-white p-3 rounded-xl border border-zinc-200/80 space-y-2 shadow-2xs">
+            <div className="flex justify-between items-center text-xs">
+              <span className="font-medium text-zinc-700">Capture Resolution & Scale</span>
+              <span className="font-mono font-bold text-blue-600">
+                {form.scaleFactor || 1}x {form.scaleFactor === 2 ? '• Ultra HD / Retina' : form.scaleFactor === 1.5 ? '• Crisp' : '• Standard'}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-1.5 p-1 bg-zinc-100 rounded-xl border border-zinc-200/80">
+              {[1, 1.5, 2].map((sc) => (
+                <button
+                  key={sc}
+                  type="button"
+                  onClick={() => setForm({ ...form, scaleFactor: sc })}
+                  className={`py-1.5 text-center rounded-lg font-semibold text-xs transition cursor-pointer ${
+                    (form.scaleFactor || 1) === sc
+                      ? 'bg-white text-blue-600 shadow-xs border border-zinc-200/60 font-bold'
+                      : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/50'
+                  }`}
+                >
+                  {sc}x {sc === 2 ? '(Retina)' : ''}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-zinc-600">
+              Renders webpage at higher pixel density before stitching, eliminating blurry text on 1080p and high-res screens.
+            </p>
+          </div>
         </div>
 
         {/* Section 2: Behavior & Automation */}
@@ -207,6 +333,49 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 </span>
               </div>
             </label>
+
+            {/* Anti-Squish Long Page Slicing */}
+            <div className="p-3 hover:bg-zinc-50/70 transition space-y-2">
+              <label htmlFor={autoSliceId} className="flex items-start gap-3 cursor-pointer">
+                <input
+                  id={autoSliceId}
+                  type="checkbox"
+                  checked={!!form.autoSliceLongPages}
+                  onChange={(e) => setForm({ ...form, autoSliceLongPages: e.target.checked })}
+                  className="mt-0.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                />
+                <div className="flex-1 min-w-0">
+                  <span className="font-semibold text-zinc-900 block leading-tight">
+                    Auto-Split Extremely Tall Pages (Anti-Squish)
+                  </span>
+                  <span className="text-[11px] text-zinc-600 block mt-0.5 leading-snug">
+                    Splits tall captures into multi-part files so Slack, Discord, Jira, and GitHub don't crush them into tiny unreadable strips.
+                  </span>
+                </div>
+              </label>
+
+              {form.autoSliceLongPages && (
+                <div className="pl-6 pt-1 flex items-center justify-between text-[11px]">
+                  <span className="text-zinc-600">Max Part Height:</span>
+                  <div className="flex items-center gap-1">
+                    {[3000, 4000, 6000].map((h) => (
+                      <button
+                        key={h}
+                        type="button"
+                        onClick={() => setForm({ ...form, maxSliceHeight: h })}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono transition cursor-pointer border ${
+                          (form.maxSliceHeight || 4000) === h
+                            ? 'bg-blue-50 text-blue-700 border-blue-300 font-bold'
+                            : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-100'
+                        }`}
+                      >
+                        {h}px {h === 4000 ? '★' : ''}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* Hide Sticky Elements */}
             <label htmlFor={hideStickyId} className="flex items-start gap-3 p-3 hover:bg-zinc-50/70 transition cursor-pointer">

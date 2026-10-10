@@ -27,6 +27,11 @@ const DEFAULT_SETTINGS = Object.freeze({
   copyToClipboard: false,
   filenameTemplate: '{title}_{date}_{time}',
   captureDelaySec: 0,
+  optimalQualityMode: false,
+  scaleFactor: 1,
+  autoSliceLongPages: false,
+  maxSliceHeight: 4000,
+  losslessWebp: false,
 });
 
 // ---------------------------------------------------------------------------
@@ -293,10 +298,31 @@ async function handleCaptureFullPage({ tabId, settings }) {
   await runCaptureCountdown(s.captureDelaySec);
   await injectContentScript(tab.id);
   ensureOffscreen().catch(() => {});
-  await chrome.tabs.sendMessage(tab.id, {
-    action: 'START_SCROLL_CAPTURE',
-    payload: { scrollDelay: s.scrollDelayMs, hideSticky: s.hideStickyElements },
-  });
+
+  let originalZoom = null;
+  if (s.scaleFactor && s.scaleFactor > 1) {
+    try {
+      originalZoom = (await chrome.tabs.getZoom(tab.id)) || 1;
+      await chrome.tabs.setZoom(tab.id, originalZoom * s.scaleFactor);
+      await sleep(250);
+    } catch (e) {
+      console.warn('Could not set zoom for high-DPI capture:', e);
+    }
+  }
+
+  scrollSessions.set(tab.id, { dataUrls: [], originalZoom });
+
+  try {
+    await chrome.tabs.sendMessage(tab.id, {
+      action: 'START_SCROLL_CAPTURE',
+      payload: { scrollDelay: s.scrollDelayMs, hideSticky: s.hideStickyElements },
+    });
+  } catch (err) {
+    if (originalZoom != null) {
+      chrome.tabs.setZoom(tab.id, originalZoom).catch(() => {});
+    }
+    throw err;
+  }
   return { success: true };
 }
 
@@ -306,7 +332,10 @@ async function handleCaptureFullPage({ tabId, settings }) {
 async function handleChunkCapture(payload, sender) {
   const tabId = sender.tab.id;
   const index = Math.max(0, Math.floor(Number(payload.index) || 0));
-  if (index === 0) scrollSessions.set(tabId, { dataUrls: [] });
+  if (index === 0) {
+    const existing = scrollSessions.get(tabId);
+    scrollSessions.set(tabId, { dataUrls: [], originalZoom: existing?.originalZoom ?? null });
+  }
 
   const session = scrollSessions.get(tabId);
   if (!session) throw new Error('No active scroll session');
@@ -322,6 +351,10 @@ function handleFinalizeStitching(payload, sender, kind) {
   const tabId = sender.tab.id;
   const session = scrollSessions.get(tabId);
   scrollSessions.delete(tabId);
+
+  if (session?.originalZoom != null) {
+    chrome.tabs.setZoom(tabId, session.originalZoom).catch(() => {});
+  }
 
   runPipeline(kind, async () => {
     if (!session || session.dataUrls.length === 0) throw new Error('No image chunks received for stitching');
@@ -433,7 +466,30 @@ async function finishCapture(o) {
       width,
       height
     );
-    await downloadSafe(item.dataUrl, filename);
+
+    if (s.autoSliceLongPages && o.mode === 'full' && height > (s.maxSliceHeight || 4000)) {
+      try {
+        const sliceRes = await callOffscreen('SLICE_IMAGE', {
+          dataUrl: item.dataUrl,
+          maxSliceHeight: s.maxSliceHeight || 4000,
+          settings: s,
+        });
+        if (sliceRes && Array.isArray(sliceRes.slices) && sliceRes.slices.length > 1) {
+          for (const slice of sliceRes.slices) {
+            const partFn = filename.replace(/(\.[a-z0-9]+)$/i, `_part${slice.part}_of_${slice.total}$1`);
+            await downloadSafe(slice.dataUrl, partFn);
+            await sleep(150);
+          }
+        } else {
+          await downloadSafe(item.dataUrl, filename);
+        }
+      } catch (err) {
+        console.warn('Auto-slice download failed, falling back to full image download:', err);
+        await downloadSafe(item.dataUrl, filename);
+      }
+    } else {
+      await downloadSafe(item.dataUrl, filename);
+    }
   }
 
   if (s.copyToClipboard && !o.skipClipboard) {
@@ -749,6 +805,11 @@ function sanitizeSettings(raw) {
         ? s.filenameTemplate.slice(0, 120)
         : DEFAULT_SETTINGS.filenameTemplate,
     captureDelaySec: Math.round(clampNum(s.captureDelaySec, 0, 30, 0)),
+    optimalQualityMode: s.optimalQualityMode === true,
+    scaleFactor: [1, 1.5, 2, 3].includes(Number(s.scaleFactor)) ? Number(s.scaleFactor) : 1,
+    autoSliceLongPages: s.autoSliceLongPages === true,
+    maxSliceHeight: Math.round(clampNum(s.maxSliceHeight, 1000, 10000, 4000)),
+    losslessWebp: s.losslessWebp === true,
   };
 }
 

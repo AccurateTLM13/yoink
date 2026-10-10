@@ -867,14 +867,20 @@ export default function App() {
 
                 {/* Storage & Engine Info Footer */}
                 <div className="p-4 bg-zinc-50 rounded-xl border border-zinc-200/80 flex items-center justify-between text-xs font-mono text-zinc-600">
-                  <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-3 sm:gap-4 flex-wrap">
+                    {settings.optimalQualityMode && (
+                      <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 font-bold font-mono text-[10px] uppercase border border-blue-200">
+                        ✨ Optimal HD (2x)
+                      </span>
+                    )}
                     <span>Format: <b className="text-zinc-900 uppercase">{settings.format}</b></span>
-                    <span>Quality: <b className="text-zinc-900">{Math.round(settings.quality * 100)}%</b></span>
+                    <span>Scale: <b className="text-zinc-900">{settings.scaleFactor || 1}x</b></span>
+                    <span>Quality: <b className="text-zinc-900">{settings.losslessWebp && settings.format === 'webp' ? 'Lossless' : `${Math.round(settings.quality * 100)}%`}</b></span>
                     <span>Auto-Download: <b className="text-zinc-900">{settings.autoDownload ? 'ON' : 'OFF'}</b></span>
                   </div>
                   <button
                     onClick={() => setView('options')}
-                    className="text-blue-600 hover:text-blue-700 font-semibold cursor-pointer"
+                    className="text-blue-600 hover:text-blue-700 font-semibold cursor-pointer shrink-0"
                   >
                     Adjust Settings &rarr;
                   </button>
@@ -951,6 +957,7 @@ export default function App() {
             onUploadFiles={handleImportFiles}
             delaySec={settings.captureDelaySec}
             onSetDelaySec={(sec) => handleSaveSettings({ ...settings, captureDelaySec: sec })}
+            optimalQualityMode={settings.optimalQualityMode}
             historyCount={history.length}
             isCapturing={isCapturing}
             activeAction={statusMessage}
