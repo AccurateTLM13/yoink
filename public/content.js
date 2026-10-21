@@ -1,3 +1,4 @@
+/* jshint esversion: 11, expr: true */
 // content.js - Yoink Content Script
 
 (function () {
