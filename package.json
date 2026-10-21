@@ -18,6 +18,9 @@
     "react": "^19.0.1",
     "react-dom": "^19.0.1"
   },
+  "overrides": {
+    "source-map-js": "1.2.2"
+  },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.14",
     "@types/chrome": "^0.2.7",
@@ -26,6 +29,6 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.4.4"
   }
 }
