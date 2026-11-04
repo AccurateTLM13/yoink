@@ -12,6 +12,7 @@ const EXT_ORIGIN = chrome.runtime.getURL('');
 const IDLE_ALARM = 'yoink-offscreen-idle';
 const HISTORY_KEY = 'omnicapture_history';
 const SETTINGS_KEY = 'omnicapture_settings';
+const PROOF_IDENTITY_KEY = 'yoink_proof_identity';
 const FULL_PREFIX = 'yoink_full_';
 const MAX_HISTORY = 40;
 const MAX_CHUNKS = 80;
@@ -32,6 +33,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   autoSliceLongPages: false,
   maxSliceHeight: 4000,
   losslessWebp: false,
+  enableProof: true,
+  proofAuthor: '',
+  proofVisualStamp: false,
 });
 
 // ---------------------------------------------------------------------------
@@ -201,14 +205,10 @@ function captureVisible(windowId, options) {
   return p;
 }
 
-async function captureAndEncode(windowId, settings) {
-  if (settings.format === 'jpeg') {
-    return captureVisible(windowId, { format: 'jpeg', quality: Math.round(settings.quality * 100) });
-  }
+async function captureAndEncode(windowId, settings, meta = {}) {
   const png = await captureVisible(windowId, { format: 'png' });
-  if (settings.format !== 'webp') return png;
-  const res = await callOffscreen('CONVERT_FORMAT', { dataUrl: png, format: 'webp', quality: settings.quality });
-  return res.dataUrl;
+  const proofContext = await buildProofContext(settings, meta.url, meta.title);
+  return callOffscreen('PROCESS_CAPTURE', { dataUrl: png, settings, proofContext });
 }
 
 // ---------------------------------------------------------------------------
@@ -245,16 +245,18 @@ async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings 
     }
   }
 
-  const dataUrl = await withJob(() => captureAndEncode(winId, s));
+  const encoded = await withJob(() =>
+    captureAndEncode(winId, s, { title: tabTitle || 'Visible Viewport', url: tabUrl || '' })
+  );
   const item = await finishCapture({
-    dataUrl,
+    ...encoded,
     mode: 'visible',
     idPrefix: 'vis',
     title: tabTitle || 'Visible Viewport',
     url: tabUrl,
     settings: s,
   });
-  return { success: true, dataUrl, item };
+  return { success: true, dataUrl: encoded.dataUrl, item };
 }
 
 // ---------------------------------------------------------------------------
@@ -273,8 +275,10 @@ async function injectContentScript(tabId) {
   await chrome.scripting.executeScript({ target: { tabId, allFrames: false }, files: ['content.js'] });
 }
 
-async function handleCaptureSelectionStart({ tabId }) {
+async function handleCaptureSelectionStart({ tabId, settings }) {
   const tab = await getInjectableTab(tabId, 'Selection capture');
+  const s = await getSettings(settings);
+  scrollSessions.set(tab.id, { dataUrls: [], originalZoom: null, settings: s });
   await injectContentScript(tab.id);
   await chrome.tabs.sendMessage(tab.id, { action: 'START_SELECTION_CAPTURE' });
   return { success: true };
@@ -283,6 +287,7 @@ async function handleCaptureSelectionStart({ tabId }) {
 async function handleCaptureElementScrollStart({ tabId, settings }) {
   const tab = await getInjectableTab(tabId, 'Scrolling element capture');
   const s = await getSettings(settings);
+  scrollSessions.set(tab.id, { dataUrls: [], originalZoom: null, settings: s });
   await injectContentScript(tab.id);
   ensureOffscreen().catch(() => {});
   await chrome.tabs.sendMessage(tab.id, {
@@ -310,7 +315,7 @@ async function handleCaptureFullPage({ tabId, settings }) {
     }
   }
 
-  scrollSessions.set(tab.id, { dataUrls: [], originalZoom });
+  scrollSessions.set(tab.id, { dataUrls: [], originalZoom, settings: s });
 
   try {
     await chrome.tabs.sendMessage(tab.id, {
@@ -334,7 +339,11 @@ async function handleChunkCapture(payload, sender) {
   const index = Math.max(0, Math.floor(Number(payload.index) || 0));
   if (index === 0) {
     const existing = scrollSessions.get(tabId);
-    scrollSessions.set(tabId, { dataUrls: [], originalZoom: existing?.originalZoom ?? null });
+    scrollSessions.set(tabId, {
+      dataUrls: [],
+      originalZoom: existing?.originalZoom ?? null,
+      settings: existing?.settings ?? null,
+    });
   }
 
   const session = scrollSessions.get(tabId);
@@ -358,9 +367,14 @@ function handleFinalizeStitching(payload, sender, kind) {
 
   runPipeline(kind, async () => {
     if (!session || session.dataUrls.length === 0) throw new Error('No image chunks received for stitching');
-    const s = await getSettings();
+    const s = await getSettings(session.settings);
     const meta = Array.isArray(payload.chunks) ? payload.chunks : [];
     const jobId = crypto.randomUUID();
+
+    const fallbackTitle = kind === 'element' ? 'Scrolling Element Capture' : 'Full Page Capture';
+    const capTitle = str(payload.title, 200) || fallbackTitle;
+    const capUrl = sender.url || sender.tab.url || '';
+    const proofContext = await buildProofContext(s, capUrl, capTitle);
 
     const result = await withJob(async () => {
       await callOffscreen('STITCH_BEGIN', {
@@ -371,6 +385,7 @@ function handleFinalizeStitching(payload, sender, kind) {
         dpr: num(payload.dpr, 1),
         cropRect: kind === 'element' ? sanitizeRect(payload.cropRect) : null,
         settings: s,
+        proofContext,
       });
       for (const m of meta) {
         const i = Math.floor(Number(m?.index));
@@ -382,12 +397,11 @@ function handleFinalizeStitching(payload, sender, kind) {
       return callOffscreen('STITCH_END', { jobId });
     });
 
-    const fallbackTitle = kind === 'element' ? 'Scrolling Element Capture' : 'Full Page Capture';
     await finishCapture({
       ...result,
       mode: kind,
-      title: str(payload.title, 200) || fallbackTitle,
-      url: sender.url || sender.tab.url,
+      title: capTitle,
+      url: capUrl,
       settings: s,
     });
   });
@@ -399,18 +413,31 @@ function handleCaptureSelectionFinish(payload, sender) {
   const rect = sanitizeRect(payload);
   if (!rect) throw new Error('Invalid selection bounds');
 
+  const tabId = sender.tab.id;
+  const session = scrollSessions.get(tabId);
+  scrollSessions.delete(tabId);
+
   runPipeline('selection', async () => {
-    const s = await getSettings();
+    const s = await getSettings(session?.settings);
+    const capTitle = str(payload.title, 200) || sender.tab.title || 'Selection Capture';
+    const capUrl = sender.url || sender.tab.url || '';
+    const proofContext = await buildProofContext(s, capUrl, capTitle);
     const raw = await captureVisible(sender.tab.windowId, { format: 'png' });
     // Build the payload explicitly. Never spread untrusted input over trusted fields.
     const result = await withJob(() =>
-      callOffscreen('CROP_SELECTION', { dataUrl: raw, ...rect, dpr: num(payload.dpr, 1), settings: s })
+      callOffscreen('CROP_SELECTION', {
+        dataUrl: raw,
+        ...rect,
+        dpr: num(payload.dpr, 1),
+        settings: s,
+        proofContext,
+      })
     );
     await finishCapture({
       ...result,
       mode: 'selection',
-      title: str(payload.title, 200) || sender.tab.title || 'Selection Capture',
-      url: sender.url || sender.tab.url,
+      title: capTitle,
+      url: capUrl,
       settings: s,
     });
   });
@@ -452,6 +479,8 @@ async function finishCapture(o) {
     height,
     mode: o.mode,
     format: s.format,
+    proofKeyId: o.proofKeyId || undefined,
+    proofSigned: o.proofSigned === true,
   };
 
   await saveHistoryItem(item);
@@ -469,10 +498,12 @@ async function finishCapture(o) {
 
     if (s.autoSliceLongPages && o.mode === 'full' && height > (s.maxSliceHeight || 4000)) {
       try {
+        const sliceProofContext = await buildProofContext(s, item.url, item.title);
         const sliceRes = await callOffscreen('SLICE_IMAGE', {
           dataUrl: item.dataUrl,
           maxSliceHeight: s.maxSliceHeight || 4000,
           settings: s,
+          proofContext: sliceProofContext,
         });
         if (sliceRes && Array.isArray(sliceRes.slices) && sliceRes.slices.length > 1) {
           for (const slice of sliceRes.slices) {
@@ -539,7 +570,10 @@ async function handleDesktopCapture({ settings }) {
     });
   });
 
-  const frame = await withJob(() => callOffscreen('CAPTURE_DESKTOP_FRAME', { streamId, settings: s }));
+  const proofContext = await buildProofContext(s, 'desktop://display', 'Desktop Screen Capture');
+  const frame = await withJob(() =>
+    callOffscreen('CAPTURE_DESKTOP_FRAME', { streamId, settings: s, proofContext })
+  );
   return finishCapture({
     ...frame,
     mode: 'desktop',
@@ -615,9 +649,11 @@ async function handleCaptureAllTabs({ settings }) {
         await chrome.tabs.update(tab.id, { active: true });
         if (tab.discarded || tab.status !== 'complete') await waitForTabComplete(tab.id, 15000);
         await sleep(600);
-        const dataUrl = await withJob(() => captureAndEncode(tab.windowId, s));
+        const encoded = await withJob(() =>
+          captureAndEncode(tab.windowId, s, { title: tab.title || 'Tab Capture', url: tab.url || '' })
+        );
         const item = await finishCapture({
-          dataUrl,
+          ...encoded,
           mode: 'alltabs',
           idPrefix: 'tab',
           downloadMode: 'tab',
@@ -663,9 +699,11 @@ async function handleCaptureUrlList({ urls, settings, delayMs }) {
       if (tabId) await waitForTabComplete(tabId, 15000);
       await sleep(hydrationDelay);
 
-      const dataUrl = await withJob(() => captureAndEncode(win.id, s));
+      const encoded = await withJob(() =>
+        captureAndEncode(win.id, s, { title: `URL Capture ${i + 1}`, url })
+      );
       const item = await finishCapture({
-        dataUrl,
+        ...encoded,
         mode: 'urllist',
         idPrefix: 'url',
         title: `URL Capture ${i + 1}`,
@@ -734,16 +772,18 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
       }
 
       try {
-        const dataUrl = await withJob(() => captureAndEncode(win.id, s));
+        const encoded = await withJob(() =>
+          captureAndEncode(win.id, s, { title: `Responsive ${label}`, url: target })
+        );
         const item = await finishCapture({
-          dataUrl,
+          ...encoded,
           mode: 'multisize',
           idPrefix: 'ms',
           title: `Responsive ${label}`,
           filenameTitle: `${res.name || 'responsive'}_${res.width}x${res.height}`,
           url: target,
-          width: res.width,
-          height: res.height,
+          width: encoded.width || res.width,
+          height: encoded.height || res.height,
           settings: s,
           silent: true,
           skipClipboard: true,
@@ -782,13 +822,29 @@ async function runCaptureCountdown(seconds) {
 // Settings (validated)
 // ---------------------------------------------------------------------------
 async function getSettings(override) {
-  if (override && typeof override === 'object') return sanitizeSettings(override);
+  let stored = null;
   try {
-    const res = await chrome.storage.sync.get(SETTINGS_KEY);
-    return sanitizeSettings(res?.[SETTINGS_KEY]);
-  } catch {
-    return { ...DEFAULT_SETTINGS };
+    const localRes = await chrome.storage.local.get(SETTINGS_KEY);
+    if (localRes?.[SETTINGS_KEY] && typeof localRes[SETTINGS_KEY] === 'object') {
+      stored = localRes[SETTINGS_KEY];
+    }
+  } catch {}
+  if (!stored) {
+    try {
+      const syncRes = await chrome.storage.sync.get(SETTINGS_KEY);
+      if (syncRes?.[SETTINGS_KEY] && typeof syncRes[SETTINGS_KEY] === 'object') {
+        stored = syncRes[SETTINGS_KEY];
+      }
+    } catch {}
   }
+  const merged = {
+    ...(stored || {}),
+    ...(override && typeof override === 'object' ? override : {}),
+  };
+  if (stored?.proofAuthor && !merged.proofAuthor) {
+    merged.proofAuthor = stored.proofAuthor;
+  }
+  return sanitizeSettings(merged);
 }
 
 function sanitizeSettings(raw) {
@@ -810,7 +866,74 @@ function sanitizeSettings(raw) {
     autoSliceLongPages: s.autoSliceLongPages === true,
     maxSliceHeight: Math.round(clampNum(s.maxSliceHeight, 1000, 10000, 4000)),
     losslessWebp: s.losslessWebp === true,
+    enableProof: s.enableProof !== false,
+    proofAuthor: typeof s.proofAuthor === 'string' ? s.proofAuthor.trim().slice(0, 60) : '',
+    proofVisualStamp: s.proofVisualStamp === true,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Yoink Proof™ Cryptographic Identity (ECDSA P-256)
+// ---------------------------------------------------------------------------
+let cachedProofIdentity = null;
+
+async function getOrCreateProofIdentity() {
+  if (cachedProofIdentity) return cachedProofIdentity;
+  try {
+    const res = await chrome.storage.local.get(PROOF_IDENTITY_KEY);
+    const stored = res?.[PROOF_IDENTITY_KEY];
+    if (stored?.keyFingerprint && stored?.privateKeyJwk && stored?.pubRawB64Url) {
+      cachedProofIdentity = stored;
+      return stored;
+    }
+  } catch {}
+
+  const keyPair = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify']
+  );
+  const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
+  const pubRawBytes = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey));
+  const hashBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', pubRawBytes));
+  const hex = Array.from(hashBytes.slice(0, 6))
+    .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
+    .join('');
+  const keyFingerprint = `${hex.slice(0, 4)}-${hex.slice(4, 8)}-${hex.slice(8, 12)}`;
+
+  let binary = '';
+  for (let i = 0; i < pubRawBytes.length; i++) binary += String.fromCharCode(pubRawBytes[i]);
+  const pubRawB64Url = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const identity = {
+    keyFingerprint,
+    pubRawB64Url,
+    publicKeyJwk,
+    privateKeyJwk,
+    createdAt: Date.now(),
+  };
+  cachedProofIdentity = identity;
+  await chrome.storage.local.set({ [PROOF_IDENTITY_KEY]: identity }).catch(() => {});
+  return identity;
+}
+
+async function buildProofContext(settings, url, title) {
+  if (settings.enableProof === false && !settings.proofVisualStamp) {
+    return null;
+  }
+  try {
+    const identity = await getOrCreateProofIdentity();
+    return {
+      identity,
+      url: String(url || ''),
+      title: String(title || 'Screenshot'),
+      author: settings.proofAuthor || '',
+    };
+  } catch (err) {
+    console.warn('Could not build proof context:', err);
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------

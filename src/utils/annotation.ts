@@ -1,4 +1,5 @@
 import { AnnotationItem, AnnotationTool } from '../types';
+import { applyProofToCanvasAndEncode } from './proof';
 
 /**
  * Draws an arrow from (startX, startY) to (endX, endY) with an arrowhead.
@@ -425,15 +426,22 @@ export async function createAnnotatedComposite(
       // Render annotations
       renderAnnotations(ctx, annotations, canvas);
 
-      const mime =
-        format === 'jpeg'
-          ? 'image/jpeg'
-          : format === 'webp'
-          ? 'image/webp'
-          : 'image/png';
-      const dataUrl = canvas.toDataURL(mime, quality);
-
-      resolve({ dataUrl, width, height });
+      applyProofToCanvasAndEncode(canvas, {
+        format,
+        quality,
+        title: 'Annotated Screenshot',
+        url: 'yoink://annotated',
+      })
+        .then((res) => resolve({ dataUrl: res.dataUrl, width: res.width, height: res.height }))
+        .catch(() => {
+          const mime =
+            format === 'jpeg'
+              ? 'image/jpeg'
+              : format === 'webp'
+              ? 'image/webp'
+              : 'image/png';
+          resolve({ dataUrl: canvas.toDataURL(mime, quality), width, height });
+        });
     };
 
     img.onerror = () => reject(new Error('Failed to load base image for compositing'));

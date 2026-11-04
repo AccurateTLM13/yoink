@@ -1,24 +1,25 @@
-import React, { useState, useId } from 'react';
+import React, { useState, useId, useEffect, useRef } from 'react';
 import {
   ChevronLeft,
   Save,
   Check,
   RotateCcw,
   Sparkles,
-  Sliders,
   Keyboard,
-  FileCode,
-  Zap,
   ScanText,
+  ShieldCheck,
+  Key,
 } from 'lucide-react';
 import { CaptureSettings, CaptureFormat } from '../types';
 import { DEFAULT_SETTINGS, applyOptimalQualityPreset } from '../utils/storage';
 import { formatFilename } from '../utils/capture';
+import { getOrCreateProofIdentity } from '../utils/proof';
 
 interface Props {
   settings: CaptureSettings;
   onBack: () => void;
   onSave: (newSettings: CaptureSettings) => void;
+  onOpenVerify?: () => void;
 }
 
 const AVAILABLE_TOKENS = [
@@ -33,10 +34,22 @@ const AVAILABLE_TOKENS = [
 
 const DELAY_OPTIONS = [0, 3, 5, 10];
 
-export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, onSave }) => {
+export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, onSave, onOpenVerify }) => {
+  const [keyFingerprint, setKeyFingerprint] = useState<string>('');
+  const enableProofId = useId();
+  const visualStampId = useId();
+
+  useEffect(() => {
+    getOrCreateProofIdentity()
+      .then((id) => setKeyFingerprint(id.keyFingerprint))
+      .catch(() => {});
+  }, []);
+
   const [form, setForm] = useState<CaptureSettings>({ ...settings });
   const [saved, setSaved] = useState(false);
   const [resetConfirm, setResetConfirm] = useState(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const autoDownloadId = useId();
   const hideStickyId = useId();
   const clipboardId = useId();
@@ -44,25 +57,54 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
   const losslessWebpId = useId();
   const optimalQualityId = useId();
 
+  // Keep local form synced if parent settings change externally
+  useEffect(() => {
+    setForm((prev) => ({ ...prev, ...settings }));
+  }, [settings]);
+
+  const triggerSavedBadge = () => {
+    setSaved(true);
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => setSaved(false), 1600);
+  };
+
+  // Auto-save every change immediately so clicking outside the popup or switching tabs never loses edits
+  const updateForm = (patch: Partial<CaptureSettings>) => {
+    setForm((prev) => {
+      const next = { ...prev, ...patch };
+      onSave(next);
+      return next;
+    });
+    triggerSavedBadge();
+  };
+
   const handleSave = () => {
     onSave(form);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1800);
+    triggerSavedBadge();
+  };
+
+  const handleBack = () => {
+    onSave(form);
+    onBack();
+  };
+
+  const handleOpenVerifyClick = () => {
+    onSave(form);
+    if (onOpenVerify) onOpenVerify();
   };
 
   const handleReset = () => {
-    setForm({ ...DEFAULT_SETTINGS });
-    onSave({ ...DEFAULT_SETTINGS });
+    const defaults = { ...DEFAULT_SETTINGS };
+    setForm(defaults);
+    onSave(defaults);
     setResetConfirm(false);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1800);
+    triggerSavedBadge();
   };
 
   const insertToken = (token: string) => {
     if (form.filenameTemplate.includes(token)) return;
     const separator = form.filenameTemplate.endsWith('_') || form.filenameTemplate.length === 0 ? '' : '_';
-    setForm({
-      ...form,
+    updateForm({
       filenameTemplate: `${form.filenameTemplate}${separator}${token}`,
     });
   };
@@ -82,7 +124,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
       {/* Header */}
       <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-200/80 bg-white/90 backdrop-blur-xs">
         <button
-          onClick={onBack}
+          onClick={handleBack}
           className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 hover:text-zinc-950 transition cursor-pointer px-1 py-1 rounded hover:bg-zinc-100"
         >
           <ChevronLeft size={16} />
@@ -103,7 +145,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
             className="flex items-center gap-1 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold shadow-xs transition cursor-pointer active:scale-95"
           >
             {saved ? <Check size={13} className="text-white" /> : <Save size={13} />}
-            <span>{saved ? 'Saved!' : 'Save'}</span>
+            <span>{saved ? 'Auto-Saved!' : 'Save'}</span>
           </button>
         </div>
       </div>
@@ -175,9 +217,12 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 onChange={(e) => {
                   const active = e.target.checked;
                   if (active) {
-                    setForm(applyOptimalQualityPreset(form));
+                    const preset = applyOptimalQualityPreset(form);
+                    setForm(preset);
+                    onSave(preset);
+                    triggerSavedBadge();
                   } else {
-                    setForm({ ...form, optimalQualityMode: false });
+                    updateForm({ optimalQualityMode: false });
                   }
                 }}
                 className="sr-only peer"
@@ -204,6 +249,117 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
           )}
         </div>
 
+        {/* Yoink Proof™: Authenticity & Anti-AI Provenance */}
+        <div
+          className={`p-3.5 rounded-xl border transition-all space-y-3 ${
+            form.enableProof !== false
+              ? 'bg-gradient-to-br from-emerald-50/90 to-teal-50/70 border-emerald-300 shadow-xs'
+              : 'bg-white border-zinc-200/80 shadow-2xs'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                  form.enableProof !== false
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-zinc-100 text-zinc-600'
+                }`}
+              >
+                <ShieldCheck size={14} />
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-zinc-900 text-xs">
+                    Yoink Proof™ (Anti-AI & Ownership Seal)
+                  </span>
+                  {form.enableProof !== false && (
+                    <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold uppercase bg-emerald-600 text-white tracking-wider">
+                      SIGNED
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-600 leading-snug mt-0.5">
+                  IPTC screenCapture • ECDSA P-256 Signature • Invisible Pixel Watermark
+                </p>
+              </div>
+            </div>
+
+            <label htmlFor={enableProofId} className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                id={enableProofId}
+                type="checkbox"
+                checked={form.enableProof !== false}
+                onChange={(e) => updateForm({ enableProof: e.target.checked })}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
+            </label>
+          </div>
+
+          <div className="pt-2 border-t border-emerald-200/70 space-y-2.5">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[10.5px] font-semibold text-zinc-800">
+                  Creator / Owner Handle (Sealed in Cryptographic Proof)
+                </label>
+                {form.proofAuthor && (
+                  <span className="text-[9.5px] font-mono text-emerald-700 font-semibold">
+                    ✓ Saved ({form.proofAuthor})
+                  </span>
+                )}
+              </div>
+              <input
+                type="text"
+                value={form.proofAuthor || ''}
+                onChange={(e) => updateForm({ proofAuthor: e.target.value })}
+                onBlur={() => onSave(form)}
+                placeholder="@yourhandle or name (auto-saves as you type)"
+                maxLength={60}
+                className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-zinc-200 rounded-lg focus:outline-none focus:border-emerald-500 text-zinc-900 select-text"
+              />
+            </div>
+
+            <label
+              htmlFor={visualStampId}
+              className="flex items-start gap-2.5 p-2 rounded-lg bg-white/80 border border-zinc-200/80 cursor-pointer hover:bg-white transition"
+            >
+              <input
+                id={visualStampId}
+                type="checkbox"
+                checked={!!form.proofVisualStamp}
+                onChange={(e) => updateForm({ proofVisualStamp: e.target.checked })}
+                className="mt-0.5 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+              />
+              <div className="flex-1 min-w-0">
+                <span className="font-semibold text-zinc-900 block text-[11px] leading-tight">
+                  &ldquo;Receipt Mode&rdquo; Visual Provenance Footer
+                </span>
+                <span className="text-[10px] text-zinc-600 block mt-0.5 leading-snug">
+                  Renders a sleek footer bar on the screenshot showing URL, UTC timestamp, and your Key ID.
+                </span>
+              </div>
+            </label>
+
+            <div className="flex items-center justify-between gap-2 pt-0.5 text-[10.5px]">
+              <div className="flex items-center gap-1.5 font-mono text-zinc-700 truncate">
+                <Key size={11} className="text-emerald-600 shrink-0" />
+                <span>Key ID:</span>
+                <b className="text-emerald-800">#{keyFingerprint || 'Generating…'}</b>
+              </div>
+              {onOpenVerify && (
+                <button
+                  type="button"
+                  onClick={handleOpenVerifyClick}
+                  className="px-2 py-0.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-[10px] transition cursor-pointer shrink-0"
+                >
+                  Open Proof Inspector →
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
         {/* Section 1: Output Format */}
         <div className="space-y-2.5">
           <div className="flex items-center justify-between">
@@ -220,7 +376,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
               <button
                 key={fmt}
                 type="button"
-                onClick={() => setForm({ ...form, format: fmt })}
+                onClick={() => updateForm({ format: fmt })}
                 className={`py-1.5 px-2 text-center rounded-lg font-semibold uppercase text-xs transition cursor-pointer ${
                   form.format === fmt
                     ? 'bg-white text-blue-600 shadow-xs border border-zinc-200/60 font-bold'
@@ -247,7 +403,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 step="0.05"
                 disabled={form.losslessWebp && form.format === 'webp'}
                 value={form.losslessWebp && form.format === 'webp' ? 1.0 : form.quality}
-                onChange={(e) => setForm({ ...form, quality: parseFloat(e.target.value) })}
+                onChange={(e) => updateForm({ quality: parseFloat(e.target.value) })}
                 className="w-full h-1.5 bg-zinc-100 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-50"
               />
               <p className="text-[10px] text-zinc-600">
@@ -261,8 +417,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                     type="checkbox"
                     checked={!!form.losslessWebp}
                     onChange={(e) =>
-                      setForm({
-                        ...form,
+                      updateForm({
                         losslessWebp: e.target.checked,
                         quality: e.target.checked ? 1.0 : form.quality,
                       })
@@ -291,7 +446,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 <button
                   key={sc}
                   type="button"
-                  onClick={() => setForm({ ...form, scaleFactor: sc })}
+                  onClick={() => updateForm({ scaleFactor: sc })}
                   className={`py-1.5 text-center rounded-lg font-semibold text-xs transition cursor-pointer ${
                     (form.scaleFactor || 1) === sc
                       ? 'bg-white text-blue-600 shadow-xs border border-zinc-200/60 font-bold'
@@ -321,7 +476,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 id={autoDownloadId}
                 type="checkbox"
                 checked={form.autoDownload}
-                onChange={(e) => setForm({ ...form, autoDownload: e.target.checked })}
+                onChange={(e) => updateForm({ autoDownload: e.target.checked })}
                 className="mt-0.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
               />
               <div className="flex-1 min-w-0">
@@ -341,7 +496,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                   id={autoSliceId}
                   type="checkbox"
                   checked={!!form.autoSliceLongPages}
-                  onChange={(e) => setForm({ ...form, autoSliceLongPages: e.target.checked })}
+                  onChange={(e) => updateForm({ autoSliceLongPages: e.target.checked })}
                   className="mt-0.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
                 />
                 <div className="flex-1 min-w-0">
@@ -349,7 +504,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                     Auto-Split Extremely Tall Pages (Anti-Squish)
                   </span>
                   <span className="text-[11px] text-zinc-600 block mt-0.5 leading-snug">
-                    Splits tall captures into multi-part files so Slack, Discord, Jira, and GitHub don't crush them into tiny unreadable strips.
+                    Splits tall captures into multi-part files so Slack, Discord, Jira, and GitHub don&apos;t crush them into tiny unreadable strips.
                   </span>
                 </div>
               </label>
@@ -362,7 +517,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                       <button
                         key={h}
                         type="button"
-                        onClick={() => setForm({ ...form, maxSliceHeight: h })}
+                        onClick={() => updateForm({ maxSliceHeight: h })}
                         className={`px-2 py-0.5 rounded text-[10px] font-mono transition cursor-pointer border ${
                           (form.maxSliceHeight || 4000) === h
                             ? 'bg-blue-50 text-blue-700 border-blue-300 font-bold'
@@ -383,7 +538,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 id={hideStickyId}
                 type="checkbox"
                 checked={form.hideStickyElements}
-                onChange={(e) => setForm({ ...form, hideStickyElements: e.target.checked })}
+                onChange={(e) => updateForm({ hideStickyElements: e.target.checked })}
                 className="mt-0.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
               />
               <div className="flex-1 min-w-0">
@@ -402,7 +557,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 id={clipboardId}
                 type="checkbox"
                 checked={form.copyToClipboard}
-                onChange={(e) => setForm({ ...form, copyToClipboard: e.target.checked })}
+                onChange={(e) => updateForm({ copyToClipboard: e.target.checked })}
                 className="mt-0.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
               />
               <div className="flex-1 min-w-0">
@@ -436,7 +591,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
               max="1600"
               step="100"
               value={form.scrollDelayMs}
-              onChange={(e) => setForm({ ...form, scrollDelayMs: parseInt(e.target.value, 10) })}
+              onChange={(e) => updateForm({ scrollDelayMs: parseInt(e.target.value, 10) })}
               className="w-full h-1.5 bg-zinc-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
             />
             <div className="flex justify-between text-[10px] text-zinc-600 font-mono">
@@ -459,7 +614,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                 <button
                   key={sec}
                   type="button"
-                  onClick={() => setForm({ ...form, captureDelaySec: sec })}
+                  onClick={() => updateForm({ captureDelaySec: sec })}
                   className={`py-1 text-center rounded-lg font-semibold text-xs transition cursor-pointer ${
                     (form.captureDelaySec || 0) === sec
                       ? 'bg-white text-orange-600 shadow-xs border border-zinc-200/60'
@@ -485,9 +640,9 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
           <input
             type="text"
             value={form.filenameTemplate}
-            onChange={(e) => setForm({ ...form, filenameTemplate: e.target.value })}
+            onChange={(e) => updateForm({ filenameTemplate: e.target.value })}
             placeholder="{title}_{date}_{time}"
-            className="w-full px-3 py-2 text-xs font-mono bg-white border border-zinc-200 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-zinc-900 shadow-2xs"
+            className="w-full px-3 py-2 text-xs font-mono bg-white border border-zinc-200 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-zinc-900 shadow-2xs select-text"
           />
 
           {/* Clickable Token Pills */}

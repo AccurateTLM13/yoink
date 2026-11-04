@@ -6,14 +6,13 @@ import {
   Check,
   ZoomIn,
   ZoomOut,
-  Maximize2,
   FileImage,
-  ExternalLink,
   RotateCcw,
   Pencil,
   FileText,
   ScanText,
   Layers,
+  ShieldCheck,
 } from 'lucide-react';
 import { HistoryItem } from '../types';
 import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage, updateStoredHistoryItem } from '../utils/storage';
@@ -21,6 +20,7 @@ import { exportPdf } from '../utils/pdf';
 import { downloadImageSlices } from '../utils/slicer';
 import { AnnotationEditor } from './AnnotationEditor';
 import { OcrDrawer } from './OcrDrawer';
+import { VerifyModal } from './VerifyModal';
 
 interface Props {
   item: HistoryItem | null;
@@ -42,9 +42,12 @@ export const ImagePreviewModal: React.FC<Props> = ({
   const [exportingPdf, setExportingPdf] = useState(false);
   const [slicing, setSlicing] = useState(false);
   const [showOcr, setShowOcr] = useState(initialOcr);
+  const [showVerify, setShowVerify] = useState(false);
+  const [verifyDataUrl, setVerifyDataUrl] = useState<string | null>(null);
   const [zoomLevel, setZoomLevel] = useState(1);
-  const initial = (item?.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item?.dataUrl || item?.thumbnailUrl || null);
-  const [fullImage, setFullImage] = useState<string | null>(initial);
+  // Only initialize fullImage when item.dataUrl is actually populated (not the downscaled JPEG thumbnail)
+  const initialFull = item?.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null;
+  const [fullImage, setFullImage] = useState<string | null>(initialFull);
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
     width: item?.width || 0,
     height: item?.height || 0,
@@ -78,9 +81,10 @@ export const ImagePreviewModal: React.FC<Props> = ({
   useEffect(() => {
     if (!item) return;
     let isMounted = true;
-    const init = (item.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item.dataUrl || item.thumbnailUrl);
-    if (init) {
-      setFullImage(init);
+    if (item.dataUrl && item.dataUrl.length > 0) {
+      setFullImage(item.dataUrl);
+    } else {
+      setFullImage(null);
     }
     if (item.width && item.height) {
       setDimensions({ width: item.width, height: item.height });
@@ -93,7 +97,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
     return () => {
       isMounted = false;
     };
-  }, [item?.id, item?.dataUrl, item?.thumbnailUrl, item?.width, item?.height]);
+  }, [item?.id, item?.dataUrl, item?.width, item?.height]);
 
   if (!item) return null;
 
@@ -113,21 +117,42 @@ export const ImagePreviewModal: React.FC<Props> = ({
     );
   }
 
+  const handleOpenVerify = async () => {
+    let targetUrl = fullImage || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null);
+    if (!targetUrl) {
+      const loaded = await getFullResolutionImage(item.id);
+      if (loaded) {
+        setFullImage(loaded);
+        targetUrl = loaded;
+      }
+    }
+    setVerifyDataUrl(targetUrl || currentImage);
+    setShowVerify(true);
+  };
+
   const handleCopy = async () => {
-    if (!currentImage) return;
-    const success = await copyImageToClipboard(currentImage);
+    let targetUrl = fullImage || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null);
+    if (!targetUrl) {
+      targetUrl = (await getFullResolutionImage(item.id)) || currentImage;
+    }
+    if (!targetUrl) return;
+    const success = await copyImageToClipboard(targetUrl);
     if (success) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
 
-  const handleDownload = () => {
-    if (!currentImage) return;
+  const handleDownload = async () => {
+    let targetUrl = fullImage || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null);
+    if (!targetUrl) {
+      targetUrl = (await getFullResolutionImage(item.id)) || currentImage;
+    }
+    if (!targetUrl) return;
     const ext = item.format || 'png';
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
     const filename = `${cleanTitle}_${Date.now()}.${ext}`;
-    downloadDataUrl(currentImage, filename);
+    downloadDataUrl(targetUrl, filename);
   };
 
   const handleExportPdf = async () => {
@@ -275,6 +300,20 @@ export const ImagePreviewModal: React.FC<Props> = ({
             <span>OCR</span>
           </button>
 
+          {/* Yoink Proof Verification Button */}
+          <button
+            onClick={handleOpenVerify}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
+              showVerify
+                ? 'bg-emerald-600 text-white border-emerald-500'
+                : 'bg-zinc-800 hover:bg-zinc-700 text-emerald-300 border-zinc-700/60'
+            }`}
+            title="Inspect Yoink Proof™ cryptographic signature, LSB pixel watermark & IPTC provenance"
+          >
+            <ShieldCheck size={13} />
+            <span>Proof</span>
+          </button>
+
           {/* Download Button */}
           <button
             onClick={handleDownload}
@@ -335,7 +374,14 @@ export const ImagePreviewModal: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* OCR Drawer (P2-9) */}
+      {/* Yoink Proof Inspector Modal */}
+      {showVerify && (verifyDataUrl || currentImage) && (
+        <VerifyModal
+          initialDataUrl={verifyDataUrl || currentImage}
+          initialTitle={item.title}
+          onClose={() => setShowVerify(false)}
+        />
+      )}
       {showOcr && currentImage && (
         <OcrDrawer
           dataUrl={currentImage}

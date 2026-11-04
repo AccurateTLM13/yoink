@@ -14,6 +14,9 @@ export const DEFAULT_SETTINGS: CaptureSettings = {
   autoSliceLongPages: false,
   maxSliceHeight: 4000,
   losslessWebp: false,
+  enableProof: true,
+  proofAuthor: '',
+  proofVisualStamp: false,
 };
 
 /**
@@ -44,6 +47,9 @@ const SETTINGS_KEY = 'omnicapture_settings';
 const HISTORY_KEY = 'omnicapture_history';
 const FULL_IMAGE_PREFIX = 'yoink_full_';
 const MAX_HISTORY_ITEMS = 40;
+
+// In-memory full-resolution image cache so signed full images are never lost if localStorage quota is reached
+const memoryFullImageCache = new Map<string, string>();
 
 /**
  * Generate a downscaled thumbnail from full dataUrl for fast index rendering
@@ -89,6 +95,14 @@ export async function createThumbnail(dataUrl: string, targetWidth: number = 720
  */
 export async function saveFullResolutionImage(id: string, dataUrl: string): Promise<void> {
   const key = `${FULL_IMAGE_PREFIX}${id}`;
+  if (dataUrl) {
+    memoryFullImageCache.set(key, dataUrl);
+    if (memoryFullImageCache.size > MAX_HISTORY_ITEMS) {
+      const oldestKey = memoryFullImageCache.keys().next().value;
+      if (oldestKey) memoryFullImageCache.delete(oldestKey);
+    }
+  }
+
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       await chrome.storage.local.set({ [key]: dataUrl });
@@ -108,14 +122,20 @@ export async function saveFullResolutionImage(id: string, dataUrl: string): Prom
 }
 
 /**
- * Retrieve full resolution image on-demand (for preview, download, or copy)
+ * Retrieve full resolution image on-demand (for preview, download, copy, or proof verification)
  */
 export async function getFullResolutionImage(id: string): Promise<string | null> {
   const key = `${FULL_IMAGE_PREFIX}${id}`;
+  const mem = memoryFullImageCache.get(key);
+  if (mem && mem.length > 0) return mem;
+
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       const res = await chrome.storage.local.get([key]);
-      if (res && typeof res[key] === 'string' && res[key].length > 0) return res[key] as string;
+      if (res && typeof res[key] === 'string' && res[key].length > 0) {
+        memoryFullImageCache.set(key, res[key] as string);
+        return res[key] as string;
+      }
     }
   } catch (e) {
     console.warn('Chrome storage full image fetch failed', e);
@@ -124,7 +144,10 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
   try {
     if (typeof localStorage !== 'undefined') {
       const local = localStorage.getItem(key);
-      if (local && local.length > 0) return local;
+      if (local && local.length > 0) {
+        memoryFullImageCache.set(key, local);
+        return local;
+      }
     }
   } catch {}
 
@@ -141,13 +164,27 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
 
 /**
  * Load user settings with fallback to defaults.
+ * Checks chrome.storage.local, chrome.storage.sync, and localStorage so changes are never lost.
  */
 export async function getStoredSettings(): Promise<CaptureSettings> {
+  let localStored: Partial<CaptureSettings> | null = null;
+  let syncStored: Partial<CaptureSettings> | null = null;
+  let domStored: Partial<CaptureSettings> | null = null;
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      const res = await chrome.storage.local.get([SETTINGS_KEY]);
+      if (res && res[SETTINGS_KEY] && typeof res[SETTINGS_KEY] === 'object') {
+        localStored = res[SETTINGS_KEY] as Partial<CaptureSettings>;
+      }
+    }
+  } catch {}
+
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
       const result = await chrome.storage.sync.get([SETTINGS_KEY]);
-      if (result && result[SETTINGS_KEY]) {
-        return { ...DEFAULT_SETTINGS, ...(result[SETTINGS_KEY] as Partial<CaptureSettings>) };
+      if (result && result[SETTINGS_KEY] && typeof result[SETTINGS_KEY] === 'object') {
+        syncStored = result[SETTINGS_KEY] as Partial<CaptureSettings>;
       }
     }
   } catch (e) {
@@ -155,33 +192,54 @@ export async function getStoredSettings(): Promise<CaptureSettings> {
   }
 
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) {
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) {
+        domStored = JSON.parse(raw) as Partial<CaptureSettings>;
+      }
     }
   } catch (e) {
     console.warn('localStorage not accessible', e);
   }
 
-  return DEFAULT_SETTINGS;
+  if (!localStored && !syncStored && !domStored) {
+    return { ...DEFAULT_SETTINGS };
+  }
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(syncStored || {}),
+    ...(domStored || {}),
+    ...(localStored || {}),
+  };
 }
 
 /**
- * Save user settings.
+ * Save user settings synchronously to localStorage and asynchronously to chrome.storage.local + sync.
  */
 export async function saveStoredSettings(settings: CaptureSettings): Promise<void> {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    }
+  } catch (e) {
+    console.warn('localStorage save failed', e);
+  }
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
+    }
+  } catch (e) {
+    console.warn('Chrome local storage settings save failed', e);
+  }
+
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
       await chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
     }
   } catch (e) {
     console.warn('Chrome sync storage save failed', e);
-  }
-
-  try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-  } catch (e) {
-    console.warn('localStorage save failed', e);
   }
 }
 
@@ -237,6 +295,7 @@ export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> 
   const merged = [indexItem, ...current.filter((i) => i.id !== item.id)];
   const updated = merged.slice(0, MAX_HISTORY_ITEMS);
   const evicted = merged.slice(MAX_HISTORY_ITEMS).map((i) => `${FULL_IMAGE_PREFIX}${i.id}`);
+  evicted.forEach((k) => memoryFullImageCache.delete(k));
   if (evicted.length && typeof chrome !== 'undefined' && chrome.storage?.local) {
     await chrome.storage.local.remove(evicted).catch(() => {});
   }
@@ -295,6 +354,7 @@ export async function updateStoredHistoryItem(
  */
 export async function deleteStoredHistoryItem(id: string): Promise<HistoryItem[]> {
   const key = `${FULL_IMAGE_PREFIX}${id}`;
+  memoryFullImageCache.delete(key);
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     try {
       await chrome.storage.local.remove([key]);
@@ -331,6 +391,7 @@ export async function deleteStoredHistoryItem(id: string): Promise<HistoryItem[]
 export async function clearStoredHistory(): Promise<void> {
   const current = await getStoredHistory();
   const fullKeys = current.map((i) => `${FULL_IMAGE_PREFIX}${i.id}`);
+  memoryFullImageCache.clear();
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     try {

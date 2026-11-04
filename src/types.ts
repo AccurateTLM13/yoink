@@ -28,6 +28,40 @@ export interface CaptureSettings {
   autoSliceLongPages?: boolean; // Split tall captures into anti-squish chunks on download
   maxSliceHeight?: number; // Max slice height in px (e.g. 4000)
   losslessWebp?: boolean; // Lossless encoding for WebP
+  enableProof?: boolean; // Yoink Proof: Embed IPTC screenCapture + ECDSA signature + LSB pixel watermark
+  proofAuthor?: string; // Creator handle / name embedded in proof manifest
+  proofVisualStamp?: boolean; // Optional "Receipt Mode" provenance footer bar rendered on screenshot
+}
+
+export interface YoinkProofManifest {
+  v: number;
+  src: string; // IPTC digitalSourceType URI (screenCapture)
+  alg: 'ES256';
+  kid: string; // 12-char key fingerprint (e.g. 8F3A-9C21-B40E)
+  pub: string; // base64url of 65-byte raw P-256 public key
+  ph: string; // base64url of SHA-256 masked pixel digest
+  bh?: string; // base64url of SHA-256 encoded visual bitstream digest (invariant to metadata chunks & display color profiles)
+  ts: number; // capture timestamp (ms)
+  w: number; // width in px
+  h: number; // height in px
+  u: string; // source URL
+  t: string; // page title
+  a: string; // author / creator handle
+  sig: string; // base64url of 64-byte ECDSA P-256 signature
+}
+
+export interface ProofVerificationResult {
+  verified: boolean;
+  status: 'authentic' | 'tampered' | 'unsigned' | 'invalid_signature';
+  summary: string;
+  hasMetadataProof: boolean;
+  hasPixelWatermark: boolean;
+  hasIptcScreenCapture: boolean;
+  signatureValid: boolean;
+  pixelsIntact: boolean;
+  isOwnCapture: boolean;
+  localKeyFingerprint?: string;
+  manifest?: YoinkProofManifest;
 }
 
 export interface HistoryItem {
@@ -43,6 +77,8 @@ export interface HistoryItem {
   format: CaptureFormat;
   fileSizeBytes?: number;
   ocrText?: string;
+  proofKeyId?: string;
+  proofSigned?: boolean;
 }
 
 export interface SelectionRect {
