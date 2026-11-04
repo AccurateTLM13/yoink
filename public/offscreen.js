@@ -1,3 +1,4 @@
+/* jshint esversion: 11, expr: true */
 // offscreen.js - Yoink Image Processing Engine
 //
 // Accepts tasks only from Yoink extension contexts (never content scripts).

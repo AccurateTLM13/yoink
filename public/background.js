@@ -1,3 +1,4 @@
+/* jshint esversion: 11, expr: true, asi: true */
 // background.js - Yoink Service Worker (Manifest V3)
 //
 // Design rules:
