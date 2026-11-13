@@ -67,8 +67,6 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
   const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
-    let isMounted = true;
-
     // If item.dataUrl is already the full high-res image, use it!
     if (item.dataUrl && item.dataUrl.length > 50000) {
       setSrc(item.dataUrl);
@@ -81,22 +79,6 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
       setSrc(item.thumbnailUrl || item.dataUrl);
       setLoadFailed(false);
     }
-
-    // Always fetch the razor-sharp original image from storage
-    getFullResolutionImage(item.id).then((full) => {
-      if (isMounted) {
-        if (full) {
-          setSrc(full);
-          setLoadFailed(false);
-        } else if (!item.thumbnailUrl && !item.dataUrl) {
-          setLoadFailed(true);
-        }
-      }
-    });
-
-    return () => {
-      isMounted = false;
-    };
   }, [item.id, item.dataUrl, item.thumbnailUrl]);
 
   if (!src || loadFailed) {
@@ -108,13 +90,15 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
       src={src}
       alt={item.title}
       onError={() => {
-        getFullResolutionImage(item.id).then((full) => {
-          if (full && full !== src) {
-            setSrc(full);
-          } else {
-            setLoadFailed(true);
-          }
-        });
+        getFullResolutionImage(item.id)
+          .then((full) => {
+            if (full && full !== src) {
+              setSrc(full);
+            } else {
+              setLoadFailed(true);
+            }
+          })
+          .catch(() => setLoadFailed(true));
       }}
       className={`w-full h-full object-cover object-top transition-transform duration-200 ${
         isFullTab ? 'group-hover:scale-102' : 'group-hover:scale-105'
@@ -146,6 +130,12 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [imageError, setImageError] = useState('');
+  const originalFor = async (item: HistoryItem) => {
+    const src = (await getFullResolutionImage(item.id)) || item.dataUrl;
+    if (!src) setImageError(`Original image unavailable for ${item.title}. The thumbnail is preview only.`);
+    return src;
+  };
 
   const filtered = useMemo(() => {
     let list = history;
@@ -169,7 +159,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   const handleCopy = async (e: React.MouseEvent, item: HistoryItem) => {
     e.stopPropagation();
-    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
+    const imageSrc = await originalFor(item);
     if (!imageSrc) return;
     const success = await copyImageToClipboard(imageSrc);
     if (success) {
@@ -180,7 +170,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   const handleDownload = async (e: React.MouseEvent, item: HistoryItem) => {
     e.stopPropagation();
-    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
+    const imageSrc = await originalFor(item);
     if (!imageSrc) return;
     const ext = item.format || 'png';
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
@@ -196,7 +186,8 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
     setDownloadingAll(true);
     for (let idx = 0; idx < itemsToDownload.length; idx++) {
       const item = itemsToDownload[idx];
-      const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
+      const imageSrc = await originalFor(item);
+      if (!imageSrc) { setDownloadingAll(false); return; }
       if (imageSrc) {
         const ext = item.format || 'png';
         const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
@@ -218,8 +209,9 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
     try {
       const sources: string[] = [];
       for (const item of items) {
-        const src = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
-        if (src) sources.push(src);
+        const src = await originalFor(item);
+        if (!src) return;
+        sources.push(src);
       }
       if (sources.length > 0) {
         await exportPdf(sources, `yoink_gallery_${sources.length}_captures`);
@@ -243,6 +235,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   return (
     <div className="flex flex-col h-full bg-[#fbfbfd] text-zinc-900 font-sans select-none overflow-hidden">
+      {imageError && <div role="alert" className="p-3 bg-amber-50 text-amber-950 border border-amber-300">{imageError} <button type="button" onClick={() => setImageError('')} className="underline">Dismiss</button></div>}
       {/* Header */}
       <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-200/80 bg-white/90 backdrop-blur-xs">
         <button

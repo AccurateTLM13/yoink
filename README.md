@@ -59,6 +59,7 @@ You can load Yoink directly into Google Chrome or any Chromium-based browser (Br
 ## 🛠️ Development & Building
 
 ### Prerequisites
+
 - [Node.js](https://nodejs.org/) (version 18 or higher recommended)
 - [npm](https://www.npmjs.com/)
 

@@ -1,6 +1,16 @@
+import type { BatchOutcome } from '../types';
 import { CaptureFormat, CaptureMode, CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
 import { addHistoryItem, downloadDataUrl, copyImageToClipboard } from './storage';
 import { applyProofToCanvasAndEncode } from './proof';
+
+export interface OpenTabInfo {
+  id: number;
+  windowId?: number;
+  title: string;
+  url: string;
+  favIconUrl?: string;
+  active?: boolean;
+}
 
 /**
  * Checks if running inside an actual Chrome Extension environment with permissions.
@@ -9,10 +19,39 @@ export function isChromeExtension(): boolean {
   return typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.sendMessage && !!chrome.tabs;
 }
 
+/**
+ * Checks whether a URL is a standard web/file page that Chrome allows extensions to capture and inject into.
+ */
+export function isCapturableWebUrl(url?: string): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    if (!['http:', 'https:', 'file:'].includes(u.protocol)) return false;
+    if (u.hostname === 'chromewebstore.google.com') return false;
+    if (u.hostname === 'chrome.google.com' && u.pathname.startsWith('/webstore')) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Must be called directly from a click handler (needs a user gesture). */
 export function ensureAllSitesAccess(): Promise<boolean> {
   if (typeof chrome === 'undefined' || !chrome.permissions) return Promise.resolve(true);
   return chrome.permissions.request({ origins: ['<all_urls>'] });
+}
+
+function sanitizeFilenameSegment(value: string): string {
+  let out = '';
+  for (const ch of value) {
+    const code = ch.charCodeAt(0);
+    if (code < 32 || '\\/:*?"<>|'.includes(ch)) {
+      out += '_';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 /**
@@ -49,15 +88,16 @@ export function formatFilename(
   const h = height ? String(Math.round(height)) : '';
 
   // Keep in sync with public/background.js.
-  let filename = template
+  const substituted = template
     .split('{title}').join(cleanTitle)
     .split('{date}').join(dateStr)
     .split('{time}').join(timeStr)
     .split('{domain}').join(domain)
     .split('{type}').join(mode)
     .split('{width}').join(w)
-    .split('{height}').join(h)
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .split('{height}').join(h);
+
+  let filename = sanitizeFilenameSegment(substituted)
     .replace(/^\.+/, '')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
@@ -117,6 +157,107 @@ function awaitCaptureEvent(
   });
 
   return { promise, cleanup };
+}
+
+/**
+ * Get all open injectable web tabs in the current window (excludes chrome:// and chrome-extension://)
+ */
+export async function getInjectableOpenTabs(): Promise<OpenTabInfo[]> {
+  if (isChromeExtension()) {
+    return new Promise((resolve) => {
+      chrome.tabs.query({ currentWindow: true }, (tabs) => {
+        const valid: OpenTabInfo[] = (tabs || [])
+          .filter((t) => typeof t.id === 'number' && isCapturableWebUrl(t.url))
+          .map((t) => ({
+            id: t.id as number,
+            windowId: t.windowId,
+            title: t.title || 'Web Page',
+            url: t.url || '',
+            favIconUrl: t.favIconUrl,
+            active: t.active,
+          }));
+        resolve(valid);
+      });
+    });
+  }
+
+  return [
+    { id: 101, title: 'Yoink Documentation', url: 'https://omnicapture.pro/docs', active: false },
+    { id: 102, title: 'Google Search', url: 'https://www.google.com', active: false },
+    { id: 103, title: 'Tailwind CSS Modern Guide', url: 'https://tailwindcss.com', active: false },
+    { id: 104, title: 'GitHub Repository', url: 'https://github.com/google/omnicapture', active: false },
+  ];
+}
+
+/**
+ * Get current open tabs in the active window
+ */
+export async function getOpenTabUrls(): Promise<{ title: string; url: string }[]> {
+  const tabs = await getInjectableOpenTabs();
+  return tabs.map((t) => ({ title: t.title, url: t.url }));
+}
+
+/**
+ * Resolve target tab and optional returnToTabId when triggered from popup or Studio Hub.
+ */
+async function resolveTargetTab(targetTabId?: number): Promise<{
+  tabId: number;
+  windowId?: number;
+  title?: string;
+  url?: string;
+  returnToTabId?: number;
+}> {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      const activeTab = tabs?.[0];
+
+      if (targetTabId) {
+        const returnToTabId = activeTab?.id && activeTab.id !== targetTabId ? activeTab.id : undefined;
+        resolve({
+          tabId: targetTabId,
+          windowId: activeTab?.windowId,
+          returnToTabId,
+        });
+        return;
+      }
+
+      if (activeTab?.id && isCapturableWebUrl(activeTab.url)) {
+        resolve({
+          tabId: activeTab.id,
+          windowId: activeTab.windowId,
+          title: activeTab.title,
+          url: activeTab.url,
+        });
+        return;
+      }
+
+      // If current active tab is the Studio Hub (chrome-extension://), fall back to the first open web tab
+      const openWebTabs = await getInjectableOpenTabs();
+      if (openWebTabs.length > 0) {
+        const fallback = openWebTabs[0];
+        resolve({
+          tabId: fallback.id,
+          windowId: fallback.windowId ?? activeTab?.windowId,
+          title: fallback.title,
+          url: fallback.url,
+          returnToTabId: activeTab?.id,
+        });
+        return;
+      }
+
+      if (activeTab?.id) {
+        resolve({
+          tabId: activeTab.id,
+          windowId: activeTab.windowId,
+          title: activeTab.title,
+          url: activeTab.url,
+        });
+        return;
+      }
+
+      reject(new Error('No active tab found.'));
+    });
+  });
 }
 
 /**
@@ -222,38 +363,33 @@ export function generateMockScreenshot(
 /**
  * Capture Visible Viewport
  */
-export async function captureVisible(settings: CaptureSettings): Promise<HistoryItem> {
+export async function captureVisible(settings: CaptureSettings, targetTabId?: number): Promise<HistoryItem> {
   if (isChromeExtension()) {
+    const target = await resolveTargetTab(targetTabId);
     return new Promise((resolve, reject) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeTab = tabs[0];
-        if (!activeTab || !activeTab.id) {
-          return reject(new Error('No active tab found.'));
-        }
-
-        chrome.runtime.sendMessage(
-          {
-            action: 'CAPTURE_VISIBLE_PART',
-            payload: {
-              tabId: activeTab.id,
-              windowId: activeTab.windowId,
-              title: activeTab.title || 'Visible Viewport',
-              url: activeTab.url || '',
-              settings,
-            },
+      chrome.runtime.sendMessage(
+        {
+          action: 'CAPTURE_VISIBLE_PART',
+          payload: {
+            tabId: target.tabId,
+            windowId: target.windowId,
+            title: target.title || 'Visible Viewport',
+            url: target.url || '',
+            returnToTabId: target.returnToTabId,
+            settings,
           },
-          async (response) => {
-            if (response?.error) {
-              return reject(new Error(response.error));
-            }
-            if (response?.item) {
-              resolve(response.item);
-            } else {
-              reject(new Error('No capture data returned'));
-            }
+        },
+        (response) => {
+          if (response?.error) {
+            return reject(new Error(response.error));
           }
-        );
-      });
+          if (response?.item) {
+            resolve(response.item);
+          } else {
+            reject(new Error('No capture data returned'));
+          }
+        }
+      );
     });
   }
 
@@ -284,35 +420,30 @@ export async function captureVisible(settings: CaptureSettings): Promise<History
 /**
  * Capture Selection
  */
-export async function captureSelection(settings: CaptureSettings): Promise<HistoryItem> {
+export async function captureSelection(settings: CaptureSettings, targetTabId?: number): Promise<HistoryItem> {
   if (isChromeExtension()) {
+    const target = await resolveTargetTab(targetTabId);
     return new Promise((resolve, reject) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeTab = tabs[0];
-        if (!activeTab || !activeTab.id) {
-          return reject(new Error('No active tab found.'));
-        }
+      const { promise, cleanup } = awaitCaptureEvent('selection', 90000);
 
-        const { promise, cleanup } = awaitCaptureEvent('selection', 90000);
-
-        chrome.runtime.sendMessage(
-          {
-            action: 'CAPTURE_SELECTION_START',
-            payload: {
-              tabId: activeTab.id,
-              settings,
-            },
+      chrome.runtime.sendMessage(
+        {
+          action: 'CAPTURE_SELECTION_START',
+          payload: {
+            tabId: target.tabId,
+            returnToTabId: target.returnToTabId,
+            settings,
           },
-          (response) => {
-            if (response?.error) {
-              cleanup();
-              return reject(new Error(response.error));
-            }
+        },
+        (response) => {
+          if (response?.error) {
+            cleanup();
+            return reject(new Error(response.error));
           }
-        );
+        }
+      );
 
-        promise.then(resolve, reject);
-      });
+      promise.then(resolve, reject);
     });
   }
 
@@ -343,35 +474,30 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
 /**
  * Capture Scrolling Element (P1-4)
  */
-export async function captureScrollingElement(settings: CaptureSettings): Promise<HistoryItem> {
+export async function captureScrollingElement(settings: CaptureSettings, targetTabId?: number): Promise<HistoryItem> {
   if (isChromeExtension()) {
+    const target = await resolveTargetTab(targetTabId);
     return new Promise((resolve, reject) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeTab = tabs[0];
-        if (!activeTab || !activeTab.id) {
-          return reject(new Error('No active tab found.'));
-        }
+      const { promise, cleanup } = awaitCaptureEvent('element', 90000);
 
-        const { promise, cleanup } = awaitCaptureEvent('element', 90000);
-
-        chrome.runtime.sendMessage(
-          {
-            action: 'CAPTURE_ELEMENT_SCROLL_START',
-            payload: {
-              tabId: activeTab.id,
-              settings,
-            },
+      chrome.runtime.sendMessage(
+        {
+          action: 'CAPTURE_ELEMENT_SCROLL_START',
+          payload: {
+            tabId: target.tabId,
+            returnToTabId: target.returnToTabId,
+            settings,
           },
-          (response) => {
-            if (response?.error) {
-              cleanup();
-              return reject(new Error(response.error));
-            }
+        },
+        (response) => {
+          if (response?.error) {
+            cleanup();
+            return reject(new Error(response.error));
           }
-        );
+        }
+      );
 
-        promise.then(resolve, reject);
-      });
+      promise.then(resolve, reject);
     });
   }
 
@@ -571,39 +697,35 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
  */
 export async function captureFullPage(
   settings: CaptureSettings,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  targetTabId?: number
 ): Promise<HistoryItem> {
   if (isChromeExtension()) {
+    const target = await resolveTargetTab(targetTabId);
     return new Promise((resolve, reject) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeTab = tabs[0];
-        if (!activeTab || !activeTab.id) {
-          return reject(new Error('No active tab found.'));
-        }
+      const delayMs = Math.max(0, (settings.captureDelaySec || 0) * 1000);
+      const { promise, cleanup } = awaitCaptureEvent('full', 60000 + delayMs, onProgress);
 
-        const delayMs = Math.max(0, (settings.captureDelaySec || 0) * 1000);
-        const { promise, cleanup } = awaitCaptureEvent('full', 60000 + delayMs, onProgress);
-
-        chrome.runtime.sendMessage(
-          {
-            action: 'CAPTURE_FULL_PAGE',
-            payload: {
-              tabId: activeTab.id,
-              title: activeTab.title,
-              url: activeTab.url,
-              settings,
-            },
+      chrome.runtime.sendMessage(
+        {
+          action: 'CAPTURE_FULL_PAGE',
+          payload: {
+            tabId: target.tabId,
+            title: target.title,
+            url: target.url,
+            returnToTabId: target.returnToTabId,
+            settings,
           },
-          (response) => {
-            if (response?.error) {
-              cleanup();
-              return reject(new Error(response.error));
-            }
+        },
+        (response) => {
+          if (response?.error) {
+            cleanup();
+            return reject(new Error(response.error));
           }
-        );
+        }
+      );
 
-        promise.then(resolve, reject);
-      });
+      promise.then(resolve, reject);
     });
   }
 
@@ -636,7 +758,9 @@ export async function captureFullPage(
  */
 export async function captureAllTabs(
   settings: CaptureSettings,
-  onProgress?: (current: number, total: number, tabTitle: string) => void
+  onProgress?: (current: number, total: number, tabTitle: string) => void,
+  onOutcome?: (outcome: BatchOutcome) => void,
+  tabIds?: number[]
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
     const granted = await ensureAllSitesAccess();
@@ -654,12 +778,15 @@ export async function captureAllTabs(
       chrome.runtime.sendMessage(
         {
           action: 'CAPTURE_ALL_TABS',
-          payload: { settings },
+          payload: { settings, tabIds },
         },
         (response) => {
           chrome.runtime.onMessage.removeListener(progressListener);
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
           if (response?.error) return reject(new Error(response.error));
-          resolve(response?.results || []);
+          if (!response) return reject(new Error('Capture did not return a result.'));
+          onOutcome?.({ failures: response.failures || [], skipped: response.skipped || [] });
+          resolve(response.results || []);
         }
       );
     });
@@ -709,7 +836,8 @@ export async function captureUrlList(
   urls: string[],
   settings: CaptureSettings,
   delayMs: number = 3000,
-  onProgress?: (current: number, total: number, url: string) => void
+  onProgress?: (current: number, total: number, url: string) => void,
+  onOutcome?: (outcome: BatchOutcome) => void
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
     const granted = await ensureAllSitesAccess();
@@ -731,8 +859,11 @@ export async function captureUrlList(
         },
         (response) => {
           chrome.runtime.onMessage.removeListener(progressListener);
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
           if (response?.error) return reject(new Error(response.error));
-          resolve(response?.results || []);
+          if (!response) return reject(new Error('Capture did not return a result.'));
+          onOutcome?.({ failures: response.failures || [], skipped: response.skipped || [] });
+          resolve(response.results || []);
         }
       );
     });
@@ -775,45 +906,66 @@ export async function captureUrlList(
 export async function captureMultiSize(
   resolutions: ResolutionConfig[],
   settings: CaptureSettings,
-  onProgress?: (current: number, total: number, resName: string) => void
+  onProgress?: (current: number, total: number, resName: string) => void,
+  targetUrl?: string,
+  onOutcome?: (outcome: BatchOutcome) => void
 ): Promise<HistoryItem[]> {
   if (isChromeExtension()) {
     const granted = await ensureAllSitesAccess();
     if (!granted) {
       throw new Error('Yoink needs access to all sites for responsive multi-size capture.');
     }
-    return new Promise((resolve, reject) => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const activeTab = tabs[0];
-        if (!activeTab || !activeTab.url) return reject(new Error('No active tab URL.'));
 
-        const progressListener = (msg: any) => {
-          if (msg.action === 'CAPTURE_PROGRESS' && onProgress && msg.payload) {
-            onProgress(msg.payload.current || 1, msg.payload.total || resolutions.length, msg.payload.name || msg.payload.message || '');
+    let resolvedUrl = targetUrl?.trim() || '';
+    if (!resolvedUrl) {
+      resolvedUrl = await new Promise<string>((resolve) => {
+        chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+          const activeUrl = tabs?.[0]?.url || '';
+          if (isCapturableWebUrl(activeUrl)) {
+            resolve(activeUrl);
+            return;
           }
-        };
-        chrome.runtime.onMessage.addListener(progressListener);
-
-        chrome.runtime.sendMessage(
-          {
-            action: 'CAPTURE_MULTI_SIZE',
-            payload: {
-              url: activeTab.url,
-              resolutions,
-              settings,
-            },
-          },
-          (response) => {
-            chrome.runtime.onMessage.removeListener(progressListener);
-            if (response?.error) return reject(new Error(response.error));
-            resolve(response?.results || []);
-          }
-        );
+          const openTabs = await getInjectableOpenTabs();
+          resolve(openTabs[0]?.url || '');
+        });
       });
+    }
+
+    if (!resolvedUrl || !isCapturableWebUrl(resolvedUrl)) {
+      throw new Error('Enter a valid http(s) URL to capture responsive viewports.');
+    }
+
+    return new Promise((resolve, reject) => {
+      const progressListener = (msg: any) => {
+        if (msg.action === 'CAPTURE_PROGRESS' && onProgress && msg.payload) {
+          onProgress(msg.payload.current || 1, msg.payload.total || resolutions.length, msg.payload.name || msg.payload.message || '');
+        }
+      };
+      chrome.runtime.onMessage.addListener(progressListener);
+
+      chrome.runtime.sendMessage(
+        {
+          action: 'CAPTURE_MULTI_SIZE',
+          payload: {
+            url: resolvedUrl,
+            resolutions,
+            settings,
+          },
+        },
+        (response) => {
+          chrome.runtime.onMessage.removeListener(progressListener);
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (response?.error) return reject(new Error(response.error));
+          if (!response) return reject(new Error('Capture did not return a result.'));
+          onOutcome?.({ failures: response.failures || [], skipped: response.skipped || [] });
+          resolve(response.results || []);
+        }
+      );
     });
   }
 
   // Simulated fallback
+  const effectiveDemoUrl = targetUrl?.trim() || 'https://example.com/responsive';
   const results: HistoryItem[] = [];
   for (let i = 0; i < resolutions.length; i++) {
     const res = resolutions[i];
@@ -824,7 +976,7 @@ export async function captureMultiSize(
     const item: HistoryItem = {
       id: `sim_ms_${Date.now()}_${i}`,
       title: `Responsive - ${res.name}`,
-      url: 'https://example.com/responsive',
+      url: effectiveDemoUrl,
       dataUrl,
       timestamp: Date.now(),
       width: res.width,
@@ -842,27 +994,4 @@ export async function captureMultiSize(
   }
 
   return results;
-}
-
-/**
- * Get current open tabs in the active window
- */
-export async function getOpenTabUrls(): Promise<{ title: string; url: string }[]> {
-  if (isChromeExtension()) {
-    return new Promise((resolve) => {
-      chrome.tabs.query({ currentWindow: true }, (tabs) => {
-        const valid = (tabs || [])
-          .filter((t) => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('edge://') && !t.url.startsWith('about:'))
-          .map((t) => ({ title: t.title || 'Tab', url: t.url || '' }));
-        resolve(valid);
-      });
-    });
-  }
-
-  return [
-    { title: 'Yoink Documentation', url: 'https://omnicapture.pro/docs' },
-    { title: 'Google Search', url: 'https://www.google.com' },
-    { title: 'Tailwind CSS Modern Guide', url: 'https://tailwindcss.com' },
-    { title: 'GitHub Repository', url: 'https://github.com/google/omnicapture' },
-  ];
 }

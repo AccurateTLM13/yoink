@@ -25,13 +25,6 @@ import {
 } from 'lucide-react';
 import { AnnotationItem, AnnotationTool, HistoryItem } from '../types';
 import {
-  drawArrow,
-  drawRectangle,
-  drawEllipse,
-  drawPen,
-  drawHighlighter,
-  drawPixelateRedaction,
-  drawTextBadge,
   renderAnnotations,
   createAnnotatedComposite,
 } from '../utils/annotation';
@@ -76,9 +69,10 @@ export const AnnotationEditor: React.FC<Props> = ({
   const [copied, setCopied] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [showOcr, setShowOcr] = useState(false);
+  const [ocrTextOverride, setOcrTextOverride] = useState<string | null>(null);
 
   const handleSaveOcrText = async (newText: string) => {
-    item.ocrText = newText;
+    setOcrTextOverride(newText);
     await updateStoredHistoryItem(item.id, { ocrText: newText });
     if (onSaved) {
       onSaved({ ...item, ocrText: newText });
@@ -110,6 +104,29 @@ export const AnnotationEditor: React.FC<Props> = ({
   const currentPointsRef = useRef<{ x: number; y: number }[]>([]);
   const baseImageRef = useRef<HTMLImageElement | null>(null);
 
+  // Redraw annotations on draw canvas
+  const redrawAll = useCallback(
+    (previewItem?: AnnotationItem) => {
+      const drawCanvas = drawCanvasRef.current;
+      const baseCanvas = baseCanvasRef.current;
+      if (!drawCanvas || !baseCanvas) return;
+
+      const ctx = drawCanvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+      // Render committed annotations
+      renderAnnotations(ctx, annotations, baseCanvas);
+
+      // Render active shape preview during drag
+      if (previewItem) {
+        renderAnnotations(ctx, [previewItem], baseCanvas);
+      }
+    },
+    [annotations]
+  );
+
   // Initialize base canvas with original image
   useEffect(() => {
     const img = new Image();
@@ -133,30 +150,7 @@ export const AnnotationEditor: React.FC<Props> = ({
       }
     };
     img.src = imageSrc;
-  }, [imageSrc]);
-
-  // Redraw annotations on draw canvas
-  const redrawAll = useCallback(
-    (previewItem?: AnnotationItem) => {
-      const drawCanvas = drawCanvasRef.current;
-      const baseCanvas = baseCanvasRef.current;
-      if (!drawCanvas || !baseCanvas) return;
-
-      const ctx = drawCanvas.getContext('2d');
-      if (!ctx) return;
-
-      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-
-      // Render committed annotations
-      renderAnnotations(ctx, annotations, baseCanvas);
-
-      // Render active shape preview during drag
-      if (previewItem) {
-        renderAnnotations(ctx, [previewItem], baseCanvas);
-      }
-    },
-    [annotations]
-  );
+  }, [imageSrc, redrawAll]);
 
   useEffect(() => {
     redrawAll();
@@ -301,21 +295,21 @@ export const AnnotationEditor: React.FC<Props> = ({
     setTextValue('');
   };
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (undoStack.length === 0) return;
     const prev = undoStack[undoStack.length - 1];
     setRedoStack((r) => [...r, annotations]);
     setUndoStack((u) => u.slice(0, -1));
     setAnnotations(prev);
-  };
+  }, [undoStack, annotations]);
 
-  const handleRedo = () => {
+  const handleRedo = useCallback(() => {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     setUndoStack((u) => [...u, annotations]);
     setRedoStack((r) => r.slice(0, -1));
     setAnnotations(next);
-  };
+  }, [redoStack, annotations]);
 
   const handleClearAll = () => {
     if (annotations.length === 0) return;
@@ -344,7 +338,7 @@ export const AnnotationEditor: React.FC<Props> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undoStack, redoStack, annotations, textInputState, onClose]);
+  }, [handleUndo, handleRedo, textInputState, onClose]);
 
   // Export & Action Handlers
   const handleCopyComposite = async () => {
@@ -737,7 +731,7 @@ export const AnnotationEditor: React.FC<Props> = ({
       {showOcr && (
         <OcrDrawer
           dataUrl={imageSrc}
-          initialText={item.ocrText}
+          initialText={ocrTextOverride ?? item.ocrText}
           onSaveText={handleSaveOcrText}
           onClose={() => setShowOcr(false)}
         />
