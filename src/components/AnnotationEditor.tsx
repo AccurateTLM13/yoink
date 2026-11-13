@@ -69,10 +69,10 @@ export const AnnotationEditor: React.FC<Props> = ({
   const [copied, setCopied] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [showOcr, setShowOcr] = useState(false);
-  const [ocrText, setOcrText] = useState<string | undefined>(item.ocrText);
+  const [ocrTextOverride, setOcrTextOverride] = useState<string | null>(null);
 
   const handleSaveOcrText = async (newText: string) => {
-    setOcrText(newText);
+    setOcrTextOverride(newText);
     await updateStoredHistoryItem(item.id, { ocrText: newText });
     if (onSaved) {
       onSaved({ ...item, ocrText: newText });
@@ -731,7 +731,7 @@ export const AnnotationEditor: React.FC<Props> = ({
       {showOcr && (
         <OcrDrawer
           dataUrl={imageSrc}
-          initialText={ocrText}
+          initialText={ocrTextOverride ?? item.ocrText}
           onSaveText={handleSaveOcrText}
           onClose={() => setShowOcr(false)}
         />
