@@ -40,7 +40,7 @@ jobs:
 
       - name: Run Codacy Analysis
         id: codacy
-        uses: codacy/analysis-cli-action@v1
+        uses: codacy/analysis-cli-action@5232ed30dc14ee9c2ebce29ebf47b60836b878a8 # v1
         with:
           project-token: ${{ secrets.CODACY_PROJECT_TOKEN }}
           format: sarif

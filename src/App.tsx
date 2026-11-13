@@ -148,7 +148,7 @@ export default function App() {
 
   useEffect(() => {
     if (isFullTab && view === 'menu') {
-      refreshOpenTabs();
+      void refreshOpenTabs();
     }
   }, [isFullTab, view, refreshOpenTabs]);
 
@@ -187,7 +187,7 @@ export default function App() {
         }
       }
     }
-    loadInitialData();
+    void loadInitialData();
 
     // Listen for storage changes from background worker
     let storageCleanup: (() => void) | undefined;
@@ -449,7 +449,7 @@ export default function App() {
 
   const handleCopyShortcut = useCallback((shortcut: string, label: string) => {
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      navigator.clipboard.writeText(shortcut);
+      void navigator.clipboard.writeText(shortcut);
     }
     setCopiedShortcut(shortcut);
     setStatusMessage(`Shortcut ${shortcut} copied! Press it on any webpage to trigger ${label}.`);

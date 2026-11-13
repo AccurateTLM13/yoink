@@ -1,11 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import vm from 'node:vm';
 
-const ROOT = process.cwd();
-const CONTENT_CODE = fs.readFileSync(path.join(ROOT, 'public/content.js'), 'utf8');
+const CONTENT_CODE = fs.readFileSync('./public/content.js', 'utf8');
 
 describe('Phase 1: Page Compatibility (SPA Inner Scroll Container & Shadow DOM Isolation)', () => {
   it('startScrollCapture automatically detects and scrolls the primary inner scrollable container on SPAs when window is not scrollable', async () => {

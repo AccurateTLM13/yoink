@@ -1,13 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import vm from 'node:vm';
 
-const ROOT = process.cwd();
-const BG_CODE = fs.readFileSync(path.join(ROOT, 'public/background.js'), 'utf8');
-const OFFSCREEN_CODE = fs.readFileSync(path.join(ROOT, 'public/offscreen.js'), 'utf8');
-const CONTENT_CODE = fs.readFileSync(path.join(ROOT, 'public/content.js'), 'utf8');
+const BG_CODE = fs.readFileSync('./public/background.js', 'utf8');
+const OFFSCREEN_CODE = fs.readFileSync('./public/offscreen.js', 'utf8');
+const CONTENT_CODE = fs.readFileSync('./public/content.js', 'utf8');
 
 describe('High-Impact Reliability Improvements (Streaming Stitch, Dynamic Canvas, Sticky Preservation)', () => {
   it('background.js streams each chunk to offscreen STITCH_ADD immediately during CAPTURE_VISIBLE_TAB without buffering dataUrls in RAM, and aborts on cancel', async () => {

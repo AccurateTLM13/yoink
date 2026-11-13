@@ -67,8 +67,6 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
   const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
-    let isMounted = true;
-
     // If item.dataUrl is already the full high-res image, use it!
     if (item.dataUrl && item.dataUrl.length > 50000) {
       setSrc(item.dataUrl);
@@ -81,11 +79,6 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
       setSrc(item.thumbnailUrl || item.dataUrl);
       setLoadFailed(false);
     }
-
-
-    return () => {
-      isMounted = false;
-    };
   }, [item.id, item.dataUrl, item.thumbnailUrl]);
 
   if (!src || loadFailed) {
@@ -97,13 +90,15 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
       src={src}
       alt={item.title}
       onError={() => {
-        getFullResolutionImage(item.id).then((full) => {
-          if (full && full !== src) {
-            setSrc(full);
-          } else {
-            setLoadFailed(true);
-          }
-        });
+        getFullResolutionImage(item.id)
+          .then((full) => {
+            if (full && full !== src) {
+              setSrc(full);
+            } else {
+              setLoadFailed(true);
+            }
+          })
+          .catch(() => setLoadFailed(true));
       }}
       className={`w-full h-full object-cover object-top transition-transform duration-200 ${
         isFullTab ? 'group-hover:scale-102' : 'group-hover:scale-105'

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import path from 'node:path';
 import vm from 'node:vm';
 import {
   isCapturableWebUrl,
@@ -12,8 +12,7 @@ import {
 } from '../src/utils/capture';
 import { DEFAULT_SETTINGS } from '../src/utils/storage';
 
-const ROOT = process.cwd();
-const BG_CODE = fs.readFileSync(path.join(ROOT, 'public/background.js'), 'utf8');
+const BG_CODE = fs.readFileSync('./public/background.js', 'utf8');
 
 describe('Phase 2: Architecture, Shared Logic & Target-Tab Capture APIs', () => {
   it('isCapturableWebUrl filters out internal browser, extension, and Chrome Web Store URLs', () => {
@@ -274,6 +273,30 @@ describe('Phase 2: Architecture, Shared Logic & Target-Tab Capture APIs', () => 
       activatedTabs,
       [42, 99],
       'Should activate target tab 42 to capture it and then restore Studio Hub tab 99'
+    );
+  });
+
+  it('excludes signing keys and packed artifacts from git and pins Codacy action SHA', () => {
+    const trackedSecrets = execFileSync(
+      'git',
+      ['ls-files', 'dist.pem', 'dist.crx', 'eng.traineddata', '.vscode/settings.json'],
+      { encoding: 'utf8' }
+    ).trim();
+    assert.equal(trackedSecrets, '', `Unexpected tracked secrets/artifacts: ${trackedSecrets}`);
+
+    const gitignoreLines = fs
+      .readFileSync('./.gitignore', 'utf8')
+      .split(/\r?\n/)
+      .map((line) => line.trim());
+    for (const pattern of ['.vscode/', '*.pem', '*.crx', '/eng.traineddata']) {
+      assert.ok(gitignoreLines.includes(pattern), `.gitignore must include "${pattern}"`);
+    }
+
+    const codacyWorkflow = fs.readFileSync('./.github/workflows/codacy.yml', 'utf8');
+    assert.match(
+      codacyWorkflow,
+      /uses:\s*codacy\/analysis-cli-action@[0-9a-f]{40}/,
+      'codacy/analysis-cli-action must be pinned to a full 40-char commit SHA'
     );
   });
 });

@@ -8,8 +8,6 @@
         "ignoreAtRules": ["theme", "layer", "apply", "tailwind", "config", "import"]
       }
     ],
-    "value-keyword-case": null,
-    "declaration-colon-newline-after": null,
-    "no-eol-whitespace": null
+    "value-keyword-case": null
   }
 }

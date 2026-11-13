@@ -68,7 +68,7 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
   };
 
   useEffect(() => {
-    loadTabs();
+    void loadTabs();
   }, []);
 
   const toggleSelect = (idx: number) => {

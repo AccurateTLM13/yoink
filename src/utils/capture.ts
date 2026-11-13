@@ -41,6 +41,19 @@ export function ensureAllSitesAccess(): Promise<boolean> {
   return chrome.permissions.request({ origins: ['<all_urls>'] });
 }
 
+function sanitizeFilenameSegment(value: string): string {
+  let out = '';
+  for (const ch of value) {
+    const code = ch.charCodeAt(0);
+    if (code < 32 || '\\/:*?"<>|'.includes(ch)) {
+      out += '_';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 /**
  * Format filename using user template tokens.
  */
@@ -75,15 +88,16 @@ export function formatFilename(
   const h = height ? String(Math.round(height)) : '';
 
   // Keep in sync with public/background.js.
-  let filename = template
+  const substituted = template
     .split('{title}').join(cleanTitle)
     .split('{date}').join(dateStr)
     .split('{time}').join(timeStr)
     .split('{domain}').join(domain)
     .split('{type}').join(mode)
     .split('{width}').join(w)
-    .split('{height}').join(h)
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .split('{height}').join(h);
+
+  let filename = sanitizeFilenameSegment(substituted)
     .replace(/^\.+/, '')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
@@ -143,6 +157,44 @@ function awaitCaptureEvent(
   });
 
   return { promise, cleanup };
+}
+
+/**
+ * Get all open injectable web tabs in the current window (excludes chrome:// and chrome-extension://)
+ */
+export async function getInjectableOpenTabs(): Promise<OpenTabInfo[]> {
+  if (isChromeExtension()) {
+    return new Promise((resolve) => {
+      chrome.tabs.query({ currentWindow: true }, (tabs) => {
+        const valid: OpenTabInfo[] = (tabs || [])
+          .filter((t) => typeof t.id === 'number' && isCapturableWebUrl(t.url))
+          .map((t) => ({
+            id: t.id as number,
+            windowId: t.windowId,
+            title: t.title || 'Web Page',
+            url: t.url || '',
+            favIconUrl: t.favIconUrl,
+            active: t.active,
+          }));
+        resolve(valid);
+      });
+    });
+  }
+
+  return [
+    { id: 101, title: 'Yoink Documentation', url: 'https://omnicapture.pro/docs', active: false },
+    { id: 102, title: 'Google Search', url: 'https://www.google.com', active: false },
+    { id: 103, title: 'Tailwind CSS Modern Guide', url: 'https://tailwindcss.com', active: false },
+    { id: 104, title: 'GitHub Repository', url: 'https://github.com/google/omnicapture', active: false },
+  ];
+}
+
+/**
+ * Get current open tabs in the active window
+ */
+export async function getOpenTabUrls(): Promise<{ title: string; url: string }[]> {
+  const tabs = await getInjectableOpenTabs();
+  return tabs.map((t) => ({ title: t.title, url: t.url }));
 }
 
 /**
@@ -327,7 +379,7 @@ export async function captureVisible(settings: CaptureSettings, targetTabId?: nu
             settings,
           },
         },
-        async (response) => {
+        (response) => {
           if (response?.error) {
             return reject(new Error(response.error));
           }
@@ -942,42 +994,4 @@ export async function captureMultiSize(
   }
 
   return results;
-}
-
-/**
- * Get all open injectable web tabs in the current window (excludes chrome:// and chrome-extension://)
- */
-export async function getInjectableOpenTabs(): Promise<OpenTabInfo[]> {
-  if (isChromeExtension()) {
-    return new Promise((resolve) => {
-      chrome.tabs.query({ currentWindow: true }, (tabs) => {
-        const valid: OpenTabInfo[] = (tabs || [])
-          .filter((t) => typeof t.id === 'number' && isCapturableWebUrl(t.url))
-          .map((t) => ({
-            id: t.id as number,
-            windowId: t.windowId,
-            title: t.title || 'Web Page',
-            url: t.url || '',
-            favIconUrl: t.favIconUrl,
-            active: t.active,
-          }));
-        resolve(valid);
-      });
-    });
-  }
-
-  return [
-    { id: 101, title: 'Yoink Documentation', url: 'https://omnicapture.pro/docs', active: false },
-    { id: 102, title: 'Google Search', url: 'https://www.google.com', active: false },
-    { id: 103, title: 'Tailwind CSS Modern Guide', url: 'https://tailwindcss.com', active: false },
-    { id: 104, title: 'GitHub Repository', url: 'https://github.com/google/omnicapture', active: false },
-  ];
-}
-
-/**
- * Get current open tabs in the active window
- */
-export async function getOpenTabUrls(): Promise<{ title: string; url: string }[]> {
-  const tabs = await getInjectableOpenTabs();
-  return tabs.map((t) => ({ title: t.title, url: t.url }));
 }

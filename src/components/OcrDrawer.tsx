@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   X,
   Copy,
@@ -7,7 +7,6 @@ import {
   Save,
   Loader2,
   Sparkles,
-  FileText,
   AlertCircle,
 } from 'lucide-react';
 import { extractOcrText, OcrResult } from '../utils/ai';
@@ -32,7 +31,7 @@ export const OcrDrawer: React.FC<Props> = ({
   const [engine, setEngine] = useState<string>('shape-detection');
   const [error, setError] = useState<string | null>(null);
 
-  const performScan = async () => {
+  const performScan = useCallback(async () => {
     setIsScanning(true);
     setError(null);
     try {
@@ -44,13 +43,13 @@ export const OcrDrawer: React.FC<Props> = ({
     } finally {
       setIsScanning(false);
     }
-  };
+  }, [dataUrl]);
 
   useEffect(() => {
     if (!initialText) {
-      performScan();
+      void performScan();
     }
-  }, [dataUrl]);
+  }, [initialText, performScan]);
 
   const handleCopy = async () => {
     if (!text) return;

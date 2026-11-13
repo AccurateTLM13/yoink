@@ -721,17 +721,6 @@ function waitForTabComplete(tabId, timeoutMs) {
   });
 }
 
-async function openGallery(count) {
-  await chrome.storage.local
-    .set({ pending_view: 'history', last_batch_count: count })
-    .catch((e) => console.error('Failed to set pending_view:', e));
-  if (count > 0) {
-    await chrome.tabs
-      .create({ url: chrome.runtime.getURL(`index.html?view=history&batch=${count}`), active: true })
-      .catch((e) => console.error('Failed to open history gallery tab:', e));
-  }
-}
-
 async function handleCaptureAllTabs({ settings, tabIds }) {
   await requireAllUrls('Capture all tabs');
   const s = await getSettings(settings);
@@ -1190,6 +1179,19 @@ function normalizeHttpUrl(v) {
   }
 }
 
+function sanitizeFilenameSegment(value) {
+  let out = '';
+  for (const ch of String(value || '')) {
+    const code = ch.charCodeAt(0);
+    if (code < 32 || '\\/:*?"<>|'.includes(ch)) {
+      out += '_';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 function formatFilename(template, title, url, mode, format, width, height) {
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10);
@@ -1211,16 +1213,17 @@ function formatFilename(template, title, url, mode, format, width, height) {
   const h = height ? String(Math.round(height)) : '';
 
   // Keep in sync with src/utils/capture.ts.
-  let filename = template
+  const substituted = template
     .split('{title}').join(cleanTitle)
     .split('{date}').join(dateStr)
     .split('{time}').join(timeStr)
     .split('{domain}').join(domain)
     .split('{type}').join(mode)
     .split('{width}').join(w)
-    .split('{height}').join(h)
-    // The template is user input: remove path separators and reserved characters.
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .split('{height}').join(h);
+
+  // The template is user input: remove path separators and reserved characters.
+  let filename = sanitizeFilenameSegment(substituted)
     .replace(/^\.+/, '')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')

@@ -1,4 +1,4 @@
-import { AnnotationItem, AnnotationTool } from '../types';
+import { AnnotationItem } from '../types';
 import { applyProofToCanvasAndEncode } from './proof';
 
 /**
@@ -388,6 +388,7 @@ export function renderAnnotations(
         }
         break;
 
+      case 'select':
       default:
         break;
     }

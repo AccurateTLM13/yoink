@@ -50,18 +50,18 @@ export const ImagePreviewModal: React.FC<Props> = ({
   // Only initialize fullImage when item.dataUrl is actually populated (not the downscaled JPEG thumbnail)
   const initialFull = item?.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null;
   const [fullImage, setFullImage] = useState<string | null>(initialFull);
-  const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
-    width: item?.width || 0,
-    height: item?.height || 0,
-  });
+  const [measuredDims, setMeasuredDims] = useState<{ id: string; width: number; height: number } | null>(null);
+  const [ocrTextOverride, setOcrTextOverride] = useState<{ id: string; text: string } | null>(null);
+  const dimensions =
+    measuredDims && item && measuredDims.id === item.id
+      ? { width: measuredDims.width, height: measuredDims.height }
+      : { width: item?.width || 0, height: item?.height || 0 };
 
   const handleSaveOcrText = async (newText: string) => {
     if (!item) return;
-    item.ocrText = newText;
+    setOcrTextOverride({ id: item.id, text: newText });
     await updateStoredHistoryItem(item.id, { ocrText: newText });
-    if (onSaved) {
-      onSaved({ ...item, ocrText: newText });
-    }
+    onSaved?.({ ...item, ocrText: newText });
   };
 
   // Close on Escape key
@@ -88,18 +88,17 @@ export const ImagePreviewModal: React.FC<Props> = ({
     } else {
       setFullImage(null);
     }
-    if (item.width && item.height) {
-      setDimensions({ width: item.width, height: item.height });
-    }
-    getFullResolutionImage(item.id).then((full) => {
-      if (isMounted && full) {
-        setFullImage(full);
-      }
-    });
+    getFullResolutionImage(item.id)
+      .then((full) => {
+        if (isMounted && full) {
+          setFullImage(full);
+        }
+      })
+      .catch(() => {});
     return () => {
       isMounted = false;
     };
-  }, [item?.id, item?.dataUrl, item?.width, item?.height]);
+  }, [item]);
 
   if (!item) return null;
 
@@ -355,7 +354,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
               onLoad={(e) => {
                 const target = e.currentTarget;
                 if (!dimensions.width || !dimensions.height) {
-                  setDimensions({ width: target.naturalWidth, height: target.naturalHeight });
+                  setMeasuredDims({ id: item.id, width: target.naturalWidth, height: target.naturalHeight });
                 }
               }}
               className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg border border-zinc-800 shadow-[0_20px_50px_rgba(0,0,0,0.6)]"
@@ -393,7 +392,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
       {showOcr && currentImage && (
         <OcrDrawer
           dataUrl={currentImage}
-          initialText={item.ocrText}
+          initialText={ocrTextOverride?.id === item.id ? ocrTextOverride.text : item.ocrText}
           onSaveText={handleSaveOcrText}
           onClose={() => setShowOcr(false)}
         />
