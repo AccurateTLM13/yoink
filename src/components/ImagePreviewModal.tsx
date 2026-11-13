@@ -6,9 +6,7 @@ import {
   Check,
   ZoomIn,
   ZoomOut,
-  Maximize2,
   FileImage,
-  ExternalLink,
   RotateCcw,
   Pencil,
   FileText,
@@ -28,6 +26,7 @@ interface Props {
   onSaved?: (newItem: HistoryItem) => void;
   initialAnnotating?: boolean;
   initialOcr?: boolean;
+  maxSliceHeight?: number;
 }
 
 export const ImagePreviewModal: React.FC<Props> = ({
@@ -36,6 +35,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
   onSaved,
   initialAnnotating = false,
   initialOcr = false,
+  maxSliceHeight = 4000,
 }) => {
   const [copied, setCopied] = useState(false);
   const [isAnnotating, setIsAnnotating] = useState(initialAnnotating);
@@ -43,7 +43,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
   const [slicing, setSlicing] = useState(false);
   const [showOcr, setShowOcr] = useState(initialOcr);
   const [zoomLevel, setZoomLevel] = useState(1);
-  const initial = (item?.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item?.dataUrl || item?.thumbnailUrl || null);
+  const initial = item?.dataUrl || null;
   const [fullImage, setFullImage] = useState<string | null>(initial);
   const [dimensions, setDimensions] = useState<{ width: number; height: number }>({
     width: item?.width || 0,
@@ -78,10 +78,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
   useEffect(() => {
     if (!item) return;
     let isMounted = true;
-    const init = (item.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item.dataUrl || item.thumbnailUrl);
-    if (init) {
-      setFullImage(init);
-    }
+    setFullImage(item.dataUrl || null);
     if (item.width && item.height) {
       setDimensions({ width: item.width, height: item.height });
     }
@@ -97,7 +94,8 @@ export const ImagePreviewModal: React.FC<Props> = ({
 
   if (!item) return null;
 
-  const currentImage = fullImage || item.dataUrl || item.thumbnailUrl;
+  const currentImage = fullImage || item.dataUrl;
+  const previewImage = currentImage || item.thumbnailUrl;
 
   if (isAnnotating && currentImage) {
     return (
@@ -147,7 +145,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
     setSlicing(true);
     try {
       const cleanTitle = (item?.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
-      await downloadImageSlices(currentImage, cleanTitle, 4000, item?.format || 'png');
+      await downloadImageSlices(currentImage, cleanTitle, maxSliceHeight || 4000, item?.format || 'png');
     } catch (err) {
       console.error('Image slicing failed:', err);
     } finally {
@@ -188,6 +186,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Annotate / Redact Button */}
           <button
             onClick={() => setIsAnnotating(true)}
+            disabled={!currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-orange-600 hover:bg-orange-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-xs mr-1"
             title="Open Annotation & Redaction Studio (P0-1 // P0-3)"
           >
@@ -228,6 +227,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Copy Button */}
           <button
             onClick={handleCopy}
+            disabled={!currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
             title="Copy to clipboard"
           >
@@ -242,7 +242,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* PDF Export Button (P0-2) */}
           <button
             onClick={handleExportPdf}
-            disabled={exportingPdf}
+            disabled={exportingPdf || !currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
             title="Export as PDF (tall pages split across A4 pages)"
           >
@@ -253,9 +253,9 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Slices Button (Anti-Squish multi-part export) */}
           <button
             onClick={handleDownloadSlices}
-            disabled={slicing}
+            disabled={slicing || !currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
-            title="Split tall image into web-friendly parts (max 4,000px per part) so upload platforms don't squash it"
+            title={`Split tall image into web-friendly parts (max ${(maxSliceHeight || 4000).toLocaleString()}px per part) so upload platforms don't squash it`}
           >
             <Layers size={13} />
             <span>{slicing ? 'Slicing…' : 'Slices'}</span>
@@ -264,6 +264,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Extract Text / OCR Button (P2-9) */}
           <button
             onClick={() => setShowOcr(true)}
+            disabled={!currentImage}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
               showOcr
                 ? 'bg-indigo-600 text-white border-indigo-500'
@@ -278,6 +279,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Download Button */}
           <button
             onClick={handleDownload}
+            disabled={!currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-xs"
             title="Download image file"
           >
@@ -302,9 +304,9 @@ export const ImagePreviewModal: React.FC<Props> = ({
           className="transition-transform duration-150 ease-out origin-center flex items-center justify-center max-w-full max-h-full"
           style={{ transform: `scale(${zoomLevel})` }}
         >
-          {currentImage ? (
+          {previewImage ? (
             <img
-              src={currentImage}
+              src={previewImage}
               alt={item.title}
               onLoad={(e) => {
                 const target = e.currentTarget;
@@ -323,6 +325,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
         </div>
       </div>
 
+      {!currentImage && <div role="status" className="p-2 text-center bg-amber-100 text-amber-950 text-xs">Original image unavailable or still loading. This is a thumbnail preview; export and editing require the original.</div>}
       {/* Footer Info */}
       <div className="px-4 py-2 bg-zinc-900/95 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
         <span className="truncate max-w-[400px]">

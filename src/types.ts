@@ -41,6 +41,7 @@ export interface HistoryItem {
   height: number;
   mode: CaptureMode;
   format: CaptureFormat;
+  viewport?: { width: number; height: number; dpr: number; requestedWidth: number; requestedHeight: number };
   fileSizeBytes?: number;
   ocrText?: string;
 }
@@ -98,3 +99,6 @@ export interface AnnotationItem {
   fontSize?: number;
   fill?: boolean;
 }
+
+export interface BatchIssue { target: string; reason: string; tabId?: number }
+export interface BatchOutcome { failures: BatchIssue[]; skipped: BatchIssue[] }

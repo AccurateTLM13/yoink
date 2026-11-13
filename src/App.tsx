@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FileText,
   Monitor,
@@ -10,15 +10,17 @@ import {
   Settings,
   Sparkles,
   ArrowRight,
-  ExternalLink,
   ChevronRight,
   Loader2,
   Check,
   Copy,
   ScrollText,
   ScreenShare,
+  Upload,
+  RefreshCw,
+  Play,
 } from 'lucide-react';
-import { CaptureSettings, HistoryItem } from './types';
+import { BatchIssue, CaptureSettings, HistoryItem } from './types';
 import {
   DEFAULT_SETTINGS,
   getStoredSettings,
@@ -37,6 +39,8 @@ import {
   captureDesktop,
   captureAllTabs,
   ensureAllSitesAccess,
+  getInjectableOpenTabs,
+  OpenTabInfo,
 } from './utils/capture';
 import { QuickMenu } from './components/QuickMenu';
 import { UrlBatchModal } from './components/UrlBatchModal';
@@ -46,6 +50,15 @@ import { MultiSizeModal } from './components/MultiSizeModal';
 import { ImagePreviewModal } from './components/ImagePreviewModal';
 
 type CurrentView = 'menu' | 'urllist' | 'history' | 'options' | 'multisize';
+
+const hasExplicitViewParam = (): boolean => {
+  if (typeof window !== 'undefined') {
+    const params = new URLSearchParams(window.location.search);
+    const v = params.get('view');
+    return Boolean(v && ['menu', 'urllist', 'history', 'options', 'multisize'].includes(v));
+  }
+  return false;
+};
 
 const getInitialView = (): CurrentView => {
   if (typeof window !== 'undefined') {
@@ -80,7 +93,13 @@ export default function App() {
   const [isOcrDirectly, setIsOcrDirectly] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('Ready');
+  const [tabIssues, setTabIssues] = useState<BatchIssue[]>([]);
   const [copiedShortcut, setCopiedShortcut] = useState<string | null>(null);
+
+  const [openTabs, setOpenTabs] = useState<OpenTabInfo[]>([]);
+  const [selectedTabId, setSelectedTabId] = useState<number | undefined>(undefined);
+  const [isLoadingTabs, setIsLoadingTabs] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [windowWidth, setWindowWidth] = useState(
     typeof window !== 'undefined' ? window.innerWidth : 370
@@ -108,19 +127,34 @@ export default function App() {
     }
   }, [isFullTab]);
 
+  const refreshOpenTabs = useCallback(async () => {
+    setIsLoadingTabs(true);
+    try {
+      const tabs = await getInjectableOpenTabs();
+      setOpenTabs(tabs);
+      setSelectedTabId((prev) => {
+        if (prev && tabs.some((t) => t.id === prev)) return prev;
+        return tabs[0]?.id;
+      });
+    } finally {
+      setIsLoadingTabs(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isFullTab && view === 'menu') {
+      refreshOpenTabs();
+    }
+  }, [isFullTab, view, refreshOpenTabs]);
+
   // Load initial settings and history, plus check for pending_view from background captures
   useEffect(() => {
-    async function loadInitialData() {
-      const s = await getStoredSettings();
-      setSettings(s);
-      const h = await getStoredHistory();
-      setHistory(h);
-    }
-    loadInitialData();
+    let pendingViewResolved = false;
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       chrome.storage.local.get(['pending_view', 'last_batch_count'], (res) => {
         if (res.pending_view) {
+          pendingViewResolved = true;
           setView(res.pending_view as CurrentView);
           if (res.last_batch_count) {
             setRecentBatchCount(res.last_batch_count);
@@ -129,6 +163,21 @@ export default function App() {
         }
       });
     }
+
+    async function loadInitialData() {
+      const s = await getStoredSettings();
+      setSettings(s);
+      const h = await getStoredHistory();
+      setHistory(h);
+
+      // In Full Tab Studio Hub, default to Gallery when captures exist unless an explicit ?view= or pending_view was requested
+      if (!forcePopup && (forceTab || window.innerWidth > 480) && !hasExplicitViewParam() && !pendingViewResolved) {
+        if (h.length > 0) {
+          setView('history');
+        }
+      }
+    }
+    loadInitialData();
 
     // Listen for storage changes from background worker
     let storageCleanup: (() => void) | undefined;
@@ -172,19 +221,24 @@ export default function App() {
       if (storageCleanup) storageCleanup();
       if (runtimeCleanup) runtimeCleanup();
     };
-  }, []);
+  }, [forcePopup, forceTab]);
+
+  const targetTabForCapture = isFullTab ? selectedTabId : undefined;
 
   const handleCaptureFullPage = useCallback(async () => {
     setIsCapturing(true);
     setStatusMessage(settings.captureDelaySec ? `Capturing in ${settings.captureDelaySec}s…` : 'Scanning page...');
     try {
-      // P1-6: close the popup during a countdown so the user can interact with the page.
       if (!isFullTab && settings.captureDelaySec > 0 && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureFullPage(settings, (msg) => {
-        setStatusMessage(msg);
-      });
+      const item = await captureFullPage(
+        settings,
+        (msg) => {
+          setStatusMessage(msg);
+        },
+        targetTabForCapture
+      );
       setStatusMessage('Full page capture complete!');
       if (item && item.dataUrl) {
         setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
@@ -195,7 +249,7 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureVisible = useCallback(async () => {
     setIsCapturing(true);
@@ -204,7 +258,7 @@ export default function App() {
       if (!isFullTab && settings.captureDelaySec > 0 && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureVisible(settings);
+      const item = await captureVisible(settings, targetTabForCapture);
       setStatusMessage('Visible viewport captured!');
       if (item && item.dataUrl) {
         setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
@@ -215,17 +269,16 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureSelection = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Select region on page...');
+    setStatusMessage('Select region on target page...');
     try {
-      // In popup mode, close popup after brief delay so user can draw rectangle on webpage
       if (!isFullTab && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureSelection(settings);
+      const item = await captureSelection(settings, targetTabForCapture);
       setStatusMessage('Selection captured!');
       if (item && item.dataUrl) {
         setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
@@ -236,16 +289,16 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureElement = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Select scrollable element on page...');
+    setStatusMessage('Select scrollable element on target page...');
     try {
       if (!isFullTab && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureScrollingElement(settings);
+      const item = await captureScrollingElement(settings, targetTabForCapture);
       setStatusMessage('Scrollable element captured!');
       if (item && item.dataUrl) {
         setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
@@ -256,7 +309,7 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureDesktop = useCallback(async () => {
     setIsCapturing(true);
@@ -275,24 +328,23 @@ export default function App() {
     }
   }, [settings]);
 
-  const handleCaptureAllTabs = useCallback(async () => {
+  const handleCaptureAllTabs = useCallback(async (retryIds?: number[]) => {
+    let issues: BatchIssue[] = [];
     try {
       if (!(await ensureAllSitesAccess())) {
         setStatusMessage('Yoink needs access to all sites to capture multiple tabs.');
         return;
       }
       setIsCapturing(true);
+      setTabIssues([]);
       setStatusMessage('Capturing all tabs in window...');
       const results = await captureAllTabs(settings, (curr, total, title) => {
         setStatusMessage(`Capturing tab ${curr}/${total}: ${title}`);
-      });
+      }, (outcome) => { issues = [...outcome.failures, ...outcome.skipped]; setTabIssues(issues); }, retryIds);
       const updated = await getStoredHistory();
       setHistory(updated);
-      setStatusMessage(`All ${results.length} tabs captured!`);
-      if (results.length > 0) {
-        setRecentBatchCount(results.length);
-        setView('history');
-      }
+      setStatusMessage(`${results.length} captured, ${issues.length} failed or skipped.`);
+      if (results.length > 0) setRecentBatchCount(results.length);
     } catch (err: any) {
       setStatusMessage(`Error: ${err.message || 'All tabs capture failed'}`);
     } finally {
@@ -321,7 +373,7 @@ export default function App() {
     setHistory((prev) => [...items, ...prev]);
   }, []);
 
-  // P1-7 Upload and Edit: import local images, then open the editor for a single file.
+  // Upload and Edit: import local images, then open the editor for a single file.
   const handleImportFiles = useCallback(async (files: File[]) => {
     const images = files.filter((f) => f.type.startsWith('image/'));
     if (images.length === 0) {
@@ -376,11 +428,13 @@ export default function App() {
       navigator.clipboard.writeText(shortcut);
     }
     setCopiedShortcut(shortcut);
-    setStatusMessage(`Shortcut ${shortcut} copied! Navigate to any tab and press it to ${label.toLowerCase()}.`);
+    setStatusMessage(`Shortcut ${shortcut} copied! Press it on any webpage to trigger ${label}.`);
     setTimeout(() => setCopiedShortcut(null), 2500);
   }, []);
 
-  // Full Tab Gallery Hub View
+  const selectedTabObj = openTabs.find((t) => t.id === selectedTabId) || openTabs[0];
+
+  // Full Tab Studio Hub View
   if (isFullTab) {
     return (
       <div className="min-h-screen w-full bg-[#f8f9fc] flex flex-col items-center py-6 px-4 sm:px-6">
@@ -466,12 +520,24 @@ export default function App() {
 
             {/* Quick Status Chip */}
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 ring-4 ring-emerald-50" />
-              <span className="text-xs font-mono text-zinc-600">Local Engine Ready</span>
+              {isCapturing ? (
+                <>
+                  <Loader2 size={14} className="animate-spin text-blue-600" />
+                  <span className="text-xs font-mono text-blue-700 font-semibold max-w-[180px] truncate">
+                    {statusMessage}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 ring-4 ring-emerald-50" />
+                  <span className="text-xs font-mono text-zinc-600">Local Engine Ready</span>
+                </>
+              )}
             </div>
           </header>
 
           {/* Content Area */}
+          {tabIssues.length > 0 && <div role="alert" className="p-3 bg-amber-50 text-amber-950 border border-amber-300 text-xs overflow-auto max-h-40"><p className="font-semibold">Tabs not captured</p><ul>{tabIssues.map((issue, i) => <li key={i}>{issue.target}: {issue.reason}</li>)}</ul>{tabIssues.some((issue) => issue.tabId) && <button type="button" disabled={isCapturing} className="underline font-semibold" onClick={() => handleCaptureAllTabs(tabIssues.flatMap((issue) => issue.tabId ? [issue.tabId] : []))}>Retry failed</button>} <button type="button" className="underline" onClick={() => setTabIssues([])}>Dismiss</button></div>}
           <main
             className="flex-1 overflow-hidden relative flex flex-col"
             onDragOver={(e) => {
@@ -517,280 +583,392 @@ export default function App() {
 
             {view === 'menu' && (
               <div className="flex-1 p-6 md:p-8 overflow-y-auto space-y-6">
-                {/* Hero Header */}
-                <div className="bg-gradient-to-br from-blue-50/70 via-white to-indigo-50/40 p-6 rounded-2xl border border-blue-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div className="space-y-1">
-                    <span className="inline-flex items-center gap-1 text-[11px] font-mono font-bold tracking-wider uppercase text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded-md">
-                      <Sparkles size={11} /> Studio Command Hub
-                    </span>
-                    <h2 className="text-xl md:text-2xl font-bold text-zinc-900 font-display tracking-tight">
-                      Capture, Stitch & Organize with Yoink
-                    </h2>
-                    <p className="text-xs md:text-sm text-zinc-600 max-w-xl leading-relaxed">
-                      All your screenshots, stitches, and batch workflows save directly to this central studio. Use keyboard shortcuts or the toolbar popup on any target tab.
-                    </p>
+                {/* Hidden File Input for Local Import Card */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    if (files.length > 0) handleImportFiles(files);
+                    e.target.value = '';
+                  }}
+                />
+
+                {/* Hero Command Header + Target Browser Tab Selector */}
+                <div className="bg-gradient-to-br from-blue-50/70 via-white to-indigo-50/40 p-6 rounded-2xl border border-blue-100 space-y-4">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <span className="inline-flex items-center gap-1 text-[11px] font-mono font-bold tracking-wider uppercase text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded-md">
+                        <Sparkles size={11} /> Studio Capture Launcher
+                      </span>
+                      <h2 className="text-xl md:text-2xl font-bold text-zinc-900 font-display tracking-tight">
+                        Launch Any Capture Directly from Studio
+                      </h2>
+                      <p className="text-xs md:text-sm text-zinc-600 max-w-xl leading-relaxed">
+                        Choose an open browser tab below and click any capture tool. Yoink will automatically switch to your target tab, capture it, and return the result right here.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2.5 shrink-0">
+                      <button
+                        onClick={() => setView('history')}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <span>Open Gallery ({history.length})</span>
+                        <ArrowRight size={14} />
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-2.5">
+                  {/* Live Target Browser Tab Bar */}
+                  <div className="bg-white/95 p-3.5 rounded-xl border border-blue-200/80 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <div className="w-8 h-8 rounded-lg bg-blue-50 border border-blue-200/60 flex items-center justify-center shrink-0">
+                        {selectedTabObj?.favIconUrl ? (
+                          <img src={selectedTabObj.favIconUrl} alt="" className="w-4 h-4 rounded-xs object-contain" />
+                        ) : (
+                          <Globe size={15} className="text-blue-600" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                            Target Browser Tab
+                          </label>
+                          <span className="text-[10px] font-mono text-zinc-500">
+                            ({openTabs.length} capturable {openTabs.length === 1 ? 'tab' : 'tabs'} open)
+                          </span>
+                        </div>
+                        {openTabs.length > 0 ? (
+                          <select
+                            value={selectedTabId ?? openTabs[0]?.id ?? ''}
+                            onChange={(e) => setSelectedTabId(Number(e.target.value))}
+                            className="mt-1 w-full text-xs font-semibold text-zinc-900 bg-zinc-50 hover:bg-zinc-100/80 border border-zinc-200/90 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer truncate"
+                          >
+                            {openTabs.map((tab) => (
+                              <option key={tab.id} value={tab.id}>
+                                {tab.title} — {tab.url}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <p className="text-xs text-amber-700 font-medium mt-0.5">
+                            No capturable web tabs detected. Open any http:// or https:// website in another tab and click Refresh.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
                     <button
-                      onClick={() => setView('history')}
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                      type="button"
+                      onClick={refreshOpenTabs}
+                      disabled={isLoadingTabs}
+                      className="px-3 py-1.5 rounded-lg bg-zinc-100 hover:bg-zinc-200/80 text-zinc-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer shrink-0 self-start sm:self-center"
+                      title="Refresh open browser tabs"
                     >
-                      <span>Open Gallery ({history.length})</span>
-                      <ArrowRight size={14} />
+                      <RefreshCw size={13} className={isLoadingTabs ? 'animate-spin text-blue-600' : ''} />
+                      <span>Refresh Tabs</span>
                     </button>
                   </div>
+
+                  {/* Status Feedback Banner */}
+                  {(isCapturing || (statusMessage && statusMessage !== 'Ready')) && (
+                    <div className="px-3.5 py-2 rounded-xl bg-blue-950 text-white text-xs font-mono flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 truncate">
+                        {isCapturing ? (
+                          <Loader2 size={13} className="animate-spin text-blue-400 shrink-0" />
+                        ) : (
+                          <Check size={13} className="text-emerald-400 shrink-0" />
+                        )}
+                        <span className="truncate">{statusMessage}</span>
+                      </div>
+                      {!isCapturing && (
+                        <button
+                          onClick={() => setStatusMessage('Ready')}
+                          className="text-[10px] text-zinc-400 hover:text-white cursor-pointer shrink-0"
+                        >
+                          Dismiss
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                {/* 3-Step Quick Start Workflow */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 p-4 bg-white rounded-2xl border border-zinc-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.02)]">
-                  <div className="flex items-start gap-3 p-1">
-                    <div className="w-6 h-6 rounded-lg bg-blue-50 text-blue-700 font-mono font-bold flex items-center justify-center shrink-0 text-xs border border-blue-200/60">
-                      1
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-semibold text-zinc-900">Browse to Target</h4>
-                      <p className="text-[11.5px] text-zinc-600 mt-0.5 leading-snug">
-                        Open the website, dashboard, or app you want to capture in any Chrome tab.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start gap-3 p-1">
-                    <div className="w-6 h-6 rounded-lg bg-blue-50 text-blue-700 font-mono font-bold flex items-center justify-center shrink-0 text-xs border border-blue-200/60">
-                      2
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-semibold text-zinc-900">Trigger on Webpage</h4>
-                      <p className="text-[11.5px] text-zinc-600 mt-0.5 leading-snug">
-                        Press the global shortcut (<kbd className="px-1 py-0.2 bg-zinc-100 rounded border border-zinc-200 font-mono text-[10px]">Alt+Shift+1</kbd>) or click the Yoink toolbar popup.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-start gap-3 p-1">
-                    <div className="w-6 h-6 rounded-lg bg-blue-50 text-blue-700 font-mono font-bold flex items-center justify-center shrink-0 text-xs border border-blue-200/60">
-                      3
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-semibold text-zinc-900">Review in Studio</h4>
-                      <p className="text-[11.5px] text-zinc-600 mt-0.5 leading-snug">
-                        Screenshots land automatically right here in your Gallery to zoom, copy, and export.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Core Capture Capabilities & Global Shortcuts */}
+                {/* Primary One-Click Capture Tools */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-700">
-                        Capture Capabilities & Shortcuts
+                        One-Click Page & Screen Captures
                       </h3>
                       <p className="text-xs text-zinc-600 mt-0.5">
-                        These tools operate on any active webpage. Click a shortcut to copy it to your clipboard.
+                        Click any card to immediately capture <b className="text-zinc-800">{selectedTabObj ? selectedTabObj.title : 'your target tab'}</b>, or copy its global keyboard shortcut.
                       </p>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                     {/* Full Page */}
                     <div
-                      onClick={() => handleCopyShortcut('Alt+Shift+1', 'Full Page Capture')}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3 relative"
+                      onClick={handleCaptureFullPage}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-400 hover:shadow-md transition cursor-pointer space-y-3 relative flex flex-col justify-between"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
-                          <FileText size={20} />
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
+                            <FileText size={20} />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCopyShortcut('Alt+Shift+1', 'Full Page Capture');
+                            }}
+                            className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                            title="Click to copy shortcut"
+                          >
+                            {copiedShortcut === 'Alt+Shift+1' ? (
+                              <>
+                                <Check size={11} className="text-emerald-600" />
+                                <span className="text-emerald-700">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={11} className="text-zinc-500" />
+                                <span>Alt+Shift+1</span>
+                              </>
+                            )}
+                          </button>
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleCopyShortcut('Alt+Shift+1', 'Full Page Capture');
-                          }}
-                          className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition"
-                          title="Click to copy shortcut"
-                        >
-                          {copiedShortcut === 'Alt+Shift+1' ? (
-                            <>
-                              <Check size={11} className="text-emerald-600" />
-                              <span className="text-emerald-700">Copied</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy size={11} className="text-zinc-500" />
-                              <span>Alt+Shift+1</span>
-                            </>
-                          )}
-                        </button>
+                        <div>
+                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
+                            Full Page Capture
+                          </h4>
+                          <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                            Scrolls the entire webpage automatically, preserves top navbars once, and streams DOM chunks into one seamless image.
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
-                          Full Page Capture
-                        </h4>
-                        <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Scrolls the entire webpage automatically, suppresses sticky navbars to avoid duplication, and stitches DOM chunks into one seamless image.
-                        </p>
-                      </div>
-                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
-                        <span>Trigger: Anywhere on Web</span>
-                        <span className="text-blue-600 font-semibold group-hover:underline">Copy Shortcut →</span>
+                      <div className="pt-2.5 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span className="truncate max-w-[140px]">
+                          {selectedTabObj ? selectedTabObj.title : 'Active Webpage'}
+                        </span>
+                        <span className="text-blue-600 font-semibold inline-flex items-center gap-1 group-hover:translate-x-0.5 transition">
+                          <Play size={11} className="fill-current" /> Capture Now →
+                        </span>
                       </div>
                     </div>
 
                     {/* Visible Viewport */}
                     <div
-                      onClick={() => handleCopyShortcut('Alt+Shift+3', 'Visible Viewport')}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3 relative"
+                      onClick={handleCaptureVisible}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-400 hover:shadow-md transition cursor-pointer space-y-3 relative flex flex-col justify-between"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
-                          <Monitor size={20} />
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
+                            <Monitor size={20} />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCopyShortcut('Alt+Shift+3', 'Visible Viewport');
+                            }}
+                            className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                            title="Click to copy shortcut"
+                          >
+                            {copiedShortcut === 'Alt+Shift+3' ? (
+                              <>
+                                <Check size={11} className="text-emerald-600" />
+                                <span className="text-emerald-700">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={11} className="text-zinc-500" />
+                                <span>Alt+Shift+3</span>
+                              </>
+                            )}
+                          </button>
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleCopyShortcut('Alt+Shift+3', 'Visible Viewport');
-                          }}
-                          className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition"
-                          title="Click to copy shortcut"
-                        >
-                          {copiedShortcut === 'Alt+Shift+3' ? (
-                            <>
-                              <Check size={11} className="text-emerald-600" />
-                              <span className="text-emerald-700">Copied</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy size={11} className="text-zinc-500" />
-                              <span>Alt+Shift+3</span>
-                            </>
-                          )}
-                        </button>
+                        <div>
+                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
+                            Visible Viewport
+                          </h4>
+                          <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                            Instant 1:1 hardware pixel ratio snapshot of the target tab's visible viewport with zero compression delay.
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
-                          Visible Viewport
-                        </h4>
-                        <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Instant 1:1 hardware pixel ratio snapshot of whatever is currently displayed on your active screen with zero compression delay.
-                        </p>
-                      </div>
-                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
-                        <span>Trigger: Anywhere on Web</span>
-                        <span className="text-blue-600 font-semibold group-hover:underline">Copy Shortcut →</span>
+                      <div className="pt-2.5 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span className="truncate max-w-[140px]">
+                          {selectedTabObj ? selectedTabObj.title : 'Active Webpage'}
+                        </span>
+                        <span className="text-blue-600 font-semibold inline-flex items-center gap-1 group-hover:translate-x-0.5 transition">
+                          <Play size={11} className="fill-current" /> Capture Now →
+                        </span>
                       </div>
                     </div>
 
                     {/* Selection Area */}
                     <div
-                      onClick={() => handleCopyShortcut('Alt+Shift+4', 'Selection Region')}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition cursor-pointer space-y-3 relative"
+                      onClick={handleCaptureSelection}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-blue-400 hover:shadow-md transition cursor-pointer space-y-3 relative flex flex-col justify-between"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
-                          <Crop size={20} />
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center group-hover:bg-blue-600 group-hover:text-white transition">
+                            <Crop size={20} />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCopyShortcut('Alt+Shift+4', 'Selection Region');
+                            }}
+                            className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                            title="Click to copy shortcut"
+                          >
+                            {copiedShortcut === 'Alt+Shift+4' ? (
+                              <>
+                                <Check size={11} className="text-emerald-600" />
+                                <span className="text-emerald-700">Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={11} className="text-zinc-500" />
+                                <span>Alt+Shift+4</span>
+                              </>
+                            )}
+                          </button>
                         </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleCopyShortcut('Alt+Shift+4', 'Selection Region');
-                          }}
-                          className="px-2 py-1 rounded-lg bg-zinc-100 hover:bg-blue-50 border border-zinc-200 hover:border-blue-200 text-zinc-700 hover:text-blue-700 font-mono text-[10.5px] font-semibold flex items-center gap-1 transition"
-                          title="Click to copy shortcut"
-                        >
-                          {copiedShortcut === 'Alt+Shift+4' ? (
-                            <>
-                              <Check size={11} className="text-emerald-600" />
-                              <span className="text-emerald-700">Copied</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy size={11} className="text-zinc-500" />
-                              <span>Alt+Shift+4</span>
-                            </>
-                          )}
-                        </button>
+                        <div>
+                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
+                            Selection Region
+                          </h4>
+                          <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                            Switches to your target tab and opens an isolated Shadow DOM crop overlay with real-time pixel dimensions.
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-blue-600 transition">
-                          Selection Region
-                        </h4>
-                        <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Launches an interactive semi-transparent crop overlay on your target page with 8-point resize handles and real-time pixel dimensions.
-                        </p>
-                      </div>
-                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
-                        <span>Trigger: Anywhere on Web</span>
-                        <span className="text-blue-600 font-semibold group-hover:underline">Copy Shortcut →</span>
+                      <div className="pt-2.5 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span className="truncate max-w-[140px]">
+                          {selectedTabObj ? selectedTabObj.title : 'Active Webpage'}
+                        </span>
+                        <span className="text-blue-600 font-semibold inline-flex items-center gap-1 group-hover:translate-x-0.5 transition">
+                          <Play size={11} className="fill-current" /> Select Region →
+                        </span>
                       </div>
                     </div>
 
                     {/* Scrollable Element */}
                     <div
                       onClick={handleCaptureElement}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-cyan-400 hover:shadow-md transition cursor-pointer space-y-3 relative"
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-cyan-400 hover:shadow-md transition cursor-pointer space-y-3 relative flex flex-col justify-between"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="w-10 h-10 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center group-hover:bg-cyan-600 group-hover:text-white transition">
-                          <ScrollText size={20} />
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="w-10 h-10 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center group-hover:bg-cyan-600 group-hover:text-white transition">
+                            <ScrollText size={20} />
+                          </div>
+                          <span className="px-2 py-0.5 rounded-lg bg-cyan-50 text-cyan-700 border border-cyan-200 font-mono text-[10.5px] font-semibold">
+                            DOM Inspector
+                          </span>
                         </div>
-                        <span className="px-2 py-0.5 rounded-lg bg-cyan-50 text-cyan-700 border border-cyan-200 font-mono text-[10.5px] font-semibold">
-                          Click to select
+                        <div>
+                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-cyan-700 transition">
+                            Scrollable Element
+                          </h4>
+                          <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                            Hover and click any scrollable container (chat log, side drawer, code block, data table) to scroll and stitch its overflow.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="pt-2.5 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span className="truncate max-w-[140px]">
+                          {selectedTabObj ? selectedTabObj.title : 'Active Webpage'}
                         </span>
-                      </div>
-                      <div>
-                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-cyan-700 transition">
-                          Scrollable Element
-                        </h4>
-                        <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Hover and click any scrollable DIV (chat log, side drawer, code snippet, spreadsheet) to scroll and stitch its full overflow content.
-                        </p>
-                      </div>
-                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
-                        <span>Trigger: Popup or Hub</span>
-                        <span className="text-cyan-700 font-semibold group-hover:underline">Launch Inspector →</span>
+                        <span className="text-cyan-700 font-semibold group-hover:translate-x-0.5 transition">
+                          Launch Inspector →
+                        </span>
                       </div>
                     </div>
 
                     {/* Desktop Screen */}
                     <div
                       onClick={handleCaptureDesktop}
-                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-emerald-400 hover:shadow-md transition cursor-pointer space-y-3 relative"
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-emerald-400 hover:shadow-md transition cursor-pointer space-y-3 relative flex flex-col justify-between"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center group-hover:bg-emerald-600 group-hover:text-white transition">
-                          <ScreenShare size={20} />
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center group-hover:bg-emerald-600 group-hover:text-white transition">
+                            <ScreenShare size={20} />
+                          </div>
+                          <span className="px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-mono text-[10.5px] font-semibold">
+                            Display Media
+                          </span>
                         </div>
-                        <span className="px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 font-mono text-[10.5px] font-semibold">
-                          Display Media
+                        <div>
+                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-emerald-700 transition">
+                            Desktop / App Window
+                          </h4>
+                          <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                            Capture your entire monitor display, individual desktop application window, or Chrome tab at full display resolution.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="pt-2.5 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span>System Picker</span>
+                        <span className="text-emerald-700 font-semibold group-hover:translate-x-0.5 transition">
+                          Share Screen →
                         </span>
                       </div>
-                      <div>
-                        <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-emerald-700 transition">
-                          Desktop / Screen
-                        </h4>
-                        <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                          Capture your entire monitor display, individual desktop application window, or Chrome tab at full hardware display resolution.
-                        </p>
+                    </div>
+
+                    {/* Import / Annotate Local Image */}
+                    <div
+                      onClick={() => fileInputRef.current?.click()}
+                      className="group bg-white p-5 rounded-2xl border border-zinc-200/90 hover:border-purple-400 hover:shadow-md transition cursor-pointer space-y-3 relative flex flex-col justify-between"
+                    >
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="w-10 h-10 rounded-xl bg-purple-50 text-purple-600 flex items-center justify-center group-hover:bg-purple-600 group-hover:text-white transition">
+                            <Upload size={20} />
+                          </div>
+                          <span className="px-2 py-0.5 rounded-lg bg-purple-50 text-purple-700 border border-purple-200 font-mono text-[10.5px] font-semibold">
+                            Ctrl+V or Drop
+                          </span>
+                        </div>
+                        <div>
+                          <h4 className="font-semibold text-sm text-zinc-900 group-hover:text-purple-700 transition">
+                            Import & Annotate Image
+                          </h4>
+                          <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
+                            Upload any local screenshot or paste from your clipboard to annotate, redact sensitive data, or run offline OCR.
+                          </p>
+                        </div>
                       </div>
-                      <div className="pt-1 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
-                        <span>Trigger: System Picker</span>
-                        <span className="text-emerald-700 font-semibold group-hover:underline">Share Screen →</span>
+                      <div className="pt-2.5 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono text-zinc-600">
+                        <span>Local File / Clipboard</span>
+                        <span className="text-purple-700 font-semibold group-hover:translate-x-0.5 transition">
+                          Browse Files →
+                        </span>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* In-Studio Automation Tools */}
+                {/* Multi-Tab & Responsive Automation Workflows */}
                 <div className="space-y-3 pt-1">
                   <div>
                     <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-700">
-                      In-Studio Automation Tools
+                      Batch & Multi-Viewport Automation
                     </h3>
                     <p className="text-xs text-zinc-600 mt-0.5">
-                      Batch workflows you can configure and execute directly from this dashboard.
+                      Automated multi-tab and responsive breakpoint pipelines.
                     </p>
                   </div>
 
@@ -820,7 +998,7 @@ export default function App() {
                           <Smartphone size={16} />
                         </div>
                         <div>
-                          <h4 className="font-semibold text-xs text-zinc-900 group-hover:text-sky-900 transition">Multi-Device Breakpoints</h4>
+                          <h4 className="font-semibold text-xs text-zinc-900 group-hover:text-sky-900 transition">Responsive Breakpoints</h4>
                           <p className="text-[11px] text-zinc-600">Mobile, Tablet, and Desktop viewports</p>
                         </div>
                       </div>
@@ -828,7 +1006,7 @@ export default function App() {
                     </div>
 
                     <div
-                      onClick={handleCaptureAllTabs}
+                      onClick={() => handleCaptureAllTabs()}
                       className="p-4 bg-white hover:bg-indigo-50/50 rounded-xl border border-zinc-200 hover:border-indigo-300 transition cursor-pointer flex items-center justify-between group shadow-2xs"
                     >
                       <div className="flex items-center gap-3">
@@ -843,26 +1021,6 @@ export default function App() {
                       <ChevronRight size={16} className="text-zinc-600 group-hover:translate-x-0.5 group-hover:text-indigo-700 transition" />
                     </div>
                   </div>
-                </div>
-
-                {/* Future Expansion Callout */}
-                <div className="p-4 bg-gradient-to-r from-blue-50/70 via-indigo-50/40 to-white rounded-2xl border border-blue-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-                      <Sparkles size={16} />
-                    </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-zinc-900">
-                        Studio Hub Workspace Roadmap
-                      </h4>
-                      <p className="text-[11.5px] text-zinc-600 leading-snug">
-                        Upcoming updates will expand this studio area with live in-tab URL rendering, canvas annotations, and multi-capture collage builders.
-                      </p>
-                    </div>
-                  </div>
-                  <span className="text-[10px] font-mono font-bold text-blue-700 bg-blue-100/80 px-2.5 py-1 rounded-full uppercase tracking-wider shrink-0 self-start sm:self-auto border border-blue-200">
-                    Active Development
-                  </span>
                 </div>
 
                 {/* Storage & Engine Info Footer */}
@@ -894,6 +1052,7 @@ export default function App() {
                 onBack={() => setView('menu')}
                 onFinished={handleBatchResults}
                 onPreview={(item) => setPreviewItem(item)}
+                isFullTab={true}
               />
             )}
 
@@ -903,6 +1062,7 @@ export default function App() {
                 onBack={() => setView('menu')}
                 onFinished={handleBatchResults}
                 onPreview={(item) => setPreviewItem(item)}
+                isFullTab={true}
               />
             )}
 
@@ -911,6 +1071,7 @@ export default function App() {
                 settings={settings}
                 onBack={() => setView('menu')}
                 onSave={handleSaveSettings}
+                isFullTab={true}
               />
             )}
           </main>
@@ -921,6 +1082,7 @@ export default function App() {
               item={previewItem}
               initialAnnotating={isAnnotatingDirectly}
               initialOcr={isOcrDirectly}
+              maxSliceHeight={settings.maxSliceHeight}
               onClose={() => {
                 setPreviewItem(null);
                 setIsAnnotatingDirectly(false);
@@ -940,6 +1102,7 @@ export default function App() {
   return (
     <div className="w-[380px] h-[585px] max-h-[600px] flex flex-col bg-[#fbfbfd] text-zinc-900 overflow-hidden font-sans border border-zinc-200/80 rounded-2xl shadow-xl">
       {/* Primary View Router */}
+      {tabIssues.length > 0 && <div role="alert" className="p-3 bg-amber-50 text-amber-950 border border-amber-300 text-xs overflow-auto max-h-40"><p className="font-semibold">Tabs not captured</p><ul>{tabIssues.map((issue, i) => <li key={i}>{issue.target}: {issue.reason}</li>)}</ul>{tabIssues.some((issue) => issue.tabId) && <button type="button" disabled={isCapturing} className="underline font-semibold" onClick={() => handleCaptureAllTabs(tabIssues.flatMap((issue) => issue.tabId ? [issue.tabId] : []))}>Retry failed</button>} <button type="button" className="underline" onClick={() => setTabIssues([])}>Dismiss</button></div>}
       <div className="flex-1 overflow-hidden relative flex flex-col">
         {view === 'menu' && (
           <QuickMenu
@@ -948,7 +1111,7 @@ export default function App() {
             onCaptureSelection={handleCaptureSelection}
             onCaptureElement={handleCaptureElement}
             onCaptureDesktop={handleCaptureDesktop}
-            onCaptureAllTabs={handleCaptureAllTabs}
+            onCaptureAllTabs={() => handleCaptureAllTabs()}
             onOpenUrlBatch={() => setView('urllist')}
             onOpenMultiSize={() => setView('multisize')}
             onOpenHistory={() => setView('history')}
@@ -1029,6 +1192,7 @@ export default function App() {
           item={previewItem}
           initialAnnotating={isAnnotatingDirectly}
           initialOcr={isOcrDirectly}
+          maxSliceHeight={settings.maxSliceHeight}
           onClose={() => {
             setPreviewItem(null);
             setIsAnnotatingDirectly(false);

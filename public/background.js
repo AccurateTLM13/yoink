@@ -14,7 +14,7 @@ const IDLE_ALARM = 'yoink-offscreen-idle';
 const HISTORY_KEY = 'omnicapture_history';
 const SETTINGS_KEY = 'omnicapture_settings';
 const FULL_PREFIX = 'yoink_full_';
-const MAX_HISTORY = 40;
+
 const MAX_CHUNKS = 80;
 // Chrome limit: MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND = 2.
 const MIN_CAPTURE_INTERVAL_MS = 550;
@@ -43,8 +43,20 @@ let activeJobs = 0;
 let lastCaptureAt = 0;
 let captureQueue = Promise.resolve();
 let historyQueue = Promise.resolve();
-/** tabId -> { dataUrls: (string|null)[] } */
+/** tabId -> { jobId, kind, settings, chunkCount, streamedCount, dataUrls, originalZoom } */
 const scrollSessions = new Map();
+
+async function abortScrollSession(tabId) {
+  const session = scrollSessions.get(tabId);
+  if (!session) return;
+  scrollSessions.delete(tabId);
+  if (session.originalZoom != null) {
+    chrome.tabs.setZoom(tabId, session.originalZoom).catch(() => { });
+  }
+  if (session.jobId) {
+    await callOffscreen('STITCH_ABORT', { jobId: session.jobId }).catch(() => { });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level listener registration (synchronous)
@@ -59,7 +71,7 @@ chrome.runtime.onMessage.addListener(onMessage);
 chrome.alarms.onAlarm.addListener((alarm) => {
   onAlarm(alarm).catch((e) => console.warn('Offscreen idle cleanup failed:', e));
 });
-chrome.tabs.onRemoved.addListener((tabId) => scrollSessions.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => abortScrollSession(tabId));
 
 // ---------------------------------------------------------------------------
 // Message routing
@@ -82,8 +94,8 @@ const ROUTES = {
   CAPTURE_SELECTION_FINISH: { from: 'content', run: (p, s) => handleCaptureSelectionFinish(p, s) },
   CAPTURE_CANCELLED: {
     from: 'content',
-    run: (p, s) => {
-      scrollSessions.delete(s.tab.id);
+    run: async (p, s) => {
+      await abortScrollSession(s.tab.id);
       return { ok: true };
     },
   },
@@ -198,7 +210,7 @@ function captureVisible(windowId, options) {
     throw new Error('captureVisibleTab failed');
   };
   const p = captureQueue.then(run, run);
-  captureQueue = p.catch(() => {});
+  captureQueue = p.catch(() => { });
   return p;
 }
 
@@ -230,7 +242,7 @@ async function handleCommand(command, tab) {
 // ---------------------------------------------------------------------------
 // 1. Visible viewport
 // ---------------------------------------------------------------------------
-async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings }) {
+async function handleCaptureVisiblePart({ tabId, windowId, title, url, returnToTabId, settings }) {
   const s = await getSettings(settings);
   await runCaptureCountdown(s.captureDelaySec);
 
@@ -243,10 +255,22 @@ async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings 
       winId = winId ?? tab.windowId;
       tabTitle = tabTitle || tab.title;
       tabUrl = tabUrl || tab.url;
+      if (!tab.active && chrome.tabs.update) {
+        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+        await sleep(300);
+      }
     }
   }
 
-  const dataUrl = await withJob(() => captureAndEncode(winId, s));
+  let dataUrl;
+  try {
+    dataUrl = await withJob(() => captureAndEncode(winId, s));
+  } finally {
+    if (returnToTabId && returnToTabId !== tabId && chrome.tabs.update) {
+      await chrome.tabs.update(returnToTabId, { active: true }).catch(() => {});
+    }
+  }
+
   const item = await finishCapture({
     dataUrl,
     mode: 'visible',
@@ -267,6 +291,10 @@ async function getInjectableTab(tabId, label) {
   if (!tab || !isInjectableUrl(tab.url)) {
     throw new Error(`${label} cannot run on internal browser pages. Please navigate to a standard website.`);
   }
+  if (!tab.active && chrome.tabs.update) {
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    await sleep(250);
+  }
   return tab;
 }
 
@@ -274,18 +302,42 @@ async function injectContentScript(tabId) {
   await chrome.scripting.executeScript({ target: { tabId, allFrames: false }, files: ['content.js'] });
 }
 
-async function handleCaptureSelectionStart({ tabId }) {
+async function handleCaptureSelectionStart({ tabId, returnToTabId }) {
   const tab = await getInjectableTab(tabId, 'Selection capture');
+  if (returnToTabId) {
+    scrollSessions.set(tab.id, {
+      jobId: null,
+      kind: 'selection',
+      settings: null,
+      chunkCount: 0,
+      streamedCount: 0,
+      dataUrls: [],
+      originalZoom: null,
+      returnToTabId,
+    });
+  }
   await injectContentScript(tab.id);
   await chrome.tabs.sendMessage(tab.id, { action: 'START_SELECTION_CAPTURE' });
   return { success: true };
 }
 
-async function handleCaptureElementScrollStart({ tabId, settings }) {
+async function handleCaptureElementScrollStart({ tabId, returnToTabId, settings }) {
   const tab = await getInjectableTab(tabId, 'Scrolling element capture');
   const s = await getSettings(settings);
+  if (returnToTabId) {
+    scrollSessions.set(tab.id, {
+      jobId: null,
+      kind: 'element',
+      settings: s,
+      chunkCount: 0,
+      streamedCount: 0,
+      dataUrls: [],
+      originalZoom: null,
+      returnToTabId,
+    });
+  }
   await injectContentScript(tab.id);
-  ensureOffscreen().catch(() => {});
+  ensureOffscreen().catch(() => { });
   await chrome.tabs.sendMessage(tab.id, {
     action: 'START_ELEMENT_SCROLL_CAPTURE',
     payload: { scrollDelay: s.scrollDelayMs },
@@ -293,12 +345,12 @@ async function handleCaptureElementScrollStart({ tabId, settings }) {
   return { success: true };
 }
 
-async function handleCaptureFullPage({ tabId, settings }) {
+async function handleCaptureFullPage({ tabId, returnToTabId, settings }) {
   const tab = await getInjectableTab(tabId, 'Full page capture');
   const s = await getSettings(settings);
   await runCaptureCountdown(s.captureDelaySec);
   await injectContentScript(tab.id);
-  ensureOffscreen().catch(() => {});
+  ensureOffscreen().catch(() => { });
 
   let originalZoom = null;
   if (s.scaleFactor && s.scaleFactor > 1) {
@@ -311,7 +363,17 @@ async function handleCaptureFullPage({ tabId, settings }) {
     }
   }
 
-  scrollSessions.set(tab.id, { dataUrls: [], originalZoom });
+  abortScrollSession(tab.id);
+  scrollSessions.set(tab.id, {
+    jobId: null,
+    kind: 'full',
+    settings: s,
+    chunkCount: 0,
+    streamedCount: 0,
+    dataUrls: [],
+    originalZoom,
+    returnToTabId: returnToTabId || null,
+  });
 
   try {
     await chrome.tabs.sendMessage(tab.id, {
@@ -319,33 +381,70 @@ async function handleCaptureFullPage({ tabId, settings }) {
       payload: { scrollDelay: s.scrollDelayMs, hideSticky: s.hideStickyElements },
     });
   } catch (err) {
-    if (originalZoom != null) {
-      chrome.tabs.setZoom(tab.id, originalZoom).catch(() => {});
-    }
+    abortScrollSession(tab.id);
     throw err;
   }
   return { success: true };
 }
 
 // ---------------------------------------------------------------------------
-// 3. Content-script pipeline (chunks stay in the worker)
+// 3. Content-script pipeline (chunks stream directly to offscreen canvas)
 // ---------------------------------------------------------------------------
 async function handleChunkCapture(payload, sender) {
   const tabId = sender.tab.id;
   const index = Math.max(0, Math.floor(Number(payload.index) || 0));
+  const kind = payload.kind === 'element' ? 'element' : 'full';
+
   if (index === 0) {
     const existing = scrollSessions.get(tabId);
-    scrollSessions.set(tabId, { dataUrls: [], originalZoom: existing?.originalZoom ?? null });
+    if (existing?.jobId) {
+      callOffscreen('STITCH_ABORT', { jobId: existing.jobId }).catch(() => { });
+    }
+    const s = existing?.settings || (await getSettings());
+    const jobId = crypto.randomUUID();
+    await callOffscreen('STITCH_BEGIN', {
+      jobId,
+      kind,
+      totalWidth: num(payload.totalWidth, 0),
+      totalHeight: num(payload.totalHeight, 0),
+      dpr: num(payload.dpr, 1),
+      cropRect: kind === 'element' ? sanitizeRect(payload.cropRect) : null,
+      settings: s,
+    });
+    scrollSessions.set(tabId, {
+      jobId,
+      kind,
+      settings: s,
+      chunkCount: 0,
+      streamedCount: 0,
+      dataUrls: [],
+      originalZoom: existing?.originalZoom ?? null,
+      returnToTabId: existing?.returnToTabId ?? null,
+    });
   }
 
   const session = scrollSessions.get(tabId);
   if (!session) throw new Error('No active scroll session');
-  if (session.dataUrls.length >= MAX_CHUNKS) throw new Error('Chunk limit reached');
+  if (session.chunkCount >= MAX_CHUNKS) throw new Error('Chunk limit reached');
   if (!sender.tab.active) throw new Error('Tab is not visible');
 
   const dataUrl = await captureVisible(sender.tab.windowId, { format: 'png' });
-  session.dataUrls.push(dataUrl);
-  return { ok: true, index: session.dataUrls.length - 1 };
+  const capturedIndex = session.chunkCount++;
+
+  if (session.jobId) {
+    await withJob(() =>
+      callOffscreen('STITCH_ADD', {
+        jobId: session.jobId,
+        dataUrl,
+        yOffset: num(payload.yOffset, 0),
+      })
+    );
+    session.streamedCount++;
+  } else {
+    session.dataUrls.push(dataUrl);
+  }
+
+  return { ok: true, index: capturedIndex };
 }
 
 function handleFinalizeStitching(payload, sender, kind) {
@@ -354,16 +453,24 @@ function handleFinalizeStitching(payload, sender, kind) {
   scrollSessions.delete(tabId);
 
   if (session?.originalZoom != null) {
-    chrome.tabs.setZoom(tabId, session.originalZoom).catch(() => {});
+    chrome.tabs.setZoom(tabId, session.originalZoom).catch(() => { });
+  }
+  if (session?.returnToTabId && session.returnToTabId !== tabId && chrome.tabs.update) {
+    chrome.tabs.update(session.returnToTabId, { active: true }).catch(() => {});
   }
 
   runPipeline(kind, async () => {
-    if (!session || session.dataUrls.length === 0) throw new Error('No image chunks received for stitching');
-    const s = await getSettings();
-    const meta = Array.isArray(payload.chunks) ? payload.chunks : [];
-    const jobId = crypto.randomUUID();
+    if (!session || (session.streamedCount === 0 && session.dataUrls.length === 0)) {
+      throw new Error('No image chunks received for stitching');
+    }
+    const s = session.settings || (await getSettings());
 
     const result = await withJob(async () => {
+      if (session.jobId && session.streamedCount > 0) {
+        return callOffscreen('STITCH_END', { jobId: session.jobId });
+      }
+      const meta = Array.isArray(payload.chunks) ? payload.chunks : [];
+      const jobId = crypto.randomUUID();
       await callOffscreen('STITCH_BEGIN', {
         jobId,
         kind,
@@ -378,7 +485,7 @@ function handleFinalizeStitching(payload, sender, kind) {
         const dataUrl = session.dataUrls[i];
         if (!dataUrl) continue;
         await callOffscreen('STITCH_ADD', { jobId, dataUrl, yOffset: num(m.yOffset, 0) });
-        session.dataUrls[i] = null; // Release memory as soon as the chunk is drawn.
+        session.dataUrls[i] = null;
       }
       return callOffscreen('STITCH_END', { jobId });
     });
@@ -399,10 +506,16 @@ function handleFinalizeStitching(payload, sender, kind) {
 function handleCaptureSelectionFinish(payload, sender) {
   const rect = sanitizeRect(payload);
   if (!rect) throw new Error('Invalid selection bounds');
+  const tabId = sender.tab.id;
+  const session = scrollSessions.get(tabId);
+  scrollSessions.delete(tabId);
 
   runPipeline('selection', async () => {
     const s = await getSettings();
     const raw = await captureVisible(sender.tab.windowId, { format: 'png' });
+    if (session?.returnToTabId && session.returnToTabId !== tabId && chrome.tabs.update) {
+      chrome.tabs.update(session.returnToTabId, { active: true }).catch(() => {});
+    }
     // Build the payload explicitly. Never spread untrusted input over trusted fields.
     const result = await withJob(() =>
       callOffscreen('CROP_SELECTION', { dataUrl: raw, ...rect, dpr: num(payload.dpr, 1), settings: s })
@@ -453,6 +566,7 @@ async function finishCapture(o) {
     height,
     mode: o.mode,
     format: s.format,
+    ...(o.viewport ? { viewport: o.viewport } : {}),
   };
 
   await saveHistoryItem(item);
@@ -514,7 +628,7 @@ async function downloadSafe(url, filename) {
 }
 
 function broadcast(action, payload) {
-  chrome.runtime.sendMessage({ action, payload }).catch(() => {});
+  chrome.runtime.sendMessage({ action, payload }).catch(() => { });
 }
 
 /** Strips the full image so batch responses stay under the 64 MiB message limit. */
@@ -562,24 +676,24 @@ async function requireAllUrls(label) {
 }
 
 function waitForTabComplete(tabId, timeoutMs) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let done = false;
-    const finish = () => {
+    const finish = (error) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
+      if (error) reject(error); else resolve();
     };
     const listener = (id, info) => {
       if (id === tabId && info.status === 'complete') finish();
     };
-    const timer = setTimeout(finish, timeoutMs);
+    const timer = setTimeout(() => finish(new Error('Page did not finish loading in time.')), timeoutMs);
     chrome.tabs.onUpdated.addListener(listener);
     // The tab can finish loading before the listener is attached.
     chrome.tabs.get(tabId).then((t) => {
       if (t.status === 'complete') finish();
-    }, finish);
+    }, (error) => finish(error));
   });
 }
 
@@ -594,17 +708,20 @@ async function openGallery(count) {
   }
 }
 
-async function handleCaptureAllTabs({ settings }) {
+async function handleCaptureAllTabs({ settings, tabIds }) {
   await requireAllUrls('Capture all tabs');
   const s = await getSettings(settings);
-  const tabs = await chrome.tabs.query({ lastFocusedWindow: true, windowType: 'normal' });
-  const original = tabs.find((t) => t.active);
+  const allTabs = await chrome.tabs.query({ lastFocusedWindow: true, windowType: 'normal' });
+  const tabs = Array.isArray(tabIds) ? allTabs.filter((tab) => tabIds.includes(tab.id)) : allTabs;
+  const original = allTabs.find((t) => t.active);
   const results = [];
+  const failures = [];
+  const skipped = [];
 
   try {
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
-      if (!tab.id || !isInjectableUrl(tab.url)) continue;
+      if (!tab.id || !isInjectableUrl(tab.url)) { skipped.push({ target: tab.title || tab.url || 'Unknown tab', reason: 'This browser page cannot be captured.' }); continue; }
 
       broadcast('CAPTURE_PROGRESS', {
         current: i + 1,
@@ -630,15 +747,14 @@ async function handleCaptureAllTabs({ settings }) {
         });
         results.push(slimItem(item));
       } catch (e) {
-        console.error(`Failed to capture tab ${tab.id}:`, e);
+        failures.push({ target: tab.title || tab.url || String(tab.id), reason: e?.message || 'Capture failed', tabId: tab.id });
       }
     }
   } finally {
-    if (original?.id) await chrome.tabs.update(original.id, { active: true }).catch(() => {});
+    if (original?.id) await chrome.tabs.update(original.id, { active: true }).catch(() => { });
   }
 
-  await openGallery(results.length);
-  return { success: true, results };
+  return { success: true, results, failures, skipped };
 }
 
 async function handleCaptureUrlList({ urls, settings, delayMs }) {
@@ -647,6 +763,8 @@ async function handleCaptureUrlList({ urls, settings, delayMs }) {
   const list = (Array.isArray(urls) ? urls : []).map(normalizeHttpUrl).filter(Boolean).slice(0, 100);
   const hydrationDelay = clampNum(delayMs, 0, 30000, 3000);
   const results = [];
+  const failures = [];
+  const skipped = [];
 
   for (let i = 0; i < list.length; i++) {
     const url = list[i];
@@ -678,14 +796,13 @@ async function handleCaptureUrlList({ urls, settings, delayMs }) {
       });
       results.push(slimItem(item));
     } catch (err) {
-      console.error(`Failed to capture URL ${url}:`, err);
+      failures.push({ target: url, reason: err?.message || 'Capture failed' });
     } finally {
-      if (win?.id) await chrome.windows.remove(win.id).catch(() => {});
+      if (win?.id) await chrome.windows.remove(win.id).catch(() => { });
     }
   }
 
-  await openGallery(results.length);
-  return { success: true, results };
+  return { success: true, results, failures, skipped };
 }
 
 async function handleCaptureMultiSize({ url, resolutions, settings }) {
@@ -705,6 +822,7 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
   if (sizes.length === 0) return { success: false, results: [] };
 
   const results = [];
+  const failures = [];
   let win = null;
   try {
     win = await chrome.windows.create({
@@ -729,12 +847,22 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
         name: res.name,
       });
 
-      if (i > 0) {
-        await chrome.windows.update(win.id, { width: res.width, height: res.height, state: 'normal' });
-        await sleep(1000);
-      }
-
       try {
+        // Window dimensions include browser chrome. Measure the CSS viewport and
+        // adjust the outer window; OS constraints can prevent an exact match.
+        let viewport;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const measured = await chrome.scripting.executeScript({ target: { tabId }, func: () => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio }) });
+          viewport = measured[0]?.result;
+          if (!viewport) throw new Error('Could not measure the page viewport.');
+          if (viewport.width === res.width && viewport.height === res.height) break;
+          const current = await chrome.windows.get(win.id);
+          await chrome.windows.update(win.id, { width: Math.max(320, current.width + res.width - viewport.width), height: Math.max(240, current.height + res.height - viewport.height), state: 'normal' });
+          await sleep(1000);
+        }
+        const finalMeasurement = await chrome.scripting.executeScript({ target: { tabId }, func: () => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio }) });
+        viewport = finalMeasurement[0]?.result;
+        if (!viewport) throw new Error('Could not measure the page viewport.');
         const dataUrl = await withJob(() => captureAndEncode(win.id, s));
         const item = await finishCapture({
           dataUrl,
@@ -743,22 +871,21 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
           title: `Responsive ${label}`,
           filenameTitle: `${res.name || 'responsive'}_${res.width}x${res.height}`,
           url: target,
-          width: res.width,
-          height: res.height,
+          viewport: { ...viewport, requestedWidth: res.width, requestedHeight: res.height },
           settings: s,
           silent: true,
           skipClipboard: true,
         });
         results.push(slimItem(item));
       } catch (e) {
-        console.error(`Failed capture at ${label}:`, e);
+        failures.push({ target: label, reason: e?.message || 'Capture failed' });
       }
     }
   } finally {
-    if (win?.id) await chrome.windows.remove(win.id).catch(() => {});
+    if (win?.id) await chrome.windows.remove(win.id).catch(() => { });
   }
 
-  return { success: true, results };
+  return { success: true, results, failures, skipped: [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -775,7 +902,7 @@ async function runCaptureCountdown(seconds) {
       await sleep(1000);
     }
   } finally {
-    await chrome.action.setBadgeText({ text: '' }).catch(() => {});
+    await chrome.action.setBadgeText({ text: '' }).catch(() => { });
   }
 }
 
@@ -819,7 +946,7 @@ function sanitizeSettings(raw) {
 // ---------------------------------------------------------------------------
 function withHistoryLock(fn) {
   const p = historyQueue.then(fn, fn);
-  historyQueue = p.catch(() => {});
+  historyQueue = p.catch(() => { });
   return p;
 }
 
@@ -828,12 +955,8 @@ function saveHistoryItem(item) {
     const res = await chrome.storage.local.get(HISTORY_KEY);
     const list = Array.isArray(res?.[HISTORY_KEY]) ? res[HISTORY_KEY] : [];
     const merged = [{ ...item, dataUrl: '' }, ...list.filter((x) => x && x.id !== item.id)];
-    const kept = merged.slice(0, MAX_HISTORY);
-    const evicted = merged.slice(MAX_HISTORY).map((x) => FULL_PREFIX + x.id);
-
-    await chrome.storage.local.set({ [FULL_PREFIX + item.id]: item.dataUrl, [HISTORY_KEY]: kept });
-    if (evicted.length) await chrome.storage.local.remove(evicted);
-  }).catch((e) => console.error('History save failed:', e));
+    await chrome.storage.local.set({ [FULL_PREFIX + item.id]: item.dataUrl, [HISTORY_KEY]: merged });
+  });
 }
 
 /** One-time repair: move full images out of the index and delete orphaned blobs. */
@@ -846,7 +969,7 @@ async function migrateStorage() {
 
   const keySet = new Set(keys);
   const toSet = {};
-  const slim = list.slice(0, MAX_HISTORY).map((item) => {
+  const slim = list.map((item) => {
     const k = FULL_PREFIX + item.id;
     if (item.dataUrl && !keySet.has(k)) {
       toSet[k] = item.dataUrl;
@@ -945,7 +1068,8 @@ function isInjectableUrl(url) {
 function normalizeHttpUrl(v) {
   try {
     const u = new URL(String(v).trim());
-    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null;
+    if (!['http:', 'https:', 'file:'].includes(u.protocol)) return null;
+    return u.href;
   } catch {
     return null;
   }
@@ -960,9 +1084,14 @@ function formatFilename(template, title, url, mode, format, width, height) {
   let domain = 'page';
   try {
     if (url) domain = new URL(url).hostname.replace(/[^a-zA-Z0-9]/g, '_') || 'page';
-  } catch {}
+  } catch { }
 
-  const cleanTitle = (title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  let cleanTitle = (title || 'capture')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40);
+  if (!cleanTitle) cleanTitle = 'capture';
   const w = width ? String(Math.round(width)) : '';
   const h = height ? String(Math.round(height)) : '';
 

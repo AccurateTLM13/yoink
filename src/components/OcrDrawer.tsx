@@ -94,6 +94,8 @@ export const OcrDrawer: React.FC<Props> = ({
             <span className="text-[10.5px] font-mono text-zinc-500">
               {engine === 'shape-detection'
                 ? 'Offline Native Shape Detection'
+                : engine === 'tesseract'
+                ? 'Client-side OCR (Tesseract.js)'
                 : engine === 'byok'
                 ? 'BYOK Vision Model'
                 : 'Local Canvas Scanner'}

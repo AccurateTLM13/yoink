@@ -1,3 +1,5 @@
+import Tesseract from 'tesseract.js';
+
 export interface AiConfig {
   provider: 'ondevice' | 'gemini' | 'openai';
   apiKey?: string;
@@ -8,7 +10,17 @@ export interface AiConfig {
 export interface OcrResult {
   text: string;
   confidence: number;
-  engine: 'shape-detection' | 'window-ai' | 'byok' | 'fallback';
+  engine: 'shape-detection' | 'tesseract' | 'window-ai' | 'byok' | 'fallback';
+}
+
+const MAX_NATIVE_OCR_DIMENSION = 4096;
+let nativeTextDetectorUnavailable = false;
+
+/**
+ * Reset cached native TextDetector availability state (used in tests)
+ */
+export function resetNativeTextDetectorCache(): void {
+  nativeTextDetectorUnavailable = false;
 }
 
 /**
@@ -97,33 +109,103 @@ export async function extractOcrText(
   config?: AiConfig
 ): Promise<OcrResult> {
   // 1. Try Native Chrome TextDetector (Shape Detection API - 100% offline & free)
-  if (typeof window !== 'undefined' && 'TextDetector' in window) {
+  if (
+    !nativeTextDetectorUnavailable &&
+    typeof window !== 'undefined' &&
+    'TextDetector' in window
+  ) {
     try {
       const img = new Image();
       img.src = dataUrl;
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('Failed to load image for OCR'));
-      });
+      await img.decode();
 
-      const detector = new (window as any).TextDetector();
-      const detectedTexts = await detector.detect(img);
+      const width = img.naturalWidth || img.width || 0;
+      const height = img.naturalHeight || img.height || 0;
 
-      if (detectedTexts && detectedTexts.length > 0) {
-        const rawStrings: string[] = detectedTexts.map((item: any) => item.rawValue || '');
-        const joined = rawStrings.filter(Boolean).join('\n');
-        return {
-          text: joined,
-          confidence: 0.95,
-          engine: 'shape-detection',
-        };
+      // OS native OCR backends (e.g., Windows.Media.Ocr) fail or disconnect the Mojo
+      // service pipe when passed stitched captures exceeding 4096px.
+      if (width <= MAX_NATIVE_OCR_DIMENSION && height <= MAX_NATIVE_OCR_DIMENSION) {
+        const detector = new (window as any).TextDetector();
+
+        let bitmap: ImageBitmap | null = null;
+        if (typeof createImageBitmap === 'function') {
+          try {
+            bitmap = await createImageBitmap(img);
+          } catch {
+            bitmap = null;
+          }
+        }
+
+        let detectedTexts: any[] | null = null;
+        try {
+          detectedTexts = await detector.detect(bitmap ?? img);
+        } finally {
+          if (bitmap && typeof bitmap.close === 'function') {
+            bitmap.close();
+          }
+        }
+
+        if (detectedTexts && detectedTexts.length > 0) {
+          const rawStrings: string[] = detectedTexts.map((item: any) => item.rawValue || '');
+          const joined = rawStrings.filter(Boolean).join('\n');
+          return {
+            text: joined,
+            confidence: 0.95,
+            engine: 'shape-detection',
+          };
+        }
       }
-    } catch (err) {
-      console.warn('Native TextDetector failed, falling back:', err);
+    } catch (err: any) {
+      if (
+        err?.name === 'NotSupportedError' ||
+        String(err?.message || '').includes('Text detection service unavailable')
+      ) {
+        nativeTextDetectorUnavailable = true;
+      }
     }
   }
 
-  // 2. If user configured BYOK (OpenAI / Gemini / Custom Ollama), dispatch directly
+  // Resolve extension-local asset URLs when running inside a Chrome extension,
+  // otherwise fall back to site-root relative paths (dev / tests).
+  const resolveOcrUrl = (relativePath: string): string => {
+    try {
+      if (typeof chrome !== 'undefined' && (chrome as any)?.runtime?.getURL) {
+        return (chrome as any).runtime.getURL(relativePath);
+      }
+    } catch {}
+    return `/${relativePath.replace(/^\/+/, '')}`;
+  };
+
+  // 2. Default client-side OCR: Tesseract.js (pure WASM, works fully offline, no API key or chrome://flags needed)
+  // Only attempt in a browser environment; Tesseract cannot run under Node.
+  if (typeof window !== 'undefined' && typeof Worker !== 'undefined') {
+    try {
+      const worker = await Tesseract.createWorker('eng', undefined, {
+        workerPath: resolveOcrUrl('ocr/worker.min.js'),
+        corePath: resolveOcrUrl('ocr/tesseract-core-simd-lstm.wasm.js'),
+        langPath: resolveOcrUrl('ocr/'),
+        workerBlobURL: false,
+        gzip: false,
+      });
+      try {
+        const { data } = await worker.recognize(dataUrl);
+        const joined = (data?.text || '').trim();
+        if (joined) {
+          return {
+            text: joined,
+            confidence: Number(data?.confidence) || 0.8,
+            engine: 'tesseract',
+          };
+        }
+      } finally {
+        await worker.terminate();
+      }
+    } catch (err) {
+      console.warn('Tesseract OCR failed, falling back:', err);
+    }
+  }
+
+  // 3. If user configured BYOK (OpenAI / Gemini / Custom Ollama), dispatch directly
   if (config && config.apiKey && config.provider !== 'ondevice') {
     try {
       const byokText = await dispatchByokVisionOcr(dataUrl, config);
@@ -139,7 +221,7 @@ export async function extractOcrText(
     }
   }
 
-  // 3. Client-side heuristic OCR fallback (extracts metadata and OCR canvas inspection)
+  // 4. Client-side heuristic OCR fallback (no machine text detected)
   return {
     text: 'Text extraction completed. (No machine text detected or native Shape Detection API disabled in chrome://flags)',
     confidence: 0.5,

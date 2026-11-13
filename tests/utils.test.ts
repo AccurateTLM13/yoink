@@ -378,3 +378,26 @@ describe('URL Safety Utilities', () => {
     });
   });
 });
+
+// Regression coverage for gallery retention and original-image integrity.
+describe('Gallery original preservation', () => {
+  beforeEach(() => mockStorage.clear());
+
+  test('keeps more than 40 captures and their original images', async () => {
+    for (let i = 0; i < 101; i++) {
+      await addHistoryItem({ id: `retained_${i}`, title: `Capture ${i}`, url: '',
+        dataUrl: `data:image/png;base64,original_${i}`, timestamp: i,
+        width: 10, height: 10, mode: 'urllist', format: 'png' });
+    }
+    assert.equal((await getStoredHistory()).length, 101);
+    assert.equal(await getFullResolutionImage('retained_0'), 'data:image/png;base64,original_0');
+  });
+
+  test('does not return a thumbnail when the original is missing', async () => {
+    await addHistoryItem({ id: 'missing_original', title: 'Missing', url: '',
+      dataUrl: 'data:image/png;base64,original', thumbnailUrl: 'data:image/jpeg;base64,thumbnail',
+      timestamp: 1, width: 10, height: 100, mode: 'full', format: 'png' });
+    mockStorage.removeItem('yoink_full_missing_original');
+    assert.equal(await getFullResolutionImage('missing_original'), null);
+  });
+});

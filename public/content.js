@@ -45,6 +45,70 @@
   });
 
   /**
+   * Detect the primary inner scrollable container on modern SPAs (e.g., Notion, Linear, Slack, dashboards)
+   * when the document root itself does not scroll.
+   */
+  function findPrimaryScrollContainer() {
+    const vw = window.innerWidth || 1;
+    const vh = window.innerHeight || 1;
+    const candidates = new Set();
+
+    // 1. Check ancestor chain from center of viewport
+    if (typeof document.elementFromPoint === 'function') {
+      try {
+        let centerEl = document.elementFromPoint(Math.floor(vw / 2), Math.floor(vh / 2));
+        while (centerEl && centerEl !== document.body && centerEl !== document.documentElement) {
+          candidates.add(centerEl);
+          centerEl = centerEl.parentElement;
+        }
+      } catch { }
+    }
+
+    // 2. Query common SPA scroll containers
+    try {
+      const queried = document.querySelectorAll(
+        'main, [role="main"], article, [class*="scroll" i], [class*="content" i], [class*="container" i], [class*="workspace" i], div, section'
+      );
+      for (const el of Array.from(queried)) {
+        if (el && el !== document.body && el !== document.documentElement) {
+          candidates.add(el);
+        }
+      }
+    } catch { }
+
+    let bestEl = null;
+    let bestScore = 0;
+
+    for (const el of candidates) {
+      try {
+        const sh = Number(el.scrollHeight) || 0;
+        const ch = Number(el.clientHeight) || 0;
+        if (sh <= ch + 15) continue;
+
+        const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+        if (style) {
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const oy = style.overflowY;
+          if (oy && oy !== 'auto' && oy !== 'scroll' && oy !== 'overlay') continue;
+        }
+
+        const rect = el.getBoundingClientRect
+          ? el.getBoundingClientRect()
+          : { width: vw, height: vh, left: 0, top: 0 };
+        if (rect.width < vw * 0.4 || rect.height < vh * 0.4) continue;
+
+        const areaScore = rect.width * rect.height * (sh / Math.max(1, ch));
+        if (areaScore > bestScore) {
+          bestScore = areaScore;
+          bestEl = el;
+        }
+      } catch { }
+    }
+
+    return bestEl;
+  }
+
+  /**
    * 1. Full Page Scroll & Stitch Capture Engine
    */
   async function startScrollCapture(scrollDelay = 600, hideSticky = true) {
@@ -54,55 +118,120 @@
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden'; // Hide scrollbars
 
-    // Suppress fixed/sticky headers during scrolling to prevent visual artifacts
-    let originalStyles = [];
-    if (hideSticky) {
-      // High-performance candidate selector avoids querying thousands of leaf DOM nodes
-      const candidateSelector = 'header, nav, aside, [class*="header" i], [class*="nav" i], [class*="sticky" i], [class*="fixed" i], [style*="fixed"], [style*="sticky"], [data-sticky], [data-fixed]';
+    const candidateSelector =
+      'header, nav, aside, [class*="header" i], [class*="nav" i], [class*="sticky" i], [class*="fixed" i], [style*="fixed"], [style*="sticky"], [data-sticky], [data-fixed]';
+    const hiddenStickyEls = new Map();
+
+    function suppressStickyElements() {
+      if (!hideSticky) return;
       const candidates = new Set([
         ...Array.from(document.querySelectorAll(candidateSelector)),
-        ...Array.from(document.body.children)
+        ...Array.from(document.body.children || []),
       ]);
 
-      const fixedElements = Array.from(candidates).filter((el) => {
-        if (!el || el === document.body || el === document.documentElement) return false;
+      for (const el of candidates) {
+        if (!el || el === document.body || el === document.documentElement || hiddenStickyEls.has(el)) {
+          continue;
+        }
         try {
           const pos = window.getComputedStyle(el).position;
-          return pos === 'fixed' || pos === 'sticky';
+          if (pos === 'fixed' || pos === 'sticky') {
+            hiddenStickyEls.set(el, {
+              visVal: el.style.getPropertyValue ? el.style.getPropertyValue('visibility') : el.style.visibility || '',
+              visPrio: el.style.getPropertyPriority ? el.style.getPropertyPriority('visibility') : '',
+              peVal: el.style.getPropertyValue ? el.style.getPropertyValue('pointer-events') : '',
+              pePrio: el.style.getPropertyPriority ? el.style.getPropertyPriority('pointer-events') : '',
+            });
+            if (el.style.setProperty) {
+              el.style.setProperty('visibility', 'hidden', 'important');
+              el.style.setProperty('pointer-events', 'none', 'important');
+            } else {
+              el.style.visibility = 'hidden';
+            }
+          }
         } catch {
-          return false;
+          // Ignore inaccessible nodes
         }
-      });
+      }
+    }
 
-      originalStyles = fixedElements.map((el) => {
-        const orig = el.style.position;
-        el.style.position = 'absolute';
-        return { el, orig };
-      });
+    function restoreStickyElements() {
+      for (const [el, orig] of hiddenStickyEls.entries()) {
+        try {
+          if (el.style.setProperty && el.style.removeProperty) {
+            if (orig.visVal) el.style.setProperty('visibility', orig.visVal, orig.visPrio);
+            else el.style.removeProperty('visibility');
+
+            if (orig.peVal) el.style.setProperty('pointer-events', orig.peVal, orig.pePrio);
+            else el.style.removeProperty('pointer-events');
+          } else {
+            el.style.visibility = orig.visVal;
+          }
+        } catch {
+          // Ignore detached nodes
+        }
+      }
+      hiddenStickyEls.clear();
     }
 
     const viewportHeight = window.innerHeight;
-    const totalHeight = Math.max(
-      document.body.scrollHeight,
-      document.documentElement.scrollHeight,
-      document.body.offsetHeight,
-      document.documentElement.offsetHeight
+    const rootHeight = Math.max(
+      document.body.scrollHeight || 0,
+      document.documentElement.scrollHeight || 0,
+      document.body.offsetHeight || 0,
+      document.documentElement.offsetHeight || 0
     );
-    const maxScroll = Math.max(0, totalHeight - viewportHeight);
+
+    // Auto-detect inner scroll container on SPAs where root window does not scroll
+    const innerContainer = rootHeight <= viewportHeight + 10 ? findPrimaryScrollContainer() : null;
+    const origInnerScrollTop = innerContainer ? innerContainer.scrollTop : 0;
+    const origInnerOverflow = innerContainer && innerContainer.style ? innerContainer.style.overflow : '';
+
+    const stepHeight = innerContainer ? innerContainer.clientHeight || viewportHeight : viewportHeight;
+    let totalHeight = innerContainer ? Math.max(innerContainer.scrollHeight, stepHeight) : rootHeight;
+    let maxScroll = Math.max(0, totalHeight - stepHeight);
     let currentTop = 0;
     const chunks = [];
 
+    const getScrollY = () =>
+      innerContainer ? innerContainer.scrollTop || 0 : window.scrollY || document.documentElement.scrollTop || 0;
+
+    const setScrollY = (y) => {
+      if (innerContainer) {
+        innerContainer.scrollTop = y;
+      } else {
+        window.scrollTo(0, y);
+      }
+    };
+
     // Scroll to top to begin
-    window.scrollTo(0, 0);
+    setScrollY(0);
     await new Promise((r) => setTimeout(r, 400));
 
     try {
       while (true) {
-        const actualY = window.scrollY || document.documentElement.scrollTop || 0;
-        
-        // Request background script to capture the visible tab
+        const actualY = getScrollY();
+
+        // After chunk 0 is captured at the top of the page, hide fixed/sticky elements
+        // via visibility:hidden so they render naturally on chunk 0 without layout breakage
+        // and never duplicate on chunks 1..N.
+        if (chunks.length > 0 && hideSticky) {
+          suppressStickyElements();
+        }
+
+        // Request background script to capture the visible tab and stream chunk to offscreen canvas
         const response = await chrome.runtime
-          .sendMessage({ action: 'CAPTURE_VISIBLE_TAB', payload: { index: chunks.length } })
+          .sendMessage({
+            action: 'CAPTURE_VISIBLE_TAB',
+            payload: {
+              index: chunks.length,
+              yOffset: actualY,
+              kind: 'full',
+              totalWidth: window.innerWidth,
+              totalHeight,
+              dpr: window.devicePixelRatio || 1,
+            },
+          })
           .catch(() => null);
         if (response && response.ok) {
           chunks.push({
@@ -111,46 +240,67 @@
           });
         }
 
+        // Refresh totalHeight & maxScroll in case lazy-loaded content expanded the page
+        totalHeight = innerContainer
+          ? Math.max(totalHeight, innerContainer.scrollHeight || 0, stepHeight)
+          : Math.max(
+            totalHeight,
+            document.body.scrollHeight || 0,
+            document.documentElement.scrollHeight || 0,
+            document.body.offsetHeight || 0,
+            document.documentElement.offsetHeight || 0
+          );
+        maxScroll = Math.max(0, totalHeight - stepHeight);
+
         // Notify progress to popup/hub
-        const pct = Math.min(99, Math.round(((actualY + viewportHeight) / totalHeight) * 100));
-        chrome.runtime.sendMessage({
-          action: 'CAPTURE_PROGRESS',
-          payload: { message: `Scanning page... (${pct}%)`, percent: pct },
-        }).catch(() => {});
+        const pct = Math.min(99, Math.round(((actualY + stepHeight) / totalHeight) * 100));
+        chrome.runtime
+          .sendMessage({
+            action: 'CAPTURE_PROGRESS',
+            payload: { message: `Scanning page... (${pct}%)`, percent: pct },
+          })
+          .catch(() => { });
 
         if (actualY >= maxScroll || chunks.length >= 80) {
           break;
         }
 
-        currentTop = Math.min(maxScroll, currentTop + viewportHeight);
-        window.scrollTo(0, currentTop);
+        // Hide fixed/sticky headers before scrolling to the next viewport
+        if (hideSticky) {
+          suppressStickyElements();
+        }
+
+        currentTop = Math.min(maxScroll, currentTop + stepHeight);
+        setScrollY(currentTop);
 
         // Pause for lazy-loading to catch up
         await new Promise((r) => setTimeout(r, scrollDelay));
 
-        const nextY = window.scrollY || document.documentElement.scrollTop || 0;
+        const nextY = getScrollY();
         if (nextY === actualY && actualY > 0) {
           // Bottom reached
           break;
         }
       }
     } finally {
-      // Restore original styles
+      // Restore original styles and scroll positions
       document.body.style.overflow = originalOverflow;
-      originalStyles.forEach(({ el, orig }) => {
-        el.style.position = orig;
-      });
+      if (innerContainer) {
+        if (innerContainer.style) innerContainer.style.overflow = origInnerOverflow;
+        innerContainer.scrollTop = origInnerScrollTop;
+      }
+      restoreStickyElements();
       window.scrollTo(origScrollX, origScrollY);
       captureInProgress = false;
     }
 
-    // Send chunks to Offscreen document for stitching
+    // Finalize stitching in Offscreen document
     await chrome.runtime.sendMessage({
       action: 'FINALIZE_STITCHING',
       payload: {
         chunks,
         totalWidth: window.innerWidth,
-        totalHeight: Math.max(totalHeight, (window.scrollY || 0) + viewportHeight),
+        totalHeight: Math.max(totalHeight, getScrollY() + stepHeight),
         dpr: window.devicePixelRatio || 1,
         title: document.title,
         url: window.location.href,
@@ -159,15 +309,31 @@
   }
 
   /**
-   * 2. Interactive Area Selection Overlay
+   * 2. Interactive Area Selection Overlay (Isolated inside closed Shadow DOM)
    */
   function initSelectionOverlay() {
     removeSelectionOverlay();
 
-    // Root overlay container
+    // Host element attached to documentElement
     overlayEl = document.createElement('div');
     overlayEl.id = 'omnicapture-selection-overlay';
     Object.assign(overlayEl.style, {
+      position: 'fixed',
+      inset: '0px',
+      top: '0px',
+      left: '0px',
+      width: '100vw',
+      height: '100vh',
+      zIndex: '2147483647',
+      pointerEvents: 'auto',
+    });
+
+    const shadowRoot =
+      typeof overlayEl.attachShadow === 'function' ? overlayEl.attachShadow({ mode: 'closed' }) : overlayEl;
+
+    // Surface container inside Shadow Root
+    const surfaceEl = document.createElement('div');
+    Object.assign(surfaceEl.style, {
       position: 'fixed',
       top: '0px',
       left: '0px',
@@ -235,7 +401,7 @@
       kbdEsc,
       document.createTextNode(' to cancel')
     );
-    overlayEl.appendChild(banner);
+    surfaceEl.appendChild(banner);
 
     // Crop Box
     cropBoxEl = document.createElement('div');
@@ -319,11 +485,12 @@
       cropBoxEl.appendChild(handleEl);
     });
 
-    overlayEl.appendChild(cropBoxEl);
+    surfaceEl.appendChild(cropBoxEl);
+    shadowRoot.appendChild(surfaceEl);
     document.documentElement.appendChild(overlayEl);
 
     // Mouse & Keyboard Event Listeners
-    overlayEl.addEventListener('mousedown', onOverlayMouseDown);
+    surfaceEl.addEventListener('mousedown', onOverlayMouseDown);
     window.addEventListener('mousemove', onGlobalMouseMove);
     window.addEventListener('mouseup', onGlobalMouseUp);
     window.addEventListener('keydown', onKeyDown, true);
@@ -352,9 +519,10 @@
   }
 
   function onOverlayMouseDown(e) {
-    if (e.target.closest('#omnicapture-crop-box')) {
+    const target = e.target;
+    if (target && typeof target.closest === 'function' && target.closest('#omnicapture-crop-box')) {
       // Clicked inside crop box -> start dragging box
-      if (!e.target.classList.contains('omnicapture-handle') && !e.target.closest('button')) {
+      if (!target.classList?.contains('omnicapture-handle') && !target.closest('button')) {
         isDraggingBox = true;
         dragStartX = e.clientX;
         dragStartY = e.clientY;
@@ -435,7 +603,7 @@
   function onKeyDown(e) {
     if (e.key === 'Escape') {
       removeSelectionOverlay();
-      chrome.runtime.sendMessage({ action: 'CAPTURE_CANCELLED' }).catch(() => {});
+      chrome.runtime.sendMessage({ action: 'CAPTURE_CANCELLED' }).catch(() => { });
     } else if (e.key === 'Enter') {
       finalizeSelectionCapture();
     }
@@ -525,7 +693,7 @@
   }
 
   /**
-   * 3. Interactive Scrolling-Element Inspector & Capture Engine (P1-4)
+   * 3. Interactive Scrolling-Element Inspector & Capture Engine (P1-4, Isolated inside closed Shadow DOM)
    */
   let inspectorOverlayEl = null;
   let inspectorHighlightEl = null;
@@ -538,6 +706,21 @@
     inspectorOverlayEl = document.createElement('div');
     inspectorOverlayEl.id = 'omnicapture-inspector-overlay';
     Object.assign(inspectorOverlayEl.style, {
+      position: 'fixed',
+      inset: '0px',
+      zIndex: '2147483647',
+      cursor: 'pointer',
+      backgroundColor: 'transparent',
+      pointerEvents: 'auto',
+    });
+
+    const shadowRoot =
+      typeof inspectorOverlayEl.attachShadow === 'function'
+        ? inspectorOverlayEl.attachShadow({ mode: 'closed' })
+        : inspectorOverlayEl;
+
+    const inspectorSurfaceEl = document.createElement('div');
+    Object.assign(inspectorSurfaceEl.style, {
       position: 'fixed',
       inset: '0px',
       zIndex: '2147483647',
@@ -589,7 +772,7 @@
       kbdEsc,
       document.createTextNode(' to cancel')
     );
-    inspectorOverlayEl.appendChild(banner);
+    inspectorSurfaceEl.appendChild(banner);
 
     inspectorHighlightEl = document.createElement('div');
     Object.assign(inspectorHighlightEl.style, {
@@ -619,8 +802,9 @@
       whiteSpace: 'nowrap',
     });
     inspectorHighlightEl.appendChild(inspectorBadgeEl);
-    inspectorOverlayEl.appendChild(inspectorHighlightEl);
+    inspectorSurfaceEl.appendChild(inspectorHighlightEl);
 
+    shadowRoot.appendChild(inspectorSurfaceEl);
     document.documentElement.appendChild(inspectorOverlayEl);
 
     const onInspectorMouseMove = (e) => {
@@ -628,7 +812,13 @@
       const el = document.elementFromPoint(e.clientX, e.clientY);
       inspectorOverlayEl.style.pointerEvents = 'auto';
 
-      if (!el || el === document.body || el === document.documentElement || el.closest('#omnicapture-inspector-overlay')) {
+      if (
+        !el ||
+        el === document.body ||
+        el === document.documentElement ||
+        el === inspectorOverlayEl ||
+        (typeof el.closest === 'function' && el.closest('#omnicapture-inspector-overlay'))
+      ) {
         inspectorHighlightEl.style.display = 'none';
         hoveredTargetEl = null;
         return;
@@ -680,17 +870,17 @@
     const onInspectorKeyDown = (e) => {
       if (e.key === 'Escape') {
         removeElementInspector();
-        chrome.runtime.sendMessage({ action: 'CAPTURE_CANCELLED' }).catch(() => {});
+        chrome.runtime.sendMessage({ action: 'CAPTURE_CANCELLED' }).catch(() => { });
       }
     };
 
-    inspectorOverlayEl.addEventListener('mousemove', onInspectorMouseMove);
-    inspectorOverlayEl.addEventListener('click', onInspectorClick);
+    inspectorSurfaceEl.addEventListener('mousemove', onInspectorMouseMove);
+    inspectorSurfaceEl.addEventListener('click', onInspectorClick);
     window.addEventListener('keydown', onInspectorKeyDown, true);
 
     inspectorOverlayEl._cleanup = () => {
-      inspectorOverlayEl.removeEventListener('mousemove', onInspectorMouseMove);
-      inspectorOverlayEl.removeEventListener('click', onInspectorClick);
+      inspectorSurfaceEl.removeEventListener('mousemove', onInspectorMouseMove);
+      inspectorSurfaceEl.removeEventListener('click', onInspectorClick);
       window.removeEventListener('keydown', onInspectorKeyDown, true);
     };
   }
@@ -751,8 +941,15 @@
     await new Promise((r) => setTimeout(r, 200));
 
     const clientHeight = targetEl.clientHeight || initialRect.height;
-    const totalHeight = Math.max(targetEl.scrollHeight, clientHeight);
-    const maxScroll = Math.max(0, totalHeight - clientHeight);
+    let totalHeight = Math.max(targetEl.scrollHeight, clientHeight);
+    let maxScroll = Math.max(0, totalHeight - clientHeight);
+
+    const cropRect = {
+      x: initialRect.left,
+      y: initialRect.top,
+      width: initialRect.width,
+      height: initialRect.height,
+    };
 
     const chunks = [];
     const maxChunks = 80;
@@ -761,9 +958,20 @@
       while (true) {
         const actualScroll = targetEl.scrollTop;
 
-        // Capture visible tab
+        // Capture visible tab and stream chunk to offscreen canvas
         const response = await chrome.runtime
-          .sendMessage({ action: 'CAPTURE_VISIBLE_TAB', payload: { index: chunks.length } })
+          .sendMessage({
+            action: 'CAPTURE_VISIBLE_TAB',
+            payload: {
+              index: chunks.length,
+              yOffset: actualScroll,
+              kind: 'element',
+              totalWidth: window.innerWidth,
+              totalHeight,
+              dpr: window.devicePixelRatio || 1,
+              cropRect,
+            },
+          })
           .catch(() => null);
         if (response && response.ok) {
           chunks.push({
@@ -772,11 +980,16 @@
           });
         }
 
+        totalHeight = Math.max(totalHeight, targetEl.scrollHeight, clientHeight);
+        maxScroll = Math.max(0, totalHeight - clientHeight);
+
         const pct = Math.min(99, Math.round(((actualScroll + clientHeight) / totalHeight) * 100));
-        chrome.runtime.sendMessage({
-          action: 'CAPTURE_PROGRESS',
-          payload: { message: `Scanning element... (${pct}%)`, percent: pct },
-        }).catch(() => {});
+        chrome.runtime
+          .sendMessage({
+            action: 'CAPTURE_PROGRESS',
+            payload: { message: `Scanning element... (${pct}%)`, percent: pct },
+          })
+          .catch(() => { });
 
         if (actualScroll >= maxScroll || chunks.length >= maxChunks) {
           break;
@@ -797,17 +1010,12 @@
 
     if (chunks.length === 0) return;
 
-    // Send chunks to offscreen document for element stitching
+    // Finalize element stitching in offscreen document
     chrome.runtime.sendMessage({
       action: 'FINALIZE_ELEMENT_STITCHING',
       payload: {
         chunks,
-        cropRect: {
-          x: initialRect.left,
-          y: initialRect.top,
-          width: initialRect.width,
-          height: initialRect.height,
-        },
+        cropRect,
         totalWidth: window.innerWidth,
         totalHeight,
         dpr: window.devicePixelRatio || 1,

@@ -18,6 +18,7 @@ const HANDLERS = {
   STITCH_BEGIN: stitchBegin,
   STITCH_ADD: stitchAdd,
   STITCH_END: stitchEnd,
+  STITCH_ABORT: stitchAbort,
   CROP_SELECTION: cropSelection,
   CONVERT_FORMAT: convertFormat,
   COPY_TO_CLIPBOARD: writeToClipboard,
@@ -70,6 +71,15 @@ function stitchBegin({ jobId, kind, totalWidth, totalHeight, dpr, cropRect, sett
   return { ok: true };
 }
 
+function stitchAbort({ jobId }) {
+  const job = jobs.get(jobId);
+  if (job) {
+    releaseCanvas(job.canvas);
+    jobs.delete(jobId);
+  }
+  return { ok: true };
+}
+
 function initJobCanvas(job, img) {
   job.scale = job.totalWidth > 0 && img.width > 0 ? img.width / job.totalWidth : job.dpr;
   let width;
@@ -95,6 +105,22 @@ function initJobCanvas(job, img) {
   job.ctx = job.canvas.getContext('2d');
 }
 
+function ensureCanvasCapacity(job, requiredBottom) {
+  if (!job.canvas || requiredBottom <= job.canvas.height) return;
+  const maxAllowed = Math.max(1, Math.min(MAX_DIMENSION, Math.floor(MAX_AREA / job.canvas.width)));
+  if (job.canvas.height >= maxAllowed) return;
+
+  const nextHeight = Math.min(maxAllowed, requiredBottom);
+  if (nextHeight <= job.canvas.height) return;
+
+  const grown = new OffscreenCanvas(job.canvas.width, nextHeight);
+  const grownCtx = grown.getContext('2d');
+  grownCtx.drawImage(job.canvas, 0, 0);
+  releaseCanvas(job.canvas);
+  job.canvas = grown;
+  job.ctx = grownCtx;
+}
+
 async function stitchAdd({ jobId, dataUrl, yOffset }) {
   const job = jobs.get(jobId);
   if (!job) throw new Error('Unknown stitch job');
@@ -103,6 +129,11 @@ async function stitchAdd({ jobId, dataUrl, yOffset }) {
   try {
     if (!job.canvas) initJobCanvas(job, img);
     const destY = Math.round((Number(yOffset) || 0) * job.scale);
+    const chunkH = job.kind === 'full' ? img.height : job.src.h;
+
+    // Dynamically expand canvas if lazy-loaded content grew the page past initial totalHeight.
+    ensureCanvasCapacity(job, destY + chunkH);
+
     if (destY < job.canvas.height) {
       if (job.kind === 'full') {
         job.ctx.drawImage(img, 0, destY);
