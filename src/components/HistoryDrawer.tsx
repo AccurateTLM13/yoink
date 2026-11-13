@@ -16,6 +16,7 @@ import {
   FileText,
   Upload,
   ScanText,
+  ShieldCheck,
 } from 'lucide-react';
 import { HistoryItem, CaptureMode } from '../types';
 import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage } from '../utils/storage';
@@ -27,6 +28,7 @@ interface Props {
   onSelectPreview: (item: HistoryItem) => void;
   onSelectAnnotate?: (item: HistoryItem) => void;
   onSelectOcr?: (item: HistoryItem) => void;
+  onSelectVerify?: (item: HistoryItem) => void;
   onDeleteItem: (id: string) => void;
   onClearAll: () => void;
   onOpenStudio?: () => void;
@@ -117,6 +119,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   onSelectPreview,
   onSelectAnnotate,
   onSelectOcr,
+  onSelectVerify,
   onDeleteItem,
   onClearAll,
   onOpenStudio,
@@ -544,6 +547,19 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                         </button>
                       )}
 
+                      {onSelectVerify && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectVerify(item);
+                          }}
+                          className="flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium text-emerald-700 hover:text-emerald-800 bg-emerald-50 hover:bg-emerald-100/80 rounded-md border border-emerald-200 transition cursor-pointer"
+                          title="Verify Yoink Proof™ cryptographic signature & pixel watermark"
+                        >
+                          <ShieldCheck size={11} />
+                          <span>Proof</span>
+                        </button>
+                      )}
                       {onSelectOcr && (
                         <button
                           onClick={(e) => {

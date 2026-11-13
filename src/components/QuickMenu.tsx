@@ -16,6 +16,7 @@ import {
   ScreenShare,
   Upload,
   Clock,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface Props {
@@ -30,6 +31,7 @@ interface Props {
   onOpenHistory: () => void;
   onOpenOptions: () => void;
   onOpenStudio?: () => void;
+  onOpenVerify?: () => void;
   onUploadFiles?: (files: File[]) => void;
   delaySec?: number;
   onSetDelaySec?: (sec: number) => void;
@@ -53,6 +55,7 @@ export const QuickMenu: React.FC<Props> = React.memo(({
   onOpenHistory,
   onOpenOptions,
   onOpenStudio,
+  onOpenVerify,
   onUploadFiles,
   delaySec = 0,
   onSetDelaySec,
@@ -294,6 +297,27 @@ export const QuickMenu: React.FC<Props> = React.memo(({
                 </div>
                 <span className="text-[9.5px] font-bold font-mono text-teal-700 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200/70 tracking-wide">
                   EDIT
+                </span>
+              </button>
+            )}
+
+            {/* Verify Screenshot Proof */}
+            {onOpenVerify && (
+              <button
+                onClick={onOpenVerify}
+                disabled={isCapturing}
+                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-emerald-50/60 border border-transparent hover:border-emerald-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 active:scale-[0.99] disabled:opacity-50"
+              >
+                <div className="flex items-center space-x-2.5 min-w-0">
+                  <div className="w-6.5 h-6.5 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0 group-hover:bg-emerald-600 group-hover:text-white transition-colors duration-150">
+                    <ShieldCheck size={14} />
+                  </div>
+                  <span className="text-[12.5px] font-medium text-zinc-800 group-hover:text-emerald-900 truncate">
+                    Verify screenshot proof ...
+                  </span>
+                </div>
+                <span className="text-[9.5px] font-bold font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/70 tracking-wide">
+                  PROOF
                 </span>
               </button>
             )}

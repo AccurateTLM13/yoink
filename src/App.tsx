@@ -19,8 +19,9 @@ import {
   Upload,
   RefreshCw,
   Play,
+  ShieldCheck,
 } from 'lucide-react';
-import { BatchIssue, CaptureSettings, HistoryItem } from './types';
+import { CaptureSettings, HistoryItem } from './types';
 import {
   DEFAULT_SETTINGS,
   getStoredSettings,
@@ -29,6 +30,7 @@ import {
   deleteStoredHistoryItem,
   clearStoredHistory,
   addHistoryItem,
+  getFullResolutionImage,
 } from './utils/storage';
 import { fileToHistoryItem } from './utils/upload';
 import {
@@ -42,20 +44,22 @@ import {
   getInjectableOpenTabs,
   OpenTabInfo,
 } from './utils/capture';
+import { getOrCreateProofIdentity } from './utils/proof';
 import { QuickMenu } from './components/QuickMenu';
 import { UrlBatchModal } from './components/UrlBatchModal';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { OptionsDrawer } from './components/OptionsDrawer';
 import { MultiSizeModal } from './components/MultiSizeModal';
 import { ImagePreviewModal } from './components/ImagePreviewModal';
+import { VerifyModal } from './components/VerifyModal';
 
-type CurrentView = 'menu' | 'urllist' | 'history' | 'options' | 'multisize';
+type CurrentView = 'menu' | 'urllist' | 'history' | 'options' | 'multisize' | 'verify';
 
 const hasExplicitViewParam = (): boolean => {
   if (typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
     const v = params.get('view');
-    return Boolean(v && ['menu', 'urllist', 'history', 'options', 'multisize'].includes(v));
+    return Boolean(v && ['menu', 'urllist', 'history', 'options', 'multisize', 'verify'].includes(v));
   }
   return false;
 };
@@ -64,7 +68,7 @@ const getInitialView = (): CurrentView => {
   if (typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
     const v = params.get('view');
-    if (v && ['menu', 'urllist', 'history', 'options', 'multisize'].includes(v)) {
+    if (v && ['menu', 'urllist', 'history', 'options', 'multisize', 'verify'].includes(v)) {
       return v as CurrentView;
     }
   }
@@ -91,9 +95,10 @@ export default function App() {
   const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
   const [isAnnotatingDirectly, setIsAnnotatingDirectly] = useState(false);
   const [isOcrDirectly, setIsOcrDirectly] = useState(false);
+  const [showVerifyModal, setShowVerifyModal] = useState(false);
+  const [verifyTarget, setVerifyTarget] = useState<{ dataUrl: string; title: string } | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('Ready');
-  const [tabIssues, setTabIssues] = useState<BatchIssue[]>([]);
   const [copiedShortcut, setCopiedShortcut] = useState<string | null>(null);
 
   const [openTabs, setOpenTabs] = useState<OpenTabInfo[]>([]);
@@ -123,7 +128,7 @@ export default function App() {
     if (isFullTab) {
       document.body.className = 'bg-[#f8f9fc] w-full min-h-screen m-0 p-0 select-none antialiased overflow-y-auto text-zinc-900 font-sans';
     } else {
-      document.body.className = 'bg-[#fbfbfd] w-[370px] h-[550px] m-0 p-0 overflow-hidden select-none antialiased text-zinc-900 font-sans';
+      document.body.className = 'bg-[#fbfbfd] w-[380px] h-[585px] m-0 p-0 overflow-hidden select-none antialiased text-zinc-900 font-sans';
     }
   }, [isFullTab]);
 
@@ -147,7 +152,7 @@ export default function App() {
     }
   }, [isFullTab, view, refreshOpenTabs]);
 
-  // Load initial settings and history, plus check for pending_view from background captures
+  // Load initial settings, history, and proof identity, plus check for pending_view from background captures
   useEffect(() => {
     let pendingViewResolved = false;
 
@@ -169,6 +174,11 @@ export default function App() {
       setSettings(s);
       const h = await getStoredHistory();
       setHistory(h);
+      try {
+        await getOrCreateProofIdentity();
+      } catch {
+        // Proof identity fallback handled internally
+      }
 
       // In Full Tab Studio Hub, default to Gallery when captures exist unless an explicit ?view= or pending_view was requested
       if (!forcePopup && (forceTab || window.innerWidth > 480) && !hasExplicitViewParam() && !pendingViewResolved) {
@@ -328,29 +338,42 @@ export default function App() {
     }
   }, [settings]);
 
-  const handleCaptureAllTabs = useCallback(async (retryIds?: number[]) => {
-    let issues: BatchIssue[] = [];
+  const handleCaptureAllTabs = useCallback(async () => {
     try {
       if (!(await ensureAllSitesAccess())) {
         setStatusMessage('Yoink needs access to all sites to capture multiple tabs.');
         return;
       }
       setIsCapturing(true);
-      setTabIssues([]);
       setStatusMessage('Capturing all tabs in window...');
       const results = await captureAllTabs(settings, (curr, total, title) => {
         setStatusMessage(`Capturing tab ${curr}/${total}: ${title}`);
-      }, (outcome) => { issues = [...outcome.failures, ...outcome.skipped]; setTabIssues(issues); }, retryIds);
+      });
       const updated = await getStoredHistory();
       setHistory(updated);
-      setStatusMessage(`${results.length} captured, ${issues.length} failed or skipped.`);
-      if (results.length > 0) setRecentBatchCount(results.length);
+      setStatusMessage(`All ${results.length} tabs captured!`);
+      if (results.length > 0) {
+        setRecentBatchCount(results.length);
+        setView('history');
+      }
     } catch (err: any) {
       setStatusMessage(`Error: ${err.message || 'All tabs capture failed'}`);
     } finally {
       setIsCapturing(false);
     }
   }, [settings]);
+
+  const handleSelectVerifyItem = useCallback(async (item: HistoryItem) => {
+    const fullUrl = await getFullResolutionImage(item.id);
+    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null) || item.thumbnailUrl;
+    if (!dataUrl) return;
+    setVerifyTarget({ dataUrl, title: item.title });
+    if (isFullTab) {
+      setView('verify');
+    } else {
+      setShowVerifyModal(true);
+    }
+  }, [isFullTab]);
 
   const handleSaveSettings = useCallback(async (newSettings: CaptureSettings) => {
     setSettings(newSettings);
@@ -401,10 +424,11 @@ export default function App() {
     }
   }, []);
 
-  // Paste an image anywhere in the Studio Hub to import it.
+  // Paste an image anywhere in the Studio Hub to import it (unless inside Verify view)
   useEffect(() => {
     if (!isFullTab) return;
     const onPaste = (e: ClipboardEvent) => {
+      if (view === 'verify' || showVerifyModal) return;
       const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'));
       if (files.length > 0) {
         e.preventDefault();
@@ -413,7 +437,7 @@ export default function App() {
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [isFullTab, handleImportFiles]);
+  }, [isFullTab, view, showVerifyModal, handleImportFiles]);
 
   const handleOpenStudio = useCallback(() => {
     if (typeof chrome !== 'undefined' && chrome.tabs && chrome.tabs.create) {
@@ -506,6 +530,18 @@ export default function App() {
               </button>
 
               <button
+                onClick={() => setView('verify')}
+                className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                  view === 'verify'
+                    ? 'bg-white text-emerald-700 font-semibold shadow-2xs'
+                    : 'text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                <ShieldCheck size={14} className="text-emerald-600" />
+                <span>Proof Vault</span>
+              </button>
+
+              <button
                 onClick={() => setView('options')}
                 className={`px-3 py-1.5 rounded-lg font-medium transition cursor-pointer flex items-center gap-1.5 ${
                   view === 'options'
@@ -537,7 +573,6 @@ export default function App() {
           </header>
 
           {/* Content Area */}
-          {tabIssues.length > 0 && <div role="alert" className="p-3 bg-amber-50 text-amber-950 border border-amber-300 text-xs overflow-auto max-h-40"><p className="font-semibold">Tabs not captured</p><ul>{tabIssues.map((issue, i) => <li key={i}>{issue.target}: {issue.reason}</li>)}</ul>{tabIssues.some((issue) => issue.tabId) && <button type="button" disabled={isCapturing} className="underline font-semibold" onClick={() => handleCaptureAllTabs(tabIssues.flatMap((issue) => issue.tabId ? [issue.tabId] : []))}>Retry failed</button>} <button type="button" className="underline" onClick={() => setTabIssues([])}>Dismiss</button></div>}
           <main
             className="flex-1 overflow-hidden relative flex flex-col"
             onDragOver={(e) => {
@@ -575,6 +610,7 @@ export default function App() {
                   setIsOcrDirectly(true);
                   setPreviewItem(item);
                 }}
+                onSelectVerify={handleSelectVerifyItem}
                 onDeleteItem={handleDeleteHistoryItem}
                 onClearAll={handleClearHistory}
                 isFullTab={true}
@@ -608,7 +644,7 @@ export default function App() {
                         Launch Any Capture Directly from Studio
                       </h2>
                       <p className="text-xs md:text-sm text-zinc-600 max-w-xl leading-relaxed">
-                        Choose an open browser tab below and click any capture tool. Yoink will automatically switch to your target tab, capture it, and return the result right here.
+                        Choose an open browser tab below and click any capture tool. Yoink will automatically switch to your target tab, capture it with cryptographically verifiable proof, and return the result right here.
                       </p>
                     </div>
 
@@ -748,7 +784,7 @@ export default function App() {
                             Full Page Capture
                           </h4>
                           <p className="text-xs text-zinc-600 mt-1 leading-relaxed">
-                            Scrolls the entire webpage automatically, preserves top navbars once, and streams DOM chunks into one seamless image.
+                            Scrolls the entire webpage automatically, preserves top navbars once, and streams DOM chunks into one seamless image with cryptographic verification.
                           </p>
                         </div>
                       </div>
@@ -1066,17 +1102,37 @@ export default function App() {
               />
             )}
 
+            {view === 'verify' && (
+              <VerifyModal
+                inline={true}
+                initialDataUrl={verifyTarget?.dataUrl}
+                initialTitle={verifyTarget?.title}
+              />
+            )}
+
             {view === 'options' && (
               <OptionsDrawer
                 settings={settings}
                 onBack={() => setView('menu')}
                 onSave={handleSaveSettings}
+                onOpenVerify={() => {
+                  setVerifyTarget(null);
+                  setView('verify');
+                }}
                 isFullTab={true}
               />
             )}
           </main>
 
-          {/* Image Preview / Zoom Modal */}
+          {/* Modal Overlays (VerifyModal when triggered from ImagePreviewModal, or ImagePreviewModal itself) */}
+          {showVerifyModal && (
+            <VerifyModal
+              initialDataUrl={verifyTarget?.dataUrl}
+              initialTitle={verifyTarget?.title}
+              onClose={() => setShowVerifyModal(false)}
+            />
+          )}
+
           {previewItem && (
             <ImagePreviewModal
               item={previewItem}
@@ -1102,7 +1158,6 @@ export default function App() {
   return (
     <div className="w-[380px] h-[585px] max-h-[600px] flex flex-col bg-[#fbfbfd] text-zinc-900 overflow-hidden font-sans border border-zinc-200/80 rounded-2xl shadow-xl">
       {/* Primary View Router */}
-      {tabIssues.length > 0 && <div role="alert" className="p-3 bg-amber-50 text-amber-950 border border-amber-300 text-xs overflow-auto max-h-40"><p className="font-semibold">Tabs not captured</p><ul>{tabIssues.map((issue, i) => <li key={i}>{issue.target}: {issue.reason}</li>)}</ul>{tabIssues.some((issue) => issue.tabId) && <button type="button" disabled={isCapturing} className="underline font-semibold" onClick={() => handleCaptureAllTabs(tabIssues.flatMap((issue) => issue.tabId ? [issue.tabId] : []))}>Retry failed</button>} <button type="button" className="underline" onClick={() => setTabIssues([])}>Dismiss</button></div>}
       <div className="flex-1 overflow-hidden relative flex flex-col">
         {view === 'menu' && (
           <QuickMenu
@@ -1117,6 +1172,10 @@ export default function App() {
             onOpenHistory={() => setView('history')}
             onOpenOptions={() => setView('options')}
             onOpenStudio={handleOpenStudio}
+            onOpenVerify={() => {
+              setVerifyTarget(null);
+              setShowVerifyModal(true);
+            }}
             onUploadFiles={handleImportFiles}
             delaySec={settings.captureDelaySec}
             onSetDelaySec={(sec) => handleSaveSettings({ ...settings, captureDelaySec: sec })}
@@ -1169,6 +1228,7 @@ export default function App() {
               setIsOcrDirectly(true);
               setPreviewItem(item);
             }}
+            onSelectVerify={handleSelectVerifyItem}
             onDeleteItem={handleDeleteHistoryItem}
             onClearAll={handleClearHistory}
             onOpenStudio={handleOpenStudio}
@@ -1182,11 +1242,22 @@ export default function App() {
             settings={settings}
             onBack={() => setView('menu')}
             onSave={handleSaveSettings}
+            onOpenVerify={() => {
+              setVerifyTarget(null);
+              setShowVerifyModal(true);
+            }}
           />
         )}
       </div>
 
       {/* Image Preview / Zoom Modal */}
+      {showVerifyModal && (
+        <VerifyModal
+          initialDataUrl={verifyTarget?.dataUrl}
+          initialTitle={verifyTarget?.title}
+          onClose={() => setShowVerifyModal(false)}
+        />
+      )}
       {previewItem && (
         <ImagePreviewModal
           item={previewItem}

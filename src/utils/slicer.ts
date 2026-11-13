@@ -1,5 +1,6 @@
 import { CaptureFormat } from '../types';
-import { downloadDataUrl } from './storage';
+import { downloadDataUrl, getStoredSettings } from './storage';
+import { applyProofToCanvasAndEncode } from './proof';
 
 /**
  * Image Slicing Utilities
@@ -81,8 +82,7 @@ export async function sliceImage(
     return [{ dataUrl: src, part: 1, total: 1, y: 0, height: h }];
   }
 
-  const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-  const q = format === 'png' ? undefined : quality;
+  const settings = await getStoredSettings().catch(() => null);
   const items: ImageSliceItem[] = [];
 
   for (let i = 0; i < slices.length; i++) {
@@ -99,12 +99,20 @@ export async function sliceImage(
     }
 
     ctx.drawImage(img, 0, slice.y, w, slice.height, 0, 0, w, slice.height);
-    const dataUrl = canvas.toDataURL(mime, q);
+    const encoded = await applyProofToCanvasAndEncode(canvas, {
+      format,
+      quality,
+      enableProof: settings?.enableProof !== false,
+      proofAuthor: settings?.proofAuthor || '',
+      proofVisualStamp: settings?.proofVisualStamp || false,
+      title: `Slice Part ${i + 1} of ${slices.length}`,
+      url: 'yoink://slice',
+    });
     canvas.width = 0;
     canvas.height = 0;
 
     items.push({
-      dataUrl,
+      dataUrl: encoded.dataUrl,
       part: i + 1,
       total: slices.length,
       y: slice.y,

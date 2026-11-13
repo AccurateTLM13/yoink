@@ -1,6 +1,7 @@
 import type { BatchOutcome } from '../types';
 import { CaptureFormat, CaptureMode, CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
 import { addHistoryItem, downloadDataUrl, copyImageToClipboard } from './storage';
+import { applyProofToCanvasAndEncode } from './proof';
 
 export interface OpenTabInfo {
   id: number;
@@ -215,7 +216,8 @@ export function generateMockScreenshot(
   title: string,
   width: number = 1200,
   height: number = 800,
-  format: CaptureFormat = 'png'
+  format: CaptureFormat = 'png',
+  settings?: Partial<CaptureSettings>
 ): Promise<string> {
   return new Promise((resolve) => {
     if (typeof document === 'undefined') {
@@ -292,7 +294,17 @@ export function generateMockScreenshot(
     ctx.fillText('YOINK CAPTURE ENGINE', 100, height - 76);
 
     const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-    resolve(canvas.toDataURL(mime, 0.95));
+    applyProofToCanvasAndEncode(canvas, {
+      format,
+      quality: settings?.quality ?? 0.95,
+      enableProof: settings?.enableProof !== false,
+      proofAuthor: settings?.proofAuthor || '',
+      proofVisualStamp: settings?.proofVisualStamp || false,
+      title,
+      url: 'https://yoink.capture/demo',
+    })
+      .then((res) => resolve(res.dataUrl))
+      .catch(() => resolve(canvas.toDataURL(mime, 0.95)));
   });
 }
 
@@ -332,7 +344,7 @@ export async function captureVisible(settings: CaptureSettings, targetTabId?: nu
   // Simulated fallback in dev/browser mode
   const width = 1440;
   const height = 900;
-  const dataUrl = await generateMockScreenshot('visible', 'Active Tab Viewport', width, height, settings.format);
+  const dataUrl = await generateMockScreenshot('visible', 'Active Tab Viewport', width, height, settings.format, settings);
   const item: HistoryItem = {
     id: `sim_${Date.now()}`,
     title: 'Visible Viewport (Demo)',
@@ -340,9 +352,10 @@ export async function captureVisible(settings: CaptureSettings, targetTabId?: nu
     dataUrl,
     timestamp: Date.now(),
     width,
-    height,
+    height: settings.proofVisualStamp && settings.enableProof !== false ? height + 36 : height,
     mode: 'visible',
     format: settings.format,
+    proofSigned: settings.enableProof !== false,
   };
   await addHistoryItem(item);
   if (settings.autoDownload) {
@@ -385,7 +398,7 @@ export async function captureSelection(settings: CaptureSettings, targetTabId?: 
   // Simulated fallback
   const width = 640;
   const height = 480;
-  const dataUrl = await generateMockScreenshot('selection', 'Crop Selection Region', width, height, settings.format);
+  const dataUrl = await generateMockScreenshot('selection', 'Crop Selection Region', width, height, settings.format, settings);
   const item: HistoryItem = {
     id: `sim_sel_${Date.now()}`,
     title: 'Selected Region (Demo)',
@@ -393,9 +406,10 @@ export async function captureSelection(settings: CaptureSettings, targetTabId?: 
     dataUrl,
     timestamp: Date.now(),
     width,
-    height,
+    height: settings.proofVisualStamp && settings.enableProof !== false ? height + 36 : height,
     mode: 'selection',
     format: settings.format,
+    proofSigned: settings.enableProof !== false,
   };
   await addHistoryItem(item);
   if (settings.autoDownload) {
@@ -438,7 +452,7 @@ export async function captureScrollingElement(settings: CaptureSettings, targetT
   // Simulated fallback
   const width = 800;
   const height = 2400;
-  const dataUrl = await generateMockScreenshot('element', 'Scrolling Element (Chat / Feed)', width, height, settings.format);
+  const dataUrl = await generateMockScreenshot('element', 'Scrolling Element (Chat / Feed)', width, height, settings.format, settings);
   const item: HistoryItem = {
     id: `sim_elem_${Date.now()}`,
     title: 'Scrolling Element (Demo)',
@@ -446,9 +460,10 @@ export async function captureScrollingElement(settings: CaptureSettings, targetT
     dataUrl,
     timestamp: Date.now(),
     width,
-    height,
+    height: settings.proofVisualStamp && settings.enableProof !== false ? height + 36 : height,
     mode: 'element',
     format: settings.format,
+    proofSigned: settings.enableProof !== false,
   };
   await addHistoryItem(item);
   if (settings.autoDownload) {
@@ -464,8 +479,9 @@ export async function captureScrollingElement(settings: CaptureSettings, targetT
 export async function captureMediaStreamFrame(
   stream: MediaStream,
   format: CaptureFormat = 'png',
-  quality: number = 0.92
-): Promise<{ dataUrl: string; width: number; height: number }> {
+  quality: number = 0.92,
+  settings?: Partial<CaptureSettings>
+): Promise<{ dataUrl: string; width: number; height: number; proofSigned?: boolean; proofKeyId?: string }> {
   try {
     const video = document.createElement('video');
     video.srcObject = stream;
@@ -492,10 +508,23 @@ export async function captureMediaStreamFrame(
       ctx.drawImage(video, 0, 0, width, height);
     }
 
-    const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-    const dataUrl = canvas.toDataURL(mime, quality);
+    const encoded = await applyProofToCanvasAndEncode(canvas, {
+      format,
+      quality,
+      enableProof: settings?.enableProof !== false,
+      proofAuthor: settings?.proofAuthor || '',
+      proofVisualStamp: settings?.proofVisualStamp || false,
+      title: 'Desktop Screen Capture',
+      url: 'desktop://display',
+    });
 
-    return { dataUrl, width, height };
+    return {
+      dataUrl: encoded.dataUrl,
+      width: encoded.width,
+      height: encoded.height,
+      proofSigned: encoded.proofSigned,
+      proofKeyId: encoded.proofKeyId,
+    };
   } finally {
     stream.getTracks().forEach((track) => track.stop());
   }
@@ -505,18 +534,23 @@ export async function captureMediaStreamFrame(
  * Capture Desktop / Full Screen (P1-5)
  */
 export async function captureDesktop(settings: CaptureSettings): Promise<HistoryItem> {
-  // 1. Direct displayMedia capture in extension tab or modern browser window
-  if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getDisplayMedia) {
+  // When running inside the small extension popup, opening the OS screen picker causes the popup
+  // to lose focus and close. Route through the persistent background service worker instead.
+  const isPopupWindow = typeof window !== 'undefined' && window.innerWidth <= 480;
+
+  // 1. Direct displayMedia capture in Studio Hub tab or standalone browser window
+  if (!isPopupWindow && typeof navigator !== 'undefined' && navigator.mediaDevices?.getDisplayMedia) {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: false,
       });
 
-      const { dataUrl, width, height } = await captureMediaStreamFrame(
+      const { dataUrl, width, height, proofSigned, proofKeyId } = await captureMediaStreamFrame(
         stream,
         settings.format,
-        settings.quality
+        settings.quality,
+        settings
       );
 
       const item: HistoryItem = {
@@ -529,6 +563,8 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
         height,
         mode: 'desktop',
         format: settings.format,
+        proofSigned,
+        proofKeyId,
       };
 
       await addHistoryItem(item);
@@ -559,7 +595,7 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
     }
   }
 
-  // 2. Extension background fallback with chrome.desktopCapture
+  // 2. Extension background service worker with chrome.desktopCapture
   if (isChromeExtension()) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(
@@ -583,7 +619,7 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
   // 3. Simulated fallback
   const width = 1920;
   const height = 1080;
-  const dataUrl = await generateMockScreenshot('desktop', 'Desktop Screen Capture', width, height, settings.format);
+  const dataUrl = await generateMockScreenshot('desktop', 'Desktop Screen Capture', width, height, settings.format, settings);
   const item: HistoryItem = {
     id: `sim_desktop_${Date.now()}`,
     title: 'Desktop Screen Capture (Demo)',
@@ -591,9 +627,10 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
     dataUrl,
     timestamp: Date.now(),
     width,
-    height,
+    height: settings.proofVisualStamp && settings.enableProof !== false ? height + 36 : height,
     mode: 'desktop',
     format: settings.format,
+    proofSigned: settings.enableProof !== false,
   };
   await addHistoryItem(item);
   if (settings.autoDownload) {
@@ -643,7 +680,7 @@ export async function captureFullPage(
   // Simulated fallback
   const width = 1440;
   const height = 3200;
-  const dataUrl = await generateMockScreenshot('full', 'Full Page Scroll Stitch', width, height, settings.format);
+  const dataUrl = await generateMockScreenshot('full', 'Full Page Scroll Stitch', width, height, settings.format, settings);
   const item: HistoryItem = {
     id: `sim_full_${Date.now()}`,
     title: 'Full Page Stitch (Demo)',
@@ -651,9 +688,10 @@ export async function captureFullPage(
     dataUrl,
     timestamp: Date.now(),
     width,
-    height,
+    height: settings.proofVisualStamp && settings.enableProof !== false ? height + 36 : height,
     mode: 'full',
     format: settings.format,
+    proofSigned: settings.enableProof !== false,
   };
   await addHistoryItem(item);
   if (settings.autoDownload) {
@@ -715,7 +753,7 @@ export async function captureAllTabs(
     if (onProgress) onProgress(i + 1, simulatedTabs.length, tab.title);
     await new Promise((r) => setTimeout(r, 600));
 
-    const dataUrl = await generateMockScreenshot('alltabs', tab.title, 1280, 800, settings.format);
+    const dataUrl = await generateMockScreenshot('alltabs', tab.title, 1280, 800, settings.format, settings);
     const item: HistoryItem = {
       id: `sim_tab_${Date.now()}_${i}`,
       title: tab.title,
@@ -723,9 +761,10 @@ export async function captureAllTabs(
       dataUrl,
       timestamp: Date.now(),
       width: 1280,
-      height: 800,
+      height: settings.proofVisualStamp && settings.enableProof !== false ? 836 : 800,
       mode: 'alltabs',
       format: settings.format,
+      proofSigned: settings.enableProof !== false,
     };
     await addHistoryItem(item);
     if (settings.autoDownload) {
@@ -785,7 +824,7 @@ export async function captureUrlList(
     if (onProgress) onProgress(i + 1, urls.length, u);
     await new Promise((r) => setTimeout(r, 800));
 
-    const dataUrl = await generateMockScreenshot('urllist', `Batch URL ${i + 1}`, 1440, 900, settings.format);
+    const dataUrl = await generateMockScreenshot('urllist', `Batch URL ${i + 1}`, 1440, 900, settings.format, settings);
     const item: HistoryItem = {
       id: `sim_url_${Date.now()}_${i}`,
       title: `Batch Capture ${i + 1}`,
@@ -793,9 +832,10 @@ export async function captureUrlList(
       dataUrl,
       timestamp: Date.now(),
       width: 1440,
-      height: 900,
+      height: settings.proofVisualStamp && settings.enableProof !== false ? 936 : 900,
       mode: 'urllist',
       format: settings.format,
+      proofSigned: settings.enableProof !== false,
     };
     await addHistoryItem(item);
     if (settings.autoDownload) {
@@ -880,7 +920,7 @@ export async function captureMultiSize(
     if (onProgress) onProgress(i + 1, resolutions.length, res.name);
     await new Promise((r) => setTimeout(r, 700));
 
-    const dataUrl = await generateMockScreenshot('multisize', `${res.name} (${res.width}x${res.height})`, res.width, res.height, settings.format);
+    const dataUrl = await generateMockScreenshot('multisize', `${res.name} (${res.width}x${res.height})`, res.width, res.height, settings.format, settings);
     const item: HistoryItem = {
       id: `sim_ms_${Date.now()}_${i}`,
       title: `Responsive - ${res.name}`,
@@ -888,9 +928,10 @@ export async function captureMultiSize(
       dataUrl,
       timestamp: Date.now(),
       width: res.width,
-      height: res.height,
+      height: settings.proofVisualStamp && settings.enableProof !== false ? res.height + 36 : res.height,
       mode: 'multisize',
       format: settings.format,
+      proofSigned: settings.enableProof !== false,
     };
     await addHistoryItem(item);
     if (settings.autoDownload) {
