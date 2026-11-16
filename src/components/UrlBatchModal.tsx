@@ -5,6 +5,7 @@ import {
   Globe,
   ListPlus,
   CheckCircle,
+  AlertTriangle,
   Loader2,
   Trash2,
   ExternalLink,
@@ -43,6 +44,7 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
   const [delaySec, setDelaySec] = useState(3);
   const [isRunning, setIsRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
+  const [hasIssues, setHasIssues] = useState(false);
   const [progressStep, setProgressStep] = useState({ current: 0, total: 0 });
   const [completedItems, setCompletedItems] = useState<HistoryItem[]>([]);
 
@@ -68,9 +70,11 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
 
   const handleStart = async () => {
     if (validUrls.length === 0) return;
+    setHasIssues(false);
 
     try {
       if (!(await ensureAllSitesAccess())) {
+        setHasIssues(true);
         setProgressMsg('Yoink needs access to all sites for batch URL capture.');
         return;
       }
@@ -78,7 +82,9 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
       setProgressStep({ current: 0, total: validUrls.length });
       setProgressMsg('Starting batch URL capture sequence...');
       setCompletedItems([]);
-    } catch {
+    } catch (error) {
+      setHasIssues(true);
+      setProgressMsg(`Could not request site access: ${error instanceof Error ? error.message : 'Unknown error'}`);
       return;
     }
 
@@ -92,10 +98,14 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
           setProgressMsg(`Capturing ${current} of ${total}: ${activeUrl}`);
         }
       );
-      setCompletedItems(results);
-      onFinished(results);
-      setProgressMsg(`Batch complete! Captured ${results.length} URLs.`);
+      setCompletedItems(results.items);
+      setHasIssues(results.failures.length > 0);
+      onFinished(results.items);
+      setProgressMsg(results.failures.length
+        ? `Captured ${results.items.length}; ${results.failures.length} need attention: ${results.failures.map((f) => `${f.target}: ${f.error}`).join('; ')}`
+        : `Batch complete! Captured ${results.items.length} URLs.`);
     } catch (err: any) {
+      setHasIssues(true);
       setProgressMsg(`Error: ${err.message || 'Batch capture failed'}`);
     } finally {
       setIsRunning(false);
@@ -187,16 +197,18 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
             className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs shadow-2xs ${
               isRunning
                 ? 'bg-blue-50/90 border-blue-200 text-blue-900'
-                : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
+                : hasIssues ? 'bg-amber-50 border-amber-200 text-amber-950' : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
             }`}
           >
             {isRunning ? (
               <Loader2 size={15} className="animate-spin text-blue-600 shrink-0 mt-0.5" />
+            ) : hasIssues ? (
+              <AlertTriangle size={15} className="text-amber-700 shrink-0 mt-0.5" />
             ) : (
               <CheckCircle size={15} className="text-emerald-600 shrink-0 mt-0.5" />
             )}
             <div className="flex-1 min-w-0">
-              <p className="font-medium text-xs leading-tight truncate">{progressMsg}</p>
+              <p className="font-medium text-xs leading-tight break-words">{progressMsg}</p>
               {isRunning && progressStep.total > 0 && (
                 <div className="w-full bg-blue-200/80 h-1.5 rounded-full mt-2 overflow-hidden">
                   <div

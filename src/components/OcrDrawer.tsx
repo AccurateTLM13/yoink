@@ -15,7 +15,7 @@ import { extractOcrText, OcrResult } from '../utils/ai';
 interface Props {
   dataUrl: string;
   initialText?: string;
-  onSaveText?: (text: string) => void;
+  onSaveText?: (text: string) => void | Promise<void>;
   onClose: () => void;
 }
 
@@ -39,6 +39,7 @@ export const OcrDrawer: React.FC<Props> = ({
       const res: OcrResult = await extractOcrText(dataUrl);
       setText(res.text);
       setEngine(res.engine);
+      if (res.status === 'unavailable' || res.status === 'empty') setError(res.message || null);
     } catch (err: any) {
       setError(err.message || 'OCR extraction failed');
     } finally {
@@ -63,11 +64,16 @@ export const OcrDrawer: React.FC<Props> = ({
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (onSaveText) {
-      onSaveText(text);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      try {
+        await onSaveText(text);
+        setError(null);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+      } catch (err) {
+        setError(`Could not save text: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      }
     }
   };
 
@@ -96,7 +102,7 @@ export const OcrDrawer: React.FC<Props> = ({
                 ? 'Offline Native Shape Detection'
                 : engine === 'byok'
                 ? 'BYOK Vision Model'
-                : 'Local Canvas Scanner'}
+                : 'OCR unavailable'}
             </span>
           </div>
         </div>

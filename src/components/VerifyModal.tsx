@@ -180,7 +180,7 @@ export const VerifyModal: React.FC<Props> = ({
                 </span>
               </div>
               <p className="text-[10.5px] text-zinc-500">
-                Verify screenshot ownership, pixel integrity & IPTC anti-AI provenance
+                Check the signature and image integrity. Source and author are self-declared.
               </p>
             </div>
           </div>
@@ -302,16 +302,16 @@ export const VerifyModal: React.FC<Props> = ({
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-bold text-xs sm:text-sm">
                       {result.status === 'authentic'
-                        ? 'Verified Authentic Yoink Capture'
+                        ? 'Signature and image integrity verified'
                         : result.status === 'tampered'
-                        ? 'Signed by Yoink — Pixels Modified After Capture'
+                        ? 'Signed image changed after signing'
                         : result.status === 'invalid_signature'
                         ? 'Invalid Cryptographic Signature'
                         : 'No Yoink Proof Signature Found'}
                     </span>
                     {result.isOwnCapture && (
                       <span className="px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase bg-emerald-600 text-white">
-                        ✓ YOUR CAPTURE
+                        ✓ THIS BROWSER’S KEY
                       </span>
                     )}
                   </div>
@@ -323,7 +323,7 @@ export const VerifyModal: React.FC<Props> = ({
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <div className="p-2.5 rounded-xl bg-white border border-zinc-200/90 space-y-1">
                   <div className="flex items-center justify-between text-[10px] font-mono text-zinc-500">
-                    <span>ANTI-AI IPTC</span>
+                    <span>DECLARED SOURCE</span>
                     <Sparkles
                       size={12}
                       className={result.hasIptcScreenCapture ? 'text-emerald-600' : 'text-zinc-400'}
@@ -390,7 +390,7 @@ export const VerifyModal: React.FC<Props> = ({
                     }`}
                   >
                     {result.pixelsIntact
-                      ? '✓ 100% Intact'
+                      ? '✓ Integrity verified'
                       : result.manifest
                       ? 'Altered / Re-saved'
                       : 'Unverified'}
@@ -406,7 +406,7 @@ export const VerifyModal: React.FC<Props> = ({
                       Decoded Capture Provenance Certificate
                     </span>
                     <span className="font-mono text-[10px] text-emerald-700 font-semibold">
-                      IPTC: screenCapture (Non-AI)
+                      {result.hasIptcScreenCapture ? 'IPTC: screenCapture (declared)' : 'Source type not declared'}
                     </span>
                   </div>
 
@@ -429,9 +429,9 @@ export const VerifyModal: React.FC<Props> = ({
                     <div className="flex items-start gap-2">
                       <User size={13} className="text-zinc-400 mt-0.5 shrink-0" />
                       <div className="min-w-0">
-                        <div className="text-[10px] text-zinc-500">Declared Creator / Owner</div>
+                        <div className="text-[10px] text-zinc-500">Declared Creator</div>
                         <div className="font-semibold text-zinc-900 truncate">
-                          {result.manifest.a || 'Yoink Verified User'}
+                          {result.manifest.a || 'Not provided'}
                         </div>
                       </div>
                     </div>

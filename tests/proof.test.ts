@@ -96,7 +96,7 @@ describe('Yoink Proof™ — Cryptographic Provenance & Steganography Engine', (
     const extracted = extractLsbWatermark(rgba);
     assert.ok(extracted, 'Watermark should be extracted from pixel LSBs');
     assert.equal(extracted.kid, id.keyFingerprint);
-    assert.equal(extracted.u, 'https://github.com/yoink/proof');
+    assert.equal(extracted.u, 'https://github.com');
     assert.equal(extracted.a, '@yoink_dev');
     assert.equal(extracted.src, IPTC_SCREEN_CAPTURE_URI);
 
@@ -263,5 +263,51 @@ describe('Yoink Proof™ — Cryptographic Provenance & Steganography Engine', (
     const forgedManifest = { ...manifest, a: '@attacker' };
     const sigValid = await verifyProofManifestSignature(forgedManifest);
     assert.equal(sigValid, false);
+  });
+
+  test('omits paths and credentials from newly signed proof', async () => {
+    const identity = await generateProofIdentity();
+    const rgba = createSyntheticRgba(80, 80);
+    const manifest = await createSignedProofManifest({
+      rgba, width: 80, height: 80, identity,
+      url: 'https://example.com/private/123?token=secret#fragment',
+    });
+    assert.equal(manifest.u, 'https://example.com');
+    assert.equal(embedLsbWatermark(rgba, manifest), true);
+    assert.equal(extractLsbWatermark(rgba)?.u, 'https://example.com');
+  });
+
+  test('preserves transparent pixels and verifies container-only proof', async () => {
+    const identity = await generateProofIdentity();
+    const rgba = createSyntheticRgba(80, 80);
+    rgba[3] = 0;
+    const before = new Uint8ClampedArray(rgba);
+    const raw = createMinimalPngBytes();
+    const bh = await computeVisualBitstreamHash(raw);
+    const manifest = await createSignedProofManifest({ rgba, width: 80, height: 80, identity, bitstreamHash: bh, source: '' });
+    assert.equal(embedLsbWatermark(rgba, manifest), false);
+    assert.deepEqual(rgba, before);
+    const tagged = injectContainerMetadata(raw, 'image/png', manifest);
+    const result = await verifyImageBufferAndPixels({ fileBytes: tagged, rgba, width: 80, height: 80, localIdentity: identity });
+    assert.equal(result.verified, true);
+    assert.equal(result.hasPixelWatermark, false);
+    assert.equal(result.hasIptcScreenCapture, false);
+
+    const altered = new Uint8Array(tagged);
+    altered[19] ^= 1;
+    const alteredResult = await verifyImageBufferAndPixels({ fileBytes: altered, rgba, width: 80, height: 80, localIdentity: identity });
+    assert.equal(alteredResult.verified, false);
+  });
+
+  test('does not imply an unknown signer has a verified identity', async () => {
+    const signer = await generateProofIdentity();
+    const verifier = await generateProofIdentity();
+    const rgba = createSyntheticRgba(80, 80);
+    const manifest = await createSignedProofManifest({ rgba, width: 80, height: 80, identity: signer, author: 'Claimed author' });
+    embedLsbWatermark(rgba, manifest);
+    const result = await verifyImageBufferAndPixels({ rgba, width: 80, height: 80, localIdentity: verifier });
+    assert.equal(result.verified, true);
+    assert.equal(result.isOwnCapture, false);
+    assert.match(result.summary, /not independently verified/);
   });
 });

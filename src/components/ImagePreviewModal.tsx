@@ -28,6 +28,7 @@ interface Props {
   onSaved?: (newItem: HistoryItem) => void;
   initialAnnotating?: boolean;
   initialOcr?: boolean;
+  onOpenAnnotate?: (item: HistoryItem) => void;
 }
 
 export const ImagePreviewModal: React.FC<Props> = ({
@@ -36,6 +37,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
   onSaved,
   initialAnnotating = false,
   initialOcr = false,
+  onOpenAnnotate,
 }) => {
   const [copied, setCopied] = useState(false);
   const [isAnnotating, setIsAnnotating] = useState(initialAnnotating);
@@ -45,6 +47,8 @@ export const ImagePreviewModal: React.FC<Props> = ({
   const [showVerify, setShowVerify] = useState(false);
   const [verifyDataUrl, setVerifyDataUrl] = useState<string | null>(null);
   const [zoomLevel, setZoomLevel] = useState(1);
+  const [loadingOriginal, setLoadingOriginal] = useState(false);
+  const [actionError, setActionError] = useState('');
   // Only initialize fullImage when item.dataUrl is actually populated (not the downscaled JPEG thumbnail)
   const initialFull = item?.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null;
   const [fullImage, setFullImage] = useState<string | null>(initialFull);
@@ -66,10 +70,12 @@ export const ImagePreviewModal: React.FC<Props> = ({
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        if (isAnnotating || showVerify) return;
+        if (showOcr) setShowOcr(false);
+        else onClose();
       }
     },
-    [onClose]
+    [onClose, isAnnotating, showOcr, showVerify]
   );
 
   useEffect(() => {
@@ -83,8 +89,10 @@ export const ImagePreviewModal: React.FC<Props> = ({
     let isMounted = true;
     if (item.dataUrl && item.dataUrl.length > 0) {
       setFullImage(item.dataUrl);
+      setLoadingOriginal(false);
     } else {
       setFullImage(null);
+      setLoadingOriginal(true);
     }
     if (item.width && item.height) {
       setDimensions({ width: item.width, height: item.height });
@@ -93,6 +101,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
       if (isMounted && full) {
         setFullImage(full);
       }
+      if (isMounted) setLoadingOriginal(false);
     });
     return () => {
       isMounted = false;
@@ -101,7 +110,8 @@ export const ImagePreviewModal: React.FC<Props> = ({
 
   if (!item) return null;
 
-  const currentImage = fullImage || item.dataUrl || item.thumbnailUrl;
+  const currentImage = fullImage || item.dataUrl;
+  const previewImage = currentImage || item.thumbnailUrl;
 
   if (isAnnotating && currentImage) {
     return (
@@ -109,6 +119,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
         item={item}
         imageSrc={currentImage}
         onClose={() => setIsAnnotating(false)}
+        onOcrSaved={onSaved}
         onSaved={(newItem) => {
           if (onSaved) onSaved(newItem);
           setIsAnnotating(false);
@@ -126,7 +137,8 @@ export const ImagePreviewModal: React.FC<Props> = ({
         targetUrl = loaded;
       }
     }
-    setVerifyDataUrl(targetUrl || currentImage);
+    if (!targetUrl) { setActionError('The original image is unavailable.'); return; }
+    setVerifyDataUrl(targetUrl);
     setShowVerify(true);
   };
 
@@ -152,7 +164,12 @@ export const ImagePreviewModal: React.FC<Props> = ({
     const ext = item.format || 'png';
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
     const filename = `${cleanTitle}_${Date.now()}.${ext}`;
-    downloadDataUrl(targetUrl, filename);
+    try {
+      await downloadDataUrl(targetUrl, filename);
+      setActionError('');
+    } catch (error) {
+      setActionError(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   const handleExportPdf = async () => {
@@ -162,6 +179,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
       await exportPdf([currentImage], item.title || 'capture');
     } catch (err) {
       console.error('PDF export failed:', err);
+      setActionError(`PDF export failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setExportingPdf(false);
     }
@@ -175,6 +193,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
       await downloadImageSlices(currentImage, cleanTitle, 4000, item?.format || 'png');
     } catch (err) {
       console.error('Image slicing failed:', err);
+      setActionError(`Slice export failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setSlicing(false);
     }
@@ -192,7 +211,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
       className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-md animate-in fade-in duration-150 font-sans select-none"
     >
       {/* Top Bar */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-zinc-900/95 border-b border-zinc-800/80 text-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-zinc-900/95 border-b border-zinc-800/80 text-white">
         <div className="flex items-center space-x-2.5 min-w-0 pr-3">
           <div className="w-7 h-7 rounded-lg bg-blue-500/20 border border-blue-500/30 flex items-center justify-center shrink-0">
             <FileImage size={15} className="text-blue-400" />
@@ -209,12 +228,13 @@ export const ImagePreviewModal: React.FC<Props> = ({
         </div>
 
         {/* Action Controls */}
-        <div className="flex items-center space-x-1.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
           {/* Annotate / Redact Button */}
           <button
-            onClick={() => setIsAnnotating(true)}
+            onClick={() => onOpenAnnotate ? onOpenAnnotate(item) : setIsAnnotating(true)}
+            disabled={!currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-orange-600 hover:bg-orange-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-xs mr-1"
-            title="Open Annotation & Redaction Studio (P0-1 // P0-3)"
+            title="Open Annotation & Redaction Studio"
           >
             <Pencil size={13} />
             <span>Annotate & Redact</span>
@@ -253,6 +273,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Copy Button */}
           <button
             onClick={handleCopy}
+            disabled={!currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
             title="Copy to clipboard"
           >
@@ -267,7 +288,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* PDF Export Button (P0-2) */}
           <button
             onClick={handleExportPdf}
-            disabled={exportingPdf}
+            disabled={exportingPdf || !currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
             title="Export as PDF (tall pages split across A4 pages)"
           >
@@ -278,7 +299,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Slices Button (Anti-Squish multi-part export) */}
           <button
             onClick={handleDownloadSlices}
-            disabled={slicing}
+            disabled={slicing || !currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
             title="Split tall image into web-friendly parts (max 4,000px per part) so upload platforms don't squash it"
           >
@@ -289,6 +310,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Extract Text / OCR Button (P2-9) */}
           <button
             onClick={() => setShowOcr(true)}
+            disabled={!currentImage}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
               showOcr
                 ? 'bg-indigo-600 text-white border-indigo-500'
@@ -303,6 +325,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Yoink Proof Verification Button */}
           <button
             onClick={handleOpenVerify}
+            disabled={!currentImage}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
               showVerify
                 ? 'bg-emerald-600 text-white border-emerald-500'
@@ -317,6 +340,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
           {/* Download Button */}
           <button
             onClick={handleDownload}
+            disabled={!currentImage}
             className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-xs"
             title="Download image file"
           >
@@ -335,15 +359,21 @@ export const ImagePreviewModal: React.FC<Props> = ({
         </div>
       </div>
 
+      {(item.warning || actionError || (!currentImage && !loadingOriginal)) && (
+        <div role="status" className="px-4 py-2 bg-amber-100 text-amber-950 text-xs font-medium">
+          {actionError || item.warning || 'The original image is unavailable. The thumbnail cannot be exported.'}
+        </div>
+      )}
+
       {/* Main Image Viewport with smooth scroll & zoom */}
       <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-zinc-950/80">
         <div
           className="transition-transform duration-150 ease-out origin-center flex items-center justify-center max-w-full max-h-full"
           style={{ transform: `scale(${zoomLevel})` }}
         >
-          {currentImage ? (
+          {previewImage ? (
             <img
-              src={currentImage}
+              src={previewImage}
               alt={item.title}
               onLoad={(e) => {
                 const target = e.currentTarget;

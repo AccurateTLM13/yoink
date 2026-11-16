@@ -8,6 +8,7 @@ import {
   Tv,
   Loader2,
   CheckCircle2,
+  AlertTriangle,
   Plus,
   Trash2,
   CheckSquare,
@@ -40,6 +41,7 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
   const [selectedIndices, setSelectedIndices] = useState<number[]>([0, 1, 2]);
   const [isRunning, setIsRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
+  const [hasIssues, setHasIssues] = useState(false);
   const [completedItems, setCompletedItems] = useState<HistoryItem[]>([]);
   const [showCustomForm, setShowCustomForm] = useState(false);
   const [customName, setCustomName] = useState('');
@@ -86,16 +88,20 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
   const handleStart = async () => {
     const targets = selectedIndices.map((i) => resolutions[i]);
     if (targets.length === 0) return;
+    setHasIssues(false);
 
     try {
       if (!(await ensureAllSitesAccess())) {
+        setHasIssues(true);
         setProgressMsg('Yoink needs access to all sites for responsive multi-size capture.');
         return;
       }
       setIsRunning(true);
       setProgressMsg('Starting responsive multi-device capture...');
       setCompletedItems([]);
-    } catch {
+    } catch (error) {
+      setHasIssues(true);
+      setProgressMsg(`Could not request site access: ${error instanceof Error ? error.message : 'Unknown error'}`);
       return;
     }
 
@@ -103,10 +109,14 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
       const results = await captureMultiSize(targets, settings, (curr, total, name) => {
         setProgressMsg(`Capturing ${curr} of ${total}: ${name}`);
       });
-      setCompletedItems(results);
-      onFinished(results);
-      setProgressMsg(`Finished capturing ${results.length} device viewports!`);
+      setCompletedItems(results.items);
+      setHasIssues(results.failures.length > 0);
+      onFinished(results.items);
+      setProgressMsg(results.failures.length
+        ? `Captured ${results.items.length}; ${results.failures.length} need attention: ${results.failures.map((f) => `${f.target}: ${f.error}`).join('; ')}`
+        : `Finished capturing ${results.items.length} device viewports!`);
     } catch (err: any) {
+      setHasIssues(true);
       setProgressMsg(`Error: ${err.message || 'Capture failed'}`);
     } finally {
       setIsRunning(false);
@@ -276,11 +286,13 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
             className={`p-3 rounded-xl border flex items-center gap-2.5 text-xs shadow-2xs ${
               isRunning
                 ? 'bg-blue-50/90 border-blue-200 text-blue-900'
-                : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
+                : hasIssues ? 'bg-amber-50 border-amber-200 text-amber-950' : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
             }`}
           >
             {isRunning ? (
               <Loader2 size={16} className="animate-spin text-blue-600 shrink-0" />
+            ) : hasIssues ? (
+              <AlertTriangle size={16} className="text-amber-700 shrink-0" />
             ) : (
               <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
             )}

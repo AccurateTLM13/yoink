@@ -15,7 +15,6 @@ const HISTORY_KEY = 'omnicapture_history';
 const SETTINGS_KEY = 'omnicapture_settings';
 const PROOF_IDENTITY_KEY = 'yoink_proof_identity';
 const FULL_PREFIX = 'yoink_full_';
-const MAX_HISTORY = 40;
 const MAX_CHUNKS = 80;
 // Chrome limit: MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND = 2.
 const MIN_CAPTURE_INTERVAL_MS = 550;
@@ -57,7 +56,7 @@ chrome.runtime.onInstalled.addListener(() => {
   withHistoryLock(migrateStorage).catch((e) => console.error('Storage migration failed:', e));
 });
 chrome.commands.onCommand.addListener((command, tab) => {
-  handleCommand(command, tab).catch((e) => console.error('Shortcut failed:', e));
+  handleCommand(command, tab).catch((e) => recordCaptureFailure(command, e));
 });
 chrome.runtime.onMessage.addListener(onMessage);
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -78,12 +77,28 @@ const ROUTES = {
   CAPTURE_ALL_TABS: { from: 'page', run: (p) => handleCaptureAllTabs(p) },
   CAPTURE_URL_LIST: { from: 'page', run: (p) => handleCaptureUrlList(p) },
   CAPTURE_MULTI_SIZE: { from: 'page', run: (p) => handleCaptureMultiSize(p) },
+  YOINK_PAGE_MEDIA: { from: 'page', run: (p) => handleYoinkPageMedia(p) },
+  HISTORY_ADD: { from: 'page', run: async (p) => ({ history: await saveHistoryItem(p.item) }) },
+  HISTORY_UPDATE: { from: 'page', run: (p) => mutateHistory('update', p) },
+  HISTORY_DELETE: { from: 'page', run: (p) => mutateHistory('delete', p) },
+  HISTORY_CLEAR: { from: 'page', run: () => mutateHistory('clear', {}) },
 
   // Yoink content script (top frame only)
   CAPTURE_VISIBLE_TAB: { from: 'content', run: (p, s) => handleChunkCapture(p, s) },
   FINALIZE_STITCHING: { from: 'content', run: (p, s) => handleFinalizeStitching(p, s, 'full') },
   FINALIZE_ELEMENT_STITCHING: { from: 'content', run: (p, s) => handleFinalizeStitching(p, s, 'element') },
   CAPTURE_SELECTION_FINISH: { from: 'content', run: (p, s) => handleCaptureSelectionFinish(p, s) },
+  CAPTURE_ABORTED: {
+    from: 'content',
+    run: async (p, s) => {
+      const session = scrollSessions.get(s.tab.id);
+      scrollSessions.delete(s.tab.id);
+      if (session?.originalZoom != null) chrome.tabs.setZoom(s.tab.id, session.originalZoom).catch(() => {});
+      const mode = p.mode === 'element' ? 'element' : 'full';
+      await recordCaptureFailure(mode, new Error(str(p.error, 300) || 'Capture was interrupted.'));
+      return { ok: true };
+    },
+  },
   CAPTURE_CANCELLED: {
     from: 'content',
     run: (p, s) => {
@@ -449,8 +464,14 @@ function handleCaptureSelectionFinish(payload, sender) {
 function runPipeline(mode, fn) {
   fn().catch((err) => {
     console.error(`${mode} capture failed:`, err);
-    broadcast('CAPTURE_FAILED', { error: err?.message || 'Capture failed', mode });
+    recordCaptureFailure(mode, err);
   });
+}
+
+async function recordCaptureFailure(mode, error) {
+  const detail = { mode, error: String(error?.message || 'Capture failed').slice(0, 300) };
+  await chrome.storage.local.set({ yoink_last_capture_error: detail }).catch(() => {});
+  broadcast('CAPTURE_FAILED', detail);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,12 +503,20 @@ async function finishCapture(o) {
     format: s.format,
     proofKeyId: o.proofKeyId || undefined,
     proofSigned: o.proofSigned === true,
+    warning: o.warning || undefined,
   };
 
-  await saveHistoryItem(item);
+  let historyError = null;
+  try {
+    await saveHistoryItem(item);
+  } catch (error) {
+    historyError = error;
+  }
+  let downloaded = false;
+  let downloadWarning = '';
 
   if (s.autoDownload) {
-    const filename = formatFilename(
+    let filename = formatFilename(
       s.filenameTemplate,
       o.filenameTitle || item.title,
       item.url,
@@ -496,9 +525,11 @@ async function finishCapture(o) {
       width,
       height
     );
+    if (item.warning) filename = filename.replace(/(\.[a-z0-9]+)$/i, '_partial$1');
 
-    if (s.autoSliceLongPages && o.mode === 'full' && height > (s.maxSliceHeight || 4000)) {
-      try {
+    try {
+      if (s.autoSliceLongPages && o.mode === 'full' && height > (s.maxSliceHeight || 4000)) {
+        try {
         const sliceProofContext = await buildProofContext(s, item.url, item.title);
         const sliceRes = await callOffscreen('SLICE_IMAGE', {
           dataUrl: item.dataUrl,
@@ -515,13 +546,28 @@ async function finishCapture(o) {
         } else {
           await downloadSafe(item.dataUrl, filename);
         }
-      } catch (err) {
-        console.warn('Auto-slice download failed, falling back to full image download:', err);
+        } catch (err) {
+          console.warn('Auto-slice download failed, falling back to full image download:', err);
+          await downloadSafe(item.dataUrl, filename);
+          downloadWarning = 'Some slices could not be saved. The full image was downloaded instead.';
+        }
+      } else {
         await downloadSafe(item.dataUrl, filename);
       }
-    } else {
-      await downloadSafe(item.dataUrl, filename);
+      downloaded = true;
+    } catch (error) {
+      downloadWarning = `Download could not be confirmed: ${error?.message || 'Unknown error'}. Check Downloads and try again from the gallery.`;
     }
+  }
+
+  if (historyError && !downloaded) {
+    throw new Error(`Capture could not be saved to the gallery${s.autoDownload ? ' or confirmed in Downloads' : ''}. Check available storage and try again.`);
+  }
+  const warnings = [item.warning, historyError ? 'Downloaded, but the gallery could not save this capture.' : '', downloadWarning].filter(Boolean);
+  item.warning = warnings.join(' ') || undefined;
+  if (historyError) item.historySaved = false;
+  if (!historyError && item.warning) {
+    await saveHistoryItem(item).catch((error) => console.warn('Could not save capture warning:', error));
   }
 
   if (s.copyToClipboard && !o.skipClipboard) {
@@ -537,11 +583,29 @@ async function finishCapture(o) {
 }
 
 async function downloadSafe(url, filename) {
-  try {
-    await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' });
-  } catch (e) {
-    console.warn('Download failed:', e);
-  }
+  const id = await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' });
+  await new Promise((resolve, reject) => {
+    let finished = false;
+    const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      chrome.downloads.onChanged.removeListener(onChanged);
+      if (error) reject(new Error(error)); else resolve();
+    };
+    const onChanged = (delta) => {
+      if (delta.id !== id) return;
+      if (delta.state?.current === 'complete') finish();
+      else if (delta.state?.current === 'interrupted') finish(delta.error?.current || 'Download interrupted');
+    };
+    const timer = setTimeout(() => finish('Timed out while checking download status'), 60000);
+    chrome.downloads.onChanged.addListener(onChanged);
+    chrome.downloads.search({ id }).then((items) => {
+      const item = items[0];
+      if (item?.state === 'complete') finish();
+      else if (item?.state === 'interrupted') finish(item.error || 'Download interrupted');
+    }, (error) => finish(error?.message || 'Could not check download status'));
+  });
 }
 
 function broadcast(action, payload) {
@@ -617,11 +681,11 @@ function waitForTabComplete(tabId, timeoutMs) {
   });
 }
 
-async function openGallery(count) {
+async function openGallery(count, failures = []) {
   await chrome.storage.local
-    .set({ pending_view: 'history', last_batch_count: count })
+    .set({ pending_view: 'history', last_batch_count: count, yoink_last_batch_report: { count, failures } })
     .catch((e) => console.error('Failed to set pending_view:', e));
-  if (count > 0) {
+  if (count > 0 || failures.length > 0) {
     await chrome.tabs
       .create({ url: chrome.runtime.getURL(`index.html?view=history&batch=${count}`), active: true })
       .catch((e) => console.error('Failed to open history gallery tab:', e));
@@ -634,11 +698,15 @@ async function handleCaptureAllTabs({ settings }) {
   const tabs = await chrome.tabs.query({ lastFocusedWindow: true, windowType: 'normal' });
   const original = tabs.find((t) => t.active);
   const results = [];
+  const failures = [];
 
   try {
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
-      if (!tab.id || !isInjectableUrl(tab.url)) continue;
+      if (!tab.id || !isInjectableUrl(tab.url)) {
+        failures.push({ target: tab.title || 'Browser page', error: 'This page cannot be captured.' });
+        continue;
+      }
 
       broadcast('CAPTURE_PROGRESS', {
         current: i + 1,
@@ -665,22 +733,32 @@ async function handleCaptureAllTabs({ settings }) {
           skipClipboard: true,
         });
         results.push(slimItem(item));
+        if (item.warning) failures.push({ target: tab.title || 'Tab', error: item.warning });
       } catch (e) {
         console.error(`Failed to capture tab ${tab.id}:`, e);
+        failures.push({ target: tab.title || 'Tab', error: e?.message || 'Capture failed.' });
       }
     }
   } finally {
     if (original?.id) await chrome.tabs.update(original.id, { active: true }).catch(() => {});
   }
 
-  await openGallery(results.length);
-  return { success: true, results };
+  await openGallery(results.length, failures);
+  return { success: failures.length === 0, results, failures };
 }
 
 async function handleCaptureUrlList({ urls, settings, delayMs }) {
   await requireAllUrls('URL batch capture');
   const s = await getSettings(settings);
-  const list = (Array.isArray(urls) ? urls : []).map(normalizeHttpUrl).filter(Boolean).slice(0, 100);
+  const requested = Array.isArray(urls) ? urls : [];
+  const failures = [];
+  const list = [];
+  for (const raw of requested) {
+    const url = normalizeHttpUrl(raw);
+    if (!url) failures.push({ target: String(raw).slice(0, 200), error: 'Invalid URL.' });
+    else if (list.length >= 100) failures.push({ target: url, error: 'Batch limit is 100 URLs.' });
+    else list.push(url);
+  }
   const hydrationDelay = clampNum(delayMs, 0, 30000, 3000);
   const results = [];
 
@@ -715,15 +793,17 @@ async function handleCaptureUrlList({ urls, settings, delayMs }) {
         skipClipboard: true,
       });
       results.push(slimItem(item));
+      if (item.warning) failures.push({ target: url, error: item.warning });
     } catch (err) {
       console.error(`Failed to capture URL ${url}:`, err);
+      failures.push({ target: url, error: err?.message || 'Capture failed.' });
     } finally {
       if (win?.id) await chrome.windows.remove(win.id).catch(() => {});
     }
   }
 
-  await openGallery(results.length);
-  return { success: true, results };
+  await openGallery(results.length, failures);
+  return { success: failures.length === 0, results, failures };
 }
 
 async function handleCaptureMultiSize({ url, resolutions, settings }) {
@@ -740,9 +820,10 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
     }))
     .filter((r) => r.width && r.height)
     .slice(0, 20);
-  if (sizes.length === 0) return { success: false, results: [] };
+  if (sizes.length === 0) return { success: false, results: [], failures: [{ target: 'Viewports', error: 'No valid viewport sizes were provided.' }] };
 
   const results = [];
+  const failures = [];
   let win = null;
   try {
     win = await chrome.windows.create({
@@ -790,20 +871,360 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
           skipClipboard: true,
         });
         results.push(slimItem(item));
+        if (item.warning) failures.push({ target: label, error: item.warning });
       } catch (e) {
         console.error(`Failed capture at ${label}:`, e);
+        failures.push({ target: label, error: e?.message || 'Capture failed.' });
       }
     }
   } finally {
     if (win?.id) await chrome.windows.remove(win.id).catch(() => {});
   }
 
-  return { success: true, results };
+  if (failures.length) await openGallery(results.length, failures);
+  return { success: failures.length === 0, results, failures };
 }
 
 // ---------------------------------------------------------------------------
 // Countdown
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 8. Yoink Page Media (Images, SVGs, CSS Backgrounds, OpenGraph, Clean <video> Frames)
+// ---------------------------------------------------------------------------
+async function handleYoinkPageMedia({ tabId }) {
+  let targetTab = null;
+
+  if (tabId) {
+    targetTab = await chrome.tabs.get(tabId).catch(() => null);
+  }
+
+  if (!targetTab || !isInjectableUrl(targetTab.url)) {
+    const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTabs[0] && isInjectableUrl(activeTabs[0].url)) {
+      targetTab = activeTabs[0];
+    } else {
+      const allWindowTabs = await chrome.tabs.query({ currentWindow: true });
+      const candidates = allWindowTabs.filter((t) => t.id && isInjectableUrl(t.url));
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+        targetTab = candidates[0];
+      }
+    }
+  }
+
+  if (!targetTab || !targetTab.id || !isInjectableUrl(targetTab.url)) {
+    throw new Error('No open website tab found to yoink media from. Open any website tab and try again.');
+  }
+
+  const execRes = await chrome.scripting.executeScript({
+    target: { tabId: targetTab.id, allFrames: false },
+    func: extractAllPageMediaInTab,
+  });
+
+  const items = execRes?.[0]?.result || [];
+  return {
+    success: true,
+    items,
+    tabId: targetTab.id,
+    tabTitle: targetTab.title || 'Webpage',
+    tabUrl: targetTab.url || '',
+  };
+}
+
+function extractAllPageMediaInTab() {
+  const seen = new Set();
+  const items = [];
+  const pageUrl = window.location.href;
+  const pageTitle = document.title || 'Webpage';
+  let counter = 0;
+
+  const resolveUrl = (raw) => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed || trimmed === 'none' || trimmed === 'about:blank') return null;
+    if (trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return trimmed;
+    try {
+      return new URL(trimmed, pageUrl).href;
+    } catch {
+      return null;
+    }
+  };
+
+  const pickBestSrcset = (srcset) => {
+    if (!srcset || typeof srcset !== 'string') return null;
+    const parts = srcset.split(/,\s+(?=\S)/).map((s) => s.trim()).filter(Boolean);
+    let bestUrl = null;
+    let bestScore = -1;
+    for (const part of parts) {
+      const tokens = part.split(/\s+/);
+      const u = tokens[0];
+      if (!u) continue;
+      let score = 1;
+      if (tokens.length > 1) {
+        const desc = tokens[tokens.length - 1].toLowerCase();
+        if (desc.endsWith('w')) {
+          const w = parseFloat(desc.slice(0, -1));
+          if (Number.isFinite(w) && w > 0) score = w;
+        } else if (desc.endsWith('x')) {
+          const x = parseFloat(desc.slice(0, -1));
+          if (Number.isFinite(x) && x > 0) score = x * 1000;
+        }
+      }
+      const resolved = resolveUrl(u);
+      if (resolved && score >= bestScore) {
+        bestScore = score;
+        bestUrl = resolved;
+      }
+    }
+    return bestUrl;
+  };
+
+  const inferFmt = (url, category) => {
+    if (category === 'svg') return 'svg';
+    const lower = String(url || '').toLowerCase();
+    if (lower.startsWith('data:image/svg')) return 'svg';
+    if (lower.startsWith('data:image/png')) return 'png';
+    if (lower.startsWith('data:image/jpeg') || lower.startsWith('data:image/jpg')) return 'jpeg';
+    if (lower.startsWith('data:image/webp')) return 'webp';
+    if (lower.startsWith('data:image/gif')) return 'gif';
+    if (lower.startsWith('data:image/avif')) return 'avif';
+    try {
+      const parsed = new URL(url, pageUrl);
+      const path = parsed.pathname.toLowerCase();
+      const fmt = (parsed.searchParams.get('format') || parsed.searchParams.get('fm') || '').toLowerCase();
+      if (path.endsWith('.svg') || fmt === 'svg') return 'svg';
+      if (path.endsWith('.png') || fmt === 'png') return 'png';
+      if (path.endsWith('.webp') || fmt === 'webp') return 'webp';
+      if (path.endsWith('.gif') || fmt === 'gif') return 'gif';
+      if (path.endsWith('.avif') || fmt === 'avif') return 'avif';
+      if (path.endsWith('.jpg') || path.endsWith('.jpeg') || fmt === 'jpg' || fmt === 'jpeg') return 'jpeg';
+    } catch {}
+    if (category === 'video' || category === 'canvas') return 'png';
+    return 'unknown';
+  };
+
+  const deriveName = (url, hint, category, idx) => {
+    const cleanHint = String(hint || '').replace(/\s+/g, ' ').trim().slice(0, 48);
+    if (cleanHint.length >= 2) return cleanHint;
+    if (url && !url.startsWith('data:') && !url.startsWith('blob:')) {
+      try {
+        const u = new URL(url, pageUrl);
+        const segs = u.pathname.split('/').filter(Boolean);
+        const last = segs[segs.length - 1];
+        if (last) {
+          const withoutExt = decodeURIComponent(last).replace(/\.[a-z0-9]{2,5}$/i, '');
+          const cleaned = withoutExt.replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 42);
+          if (cleaned.length >= 2) return cleaned;
+        }
+      } catch {}
+    }
+    return `${category.toUpperCase()}_Asset_${idx}`;
+  };
+
+  const addItem = ({ url, nameHint, category, width, height, sourceTag, svgCode }) => {
+    if (!url || seen.has(url)) return;
+    if (url.startsWith('data:image/gif;base64,R0lGOD')) return;
+    seen.add(url);
+    counter++;
+    items.push({
+      id: `yoink_${category}_${counter}_${Date.now()}`,
+      url,
+      name: deriveName(url, nameHint, category, counter),
+      category,
+      format: inferFmt(url, category),
+      width: Math.round(Number(width) || 0),
+      height: Math.round(Number(height) || 0),
+      sourceTag,
+      svgCode,
+      pageUrl,
+      pageTitle,
+    });
+  };
+
+  // 1. Clean <video> Frame Snaps (No player UI!) + Video Posters
+  const videos = Array.from(document.querySelectorAll('video'));
+  videos.forEach((v, idx) => {
+    const vw = v.videoWidth || v.clientWidth || 0;
+    const vh = v.videoHeight || v.clientHeight || 0;
+    if (v.readyState >= 2 && vw > 16 && vh > 16) {
+      try {
+        const c = document.createElement('canvas');
+        c.width = vw;
+        c.height = vh;
+        const ctx = c.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(v, 0, 0, vw, vh);
+          const dataUrl = c.toDataURL('image/png');
+          addItem({
+            url: dataUrl,
+            nameHint: v.getAttribute('title') || v.getAttribute('aria-label') || `Clean_Video_Frame_${idx + 1}`,
+            category: 'video',
+            width: vw,
+            height: vh,
+            sourceTag: '<video> Clean Frame',
+          });
+        }
+      } catch {}
+    }
+    if (v.poster) {
+      const posterUrl = resolveUrl(v.poster);
+      if (posterUrl) {
+        addItem({
+          url: posterUrl,
+          nameHint: `Video_Poster_${idx + 1}`,
+          category: 'video',
+          width: vw,
+          height: vh,
+          sourceTag: '<video poster>',
+        });
+      }
+    }
+  });
+
+  // 2. OpenGraph, Twitter Cards & High-Res Icons
+  const metaSelectors = [
+    { sel: 'meta[property="og:image"], meta[property="og:image:secure_url"]', tag: 'meta og:image', hint: 'OpenGraph_Social_Banner' },
+    { sel: 'meta[name="twitter:image"], meta[property="twitter:image"]', tag: 'meta twitter:image', hint: 'Twitter_Card_Banner' },
+    { sel: 'link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]', tag: 'apple-touch-icon', hint: 'Apple_Touch_Icon' },
+    { sel: 'link[rel="icon"], link[rel="shortcut icon"]', tag: 'link favicon', hint: 'Site_Favicon' },
+  ];
+  metaSelectors.forEach(({ sel, tag, hint }) => {
+    document.querySelectorAll(sel).forEach((el) => {
+      const raw = el.getAttribute('content') || el.getAttribute('href');
+      const resolved = resolveUrl(raw);
+      if (resolved) {
+        addItem({
+          url: resolved,
+          nameHint: hint,
+          category: 'og',
+          width: tag.includes('og:') || tag.includes('twitter:') ? 1200 : 180,
+          height: tag.includes('og:') || tag.includes('twitter:') ? 630 : 180,
+          sourceTag: tag,
+        });
+      }
+    });
+  });
+
+  // 3. <img> and <picture> elements (preferring highest-res srcset)
+  document.querySelectorAll('img').forEach((img) => {
+    let bestUrl =
+      pickBestSrcset(img.getAttribute('srcset') || img.getAttribute('data-srcset') || '') ||
+      resolveUrl(img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src'));
+
+    const parentPic = img.closest('picture');
+    if (parentPic) {
+      const sources = Array.from(parentPic.querySelectorAll('source'));
+      for (const s of sources) {
+        const candidate = pickBestSrcset(s.getAttribute('srcset') || '');
+        if (candidate) {
+          bestUrl = candidate;
+          break;
+        }
+      }
+    }
+
+    if (bestUrl) {
+      const w = img.naturalWidth || img.width || img.clientWidth || 0;
+      const h = img.naturalHeight || img.height || img.clientHeight || 0;
+      addItem({
+        url: bestUrl,
+        nameHint: img.alt || img.title || '',
+        category: 'img',
+        width: w,
+        height: h,
+        sourceTag: img.srcset ? '<img srcset>' : '<img>',
+      });
+    }
+  });
+
+  // 4. Inline <svg> vectors
+  const svgs = Array.from(document.querySelectorAll('svg'));
+  const seenSvgHashes = new Set();
+  svgs.slice(0, 80).forEach((svg, idx) => {
+    const rect = svg.getBoundingClientRect();
+    const w = Math.round(rect.width || parseFloat(svg.getAttribute('width') || '0') || 64);
+    const h = Math.round(rect.height || parseFloat(svg.getAttribute('height') || '0') || 64);
+    if (w < 12 || h < 12) return;
+
+    try {
+      const clone = svg.cloneNode(true);
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      if (!clone.getAttribute('viewBox') && w > 0 && h > 0) {
+        clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      }
+      if (!clone.getAttribute('width')) clone.setAttribute('width', String(w));
+      if (!clone.getAttribute('height')) clone.setAttribute('height', String(h));
+
+      const rawMarkup = new XMLSerializer().serializeToString(clone);
+      if (rawMarkup.length > 350000 || seenSvgHashes.has(rawMarkup)) return;
+      seenSvgHashes.add(rawMarkup);
+
+      const dataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(rawMarkup)}`;
+      const label =
+        svg.getAttribute('aria-label') ||
+        svg.querySelector('title')?.textContent ||
+        svg.id ||
+        `Vector_SVG_${idx + 1}`;
+
+      addItem({
+        url: dataUrl,
+        nameHint: label,
+        category: 'svg',
+        width: w,
+        height: h,
+        sourceTag: 'Inline <svg>',
+        svgCode: rawMarkup,
+      });
+    } catch {}
+  });
+
+  // 5. CSS background-image across DOM elements
+  const allElements = Array.from(document.querySelectorAll('*')).slice(0, 1200);
+  const urlRegex = /url\(\s*(?:(['"])(.*?)\1|([^)'"]+))\s*\)/gi;
+  for (const el of allElements) {
+    const styles = [window.getComputedStyle(el), window.getComputedStyle(el, '::before'), window.getComputedStyle(el, '::after')];
+    for (const st of styles) {
+      const bg = st?.backgroundImage;
+      if (!bg || bg === 'none' || !bg.includes('url(')) continue;
+      urlRegex.lastIndex = 0;
+      let match;
+      while ((match = urlRegex.exec(bg)) !== null) {
+        const raw = (match[2] ?? match[3] ?? '').trim();
+        const resolved = resolveUrl(raw);
+        if (resolved) {
+          const rect = el.getBoundingClientRect();
+          addItem({
+            url: resolved,
+            nameHint: el.getAttribute('aria-label') || el.id || '',
+            category: 'bg',
+            width: Math.round(rect.width || 0),
+            height: Math.round(rect.height || 0),
+            sourceTag: 'CSS background-image',
+          });
+        }
+      }
+    }
+  }
+
+  // 6. <canvas> graphics
+  document.querySelectorAll('canvas').forEach((c, idx) => {
+    if (c.width >= 32 && c.height >= 32) {
+      try {
+        const dataUrl = c.toDataURL('image/png');
+        addItem({
+          url: dataUrl,
+          nameHint: c.getAttribute('aria-label') || c.id || `Canvas_Graphic_${idx + 1}`,
+          category: 'canvas',
+          width: c.width,
+          height: c.height,
+          sourceTag: '<canvas>',
+        });
+      } catch {}
+    }
+  });
+
+  return items;
+}
+
 async function runCaptureCountdown(seconds) {
   const total = Math.round(clampNum(seconds, 0, 30, 0));
   if (total === 0) return;
@@ -948,15 +1369,40 @@ function withHistoryLock(fn) {
 
 function saveHistoryItem(item) {
   return withHistoryLock(async () => {
+    if (!item || typeof item.id !== 'string' || !item.id || typeof item.dataUrl !== 'string' || !item.dataUrl) {
+      throw new Error('Cannot save a capture without its original image.');
+    }
     const res = await chrome.storage.local.get(HISTORY_KEY);
     const list = Array.isArray(res?.[HISTORY_KEY]) ? res[HISTORY_KEY] : [];
     const merged = [{ ...item, dataUrl: '' }, ...list.filter((x) => x && x.id !== item.id)];
-    const kept = merged.slice(0, MAX_HISTORY);
-    const evicted = merged.slice(MAX_HISTORY).map((x) => FULL_PREFIX + x.id);
+    await chrome.storage.local.set({ [FULL_PREFIX + item.id]: item.dataUrl, [HISTORY_KEY]: merged });
+    return merged;
+  });
+}
 
-    await chrome.storage.local.set({ [FULL_PREFIX + item.id]: item.dataUrl, [HISTORY_KEY]: kept });
-    if (evicted.length) await chrome.storage.local.remove(evicted);
-  }).catch((e) => console.error('History save failed:', e));
+function mutateHistory(operation, payload) {
+  return withHistoryLock(async () => {
+    const res = await chrome.storage.local.get(HISTORY_KEY);
+    const list = Array.isArray(res?.[HISTORY_KEY]) ? res[HISTORY_KEY] : [];
+    if (operation === 'clear') {
+      await chrome.storage.local.remove([HISTORY_KEY, ...list.map((item) => FULL_PREFIX + item.id)]);
+      return { history: [] };
+    }
+    const id = str(payload.id, 200);
+    if (!id) throw new Error('Missing capture ID.');
+    if (operation === 'update') {
+      const updates = payload.updates && typeof payload.updates === 'object' ? payload.updates : {};
+      const history = list.map((item) => item.id === id ? { ...item, ...updates, id: item.id, dataUrl: '' } : item);
+      await chrome.storage.local.set({ [HISTORY_KEY]: history });
+      return { history };
+    }
+    const history = list.filter((item) => item.id !== id);
+    // Remove the index first. A failed blob cleanup leaves a recoverable orphan,
+    // rather than an index pointing at an irretrievably deleted image.
+    await chrome.storage.local.set({ [HISTORY_KEY]: history });
+    await chrome.storage.local.remove(FULL_PREFIX + id).catch((error) => console.warn('Image cleanup failed:', error));
+    return { history };
+  });
 }
 
 /** One-time repair: move full images out of the index and delete orphaned blobs. */
@@ -969,7 +1415,7 @@ async function migrateStorage() {
 
   const keySet = new Set(keys);
   const toSet = {};
-  const slim = list.slice(0, MAX_HISTORY).map((item) => {
+  const slim = list.map((item) => {
     const k = FULL_PREFIX + item.id;
     if (item.dataUrl && !keySet.has(k)) {
       toSet[k] = item.dataUrl;
@@ -978,11 +1424,7 @@ async function migrateStorage() {
     return { ...item, dataUrl: '' };
   });
 
-  const live = new Set(slim.map((i) => FULL_PREFIX + i.id));
-  const orphans = [...keySet].filter((k) => k.startsWith(FULL_PREFIX) && !live.has(k));
-
   await chrome.storage.local.set({ ...toSet, [HISTORY_KEY]: slim });
-  if (orphans.length) await chrome.storage.local.remove(orphans);
 }
 
 // ---------------------------------------------------------------------------

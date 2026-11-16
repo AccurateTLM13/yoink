@@ -17,9 +17,12 @@ import {
   Upload,
   Clock,
   ShieldCheck,
+  Image as ImageIcon,
 } from 'lucide-react';
 
 interface Props {
+  lastCaptureError?: string | null;
+  onDismissCaptureError?: () => void;
   onCaptureFullPage: () => void;
   onCaptureVisible: () => void;
   onCaptureSelection: () => void;
@@ -32,6 +35,7 @@ interface Props {
   onOpenOptions: () => void;
   onOpenStudio?: () => void;
   onOpenVerify?: () => void;
+  onOpenMediaYoinker?: () => void;
   onUploadFiles?: (files: File[]) => void;
   delaySec?: number;
   onSetDelaySec?: (sec: number) => void;
@@ -44,6 +48,8 @@ interface Props {
 const DELAY_OPTIONS = [0, 3, 5, 10];
 
 export const QuickMenu: React.FC<Props> = React.memo(({
+  lastCaptureError,
+  onDismissCaptureError,
   onCaptureFullPage,
   onCaptureVisible,
   onCaptureSelection,
@@ -56,6 +62,7 @@ export const QuickMenu: React.FC<Props> = React.memo(({
   onOpenOptions,
   onOpenStudio,
   onOpenVerify,
+  onOpenMediaYoinker,
   onUploadFiles,
   delaySec = 0,
   onSetDelaySec,
@@ -132,6 +139,13 @@ export const QuickMenu: React.FC<Props> = React.memo(({
 
       {/* Main Action Body - scrollable with sleek scrollbar so options are never cut off */}
       <div className="flex-1 px-3 py-2 flex flex-col space-y-2 overflow-y-auto overflow-x-hidden scrollbar-thin">
+        {lastCaptureError && (
+          <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-950">
+            <p className="font-semibold">A capture did not finish</p>
+            <p className="mt-1 break-words">{lastCaptureError}</p>
+            <button onClick={onDismissCaptureError} className="mt-2 font-semibold underline">Dismiss</button>
+          </div>
+        )}
         {/* Delay Timer Selector */}
         {onSetDelaySec && (
           <div className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-white border border-zinc-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
@@ -280,6 +294,27 @@ export const QuickMenu: React.FC<Props> = React.memo(({
           </div>
 
           <div className="rounded-xl border border-zinc-200/80 bg-white p-1 space-y-0.5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
+            {/* Yoink Page Images, SVGs & Video Frames */}
+            {onOpenMediaYoinker && (
+              <button
+                onClick={onOpenMediaYoinker}
+                disabled={isCapturing}
+                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg transition-all duration-150 cursor-pointer text-left group hover:bg-purple-50/60 border border-transparent hover:border-purple-200/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500/50 active:scale-[0.99] disabled:opacity-50"
+              >
+                <div className="flex items-center space-x-2.5 min-w-0">
+                  <div className="w-6.5 h-6.5 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center shrink-0 group-hover:bg-purple-600 group-hover:text-white transition-colors duration-150">
+                    <ImageIcon size={14} />
+                  </div>
+                  <span className="text-[12.5px] font-medium text-zinc-800 group-hover:text-purple-900 truncate">
+                    Yoink page images &amp; SVGs ...
+                  </span>
+                </div>
+                <span className="text-[9.5px] font-bold font-mono text-purple-700 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-200/70 tracking-wide">
+                  YOINK
+                </span>
+              </button>
+            )}
+
             {/* Upload & Edit Image */}
             {onUploadFiles && (
               <button

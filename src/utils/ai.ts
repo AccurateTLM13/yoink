@@ -9,6 +9,8 @@ export interface OcrResult {
   text: string;
   confidence: number;
   engine: 'shape-detection' | 'window-ai' | 'byok' | 'fallback';
+  status?: 'success' | 'empty' | 'unavailable';
+  message?: string;
 }
 
 /**
@@ -96,6 +98,7 @@ export async function extractOcrText(
   dataUrl: string,
   config?: AiConfig
 ): Promise<OcrResult> {
+  let detectorCompleted = false;
   // 1. Try Native Chrome TextDetector (Shape Detection API - 100% offline & free)
   if (typeof window !== 'undefined' && 'TextDetector' in window) {
     try {
@@ -108,6 +111,7 @@ export async function extractOcrText(
 
       const detector = new (window as any).TextDetector();
       const detectedTexts = await detector.detect(img);
+      detectorCompleted = true;
 
       if (detectedTexts && detectedTexts.length > 0) {
         const rawStrings: string[] = detectedTexts.map((item: any) => item.rawValue || '');
@@ -116,6 +120,7 @@ export async function extractOcrText(
           text: joined,
           confidence: 0.95,
           engine: 'shape-detection',
+          status: 'success',
         };
       }
     } catch (err) {
@@ -132,6 +137,7 @@ export async function extractOcrText(
           text: byokText,
           confidence: 0.98,
           engine: 'byok',
+          status: 'success',
         };
       }
     } catch (err) {
@@ -139,11 +145,15 @@ export async function extractOcrText(
     }
   }
 
-  // 3. Client-side heuristic OCR fallback (extracts metadata and OCR canvas inspection)
+  // A status message is not recognized text and must not be saved as a result.
   return {
-    text: 'Text extraction completed. (No machine text detected or native Shape Detection API disabled in chrome://flags)',
-    confidence: 0.5,
-    engine: 'fallback',
+    text: '',
+    confidence: 0,
+    engine: detectorCompleted ? 'shape-detection' : 'fallback',
+    status: detectorCompleted ? 'empty' : 'unavailable',
+    message: detectorCompleted
+      ? 'No text was detected in this image.'
+      : 'Text recognition is unavailable in this browser. Try a browser with a supported text detector.',
   };
 }
 

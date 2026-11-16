@@ -26,7 +26,7 @@ import {
   Zap,
   Image as ImageIcon,
 } from 'lucide-react';
-import { CaptureSettings, HistoryItem } from './types';
+import { BatchFailure, CaptureSettings, HistoryItem } from './types';
 import {
   DEFAULT_SETTINGS,
   getStoredSettings,
@@ -37,7 +37,6 @@ import {
   addHistoryItem,
   applyOptimalQualityPreset,
   getFullResolutionImage,
-  saveFullResolutionImage,
   copyImageToClipboard,
 } from './utils/storage';
 import { fileToHistoryItem } from './utils/upload';
@@ -58,14 +57,17 @@ import { OptionsDrawer } from './components/OptionsDrawer';
 import { MultiSizeModal } from './components/MultiSizeModal';
 import { ImagePreviewModal } from './components/ImagePreviewModal';
 import { VerifyModal } from './components/VerifyModal';
+import { MediaYoinkerModal } from './components/MediaYoinkerModal';
 
-type CurrentView = 'menu' | 'urllist' | 'history' | 'options' | 'multisize' | 'verify';
+type CurrentView = 'menu' | 'urllist' | 'history' | 'options' | 'multisize' | 'verify' | 'media';
+
+const indexItem = (item: HistoryItem): HistoryItem => ({ ...item, dataUrl: '' });
 
 const getInitialView = (): CurrentView => {
   if (typeof window !== 'undefined') {
     const params = new URLSearchParams(window.location.search);
     const v = params.get('view');
-    if (v && ['menu', 'urllist', 'history', 'options', 'multisize', 'verify'].includes(v)) {
+    if (v && ['menu', 'urllist', 'history', 'options', 'multisize', 'verify', 'media'].includes(v)) {
       return v as CurrentView;
     }
   }
@@ -87,6 +89,7 @@ const getInitialBatchCount = (): number | null => {
 export default function App() {
   const [view, setView] = useState<CurrentView>(getInitialView);
   const [recentBatchCount, setRecentBatchCount] = useState<number | null>(getInitialBatchCount);
+  const [recentBatchFailures, setRecentBatchFailures] = useState<BatchFailure[]>([]);
   const [settings, setSettings] = useState<CaptureSettings>(DEFAULT_SETTINGS);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
@@ -97,6 +100,7 @@ export default function App() {
   const [proofKeyId, setProofKeyId] = useState<string>('Generating...');
   const [isCapturing, setIsCapturing] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string>('Ready');
+  const [lastCaptureError, setLastCaptureError] = useState<string | null>(null);
   const [copiedShortcut, setCopiedShortcut] = useState<string | null>(null);
   const [copiedItemId, setCopiedItemId] = useState<string | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -136,6 +140,17 @@ export default function App() {
       setSettings(s);
       const h = await getStoredHistory();
       setHistory(h);
+      const editId = new URLSearchParams(window.location.search).get('edit');
+      if (editId) {
+        const target = h.find((item) => item.id === editId);
+        if (target) {
+          setView('history');
+          setIsAnnotatingDirectly(true);
+          setPreviewItem(target);
+        } else {
+          setStatusMessage('This capture is no longer available in the gallery.');
+        }
+      }
       try {
         const identity = await getOrCreateProofIdentity();
         setProofKeyId(`#${identity.keyFingerprint}`);
@@ -146,7 +161,14 @@ export default function App() {
     loadInitialData();
 
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.get(['pending_view', 'last_batch_count'], (res) => {
+      chrome.storage.local.get(['pending_view', 'last_batch_count', 'yoink_last_batch_report', 'yoink_last_capture_error'], (res) => {
+        const captureError = res.yoink_last_capture_error as { error?: string } | undefined;
+        if (captureError?.error) setLastCaptureError(captureError.error);
+        const report = res.yoink_last_batch_report as { count: number; failures: BatchFailure[] } | undefined;
+        if (report) {
+          setRecentBatchCount(report.count ?? 0);
+          setRecentBatchFailures(report.failures || []);
+        }
         if (res.pending_view) {
           setView(res.pending_view as CurrentView);
           if (res.last_batch_count) {
@@ -168,6 +190,14 @@ export default function App() {
           if (changes.omnicapture_history) {
             setHistory(changes.omnicapture_history.newValue || []);
           }
+          if (changes.yoink_last_batch_report) {
+            const report = changes.yoink_last_batch_report.newValue;
+            setRecentBatchCount(report ? report.count : null);
+            setRecentBatchFailures(report?.failures || []);
+          }
+          if (changes.yoink_last_capture_error) {
+            setLastCaptureError(changes.yoink_last_capture_error.newValue?.error || null);
+          }
           if (changes.pending_view && changes.pending_view.newValue) {
             setView(changes.pending_view.newValue as CurrentView);
             chrome.storage.local.remove(['pending_view']);
@@ -188,13 +218,10 @@ export default function App() {
       const msgListener = (msg: any) => {
         if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item) {
           const item = msg.payload.item as HistoryItem;
-          if (item.dataUrl) {
-            saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
-          }
-          setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+          if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
           setPreviewItem(item);
           setIsCapturing(false);
-          setStatusMessage('Capture complete!');
+          setStatusMessage(item.warning || 'Capture complete!');
         }
       };
       chrome.runtime.onMessage.addListener(msgListener);
@@ -218,10 +245,9 @@ export default function App() {
       const item = await captureFullPage(settings, (msg) => {
         setStatusMessage(msg);
       });
-      setStatusMessage('Full page capture complete!');
+      setStatusMessage(item.warning || 'Full page capture complete!');
       if (item && item.dataUrl) {
-        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
-        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -239,10 +265,9 @@ export default function App() {
         setTimeout(() => window.close(), 300);
       }
       const item = await captureVisible(settings);
-      setStatusMessage('Visible viewport captured!');
+      setStatusMessage(item.warning || 'Visible viewport captured!');
       if (item && item.dataUrl) {
-        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
-        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -261,10 +286,9 @@ export default function App() {
         setTimeout(() => window.close(), 300);
       }
       const item = await captureSelection(settings);
-      setStatusMessage('Selection captured!');
+      setStatusMessage(item.warning || 'Selection captured!');
       if (item && item.dataUrl) {
-        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
-        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -282,10 +306,9 @@ export default function App() {
         setTimeout(() => window.close(), 300);
       }
       const item = await captureScrollingElement(settings);
-      setStatusMessage('Scrollable element captured!');
+      setStatusMessage(item.warning || 'Scrollable element captured!');
       if (item && item.dataUrl) {
-        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
-        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -300,10 +323,9 @@ export default function App() {
     setStatusMessage('Select desktop screen or window to capture...');
     try {
       const item = await captureDesktop(settings);
-      setStatusMessage('Desktop screen captured!');
+      setStatusMessage(item.warning || 'Desktop screen captured!');
       if (item && item.dataUrl) {
-        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
-        setHistory((prev) => [item, ...prev.filter((i) => i.id !== item.id)]);
+        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -326,9 +348,12 @@ export default function App() {
       });
       const updated = await getStoredHistory();
       setHistory(updated);
-      setStatusMessage(`All ${results.length} tabs captured!`);
-      if (results.length > 0) {
-        setRecentBatchCount(results.length);
+      setStatusMessage(results.failures.length
+        ? `Captured ${results.items.length}; ${results.failures.length} items need attention.`
+        : `Captured ${results.items.length} tabs.`);
+      if (results.items.length > 0 || results.failures.length > 0) {
+        setRecentBatchCount(results.items.length);
+        setRecentBatchFailures(results.failures);
         setView('history');
       }
     } catch (err: any) {
@@ -366,25 +391,45 @@ export default function App() {
   }, [settings, handleSaveSettings]);
 
   const handleDeleteHistoryItem = useCallback(async (id: string) => {
-    const updated = await deleteStoredHistoryItem(id);
-    setHistory(updated);
+    try {
+      const updated = await deleteStoredHistoryItem(id);
+      setHistory(updated);
+    } catch (error) {
+      setStatusMessage(`Could not delete capture: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
   }, []);
 
   const handleClearHistory = useCallback(async () => {
-    await clearStoredHistory();
-    setHistory([]);
-    setStatusMessage('History cleared');
+    try {
+      await clearStoredHistory();
+      setHistory([]);
+      setStatusMessage('History cleared');
+    } catch (error) {
+      setStatusMessage(`Could not clear history: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
+  }, []);
+
+  const dismissBatchReport = useCallback(() => {
+    setRecentBatchCount(null);
+    setRecentBatchFailures([]);
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.remove('yoink_last_batch_report').catch(() => {});
+    }
   }, []);
 
   const handleBatchResults = useCallback((items: HistoryItem[]) => {
-    setHistory((prev) => [...items, ...prev]);
+    const saved = items.filter((item) => item.historySaved !== false);
+    const ids = new Set(saved.map((item) => item.id));
+    setHistory((prev) => [...saved.map(indexItem), ...prev.filter((item) => !ids.has(item.id))]);
   }, []);
 
   // Open Yoink Proof™ Inspector for a specific HistoryItem
   const handleSelectVerifyItem = useCallback(async (item: HistoryItem) => {
     const fullUrl = await getFullResolutionImage(item.id);
-    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null) || item.thumbnailUrl;
-    if (!dataUrl) return;
+    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null);
+    if (!dataUrl) { setStatusMessage('The original image is unavailable.'); return; }
     setVerifyTarget({ dataUrl, title: item.title });
     if (isFullTab) {
       setView('verify');
@@ -397,8 +442,8 @@ export default function App() {
   const handleQuickCopyItem = useCallback(async (item: HistoryItem, e: React.MouseEvent) => {
     e.stopPropagation();
     const fullUrl = await getFullResolutionImage(item.id);
-    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null) || item.thumbnailUrl;
-    if (!dataUrl) return;
+    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null);
+    if (!dataUrl) { setStatusMessage('The original image is unavailable.'); return; }
     const ok = await copyImageToClipboard(dataUrl);
     if (ok) {
       setCopiedItemId(item.id);
@@ -406,6 +451,19 @@ export default function App() {
       setTimeout(() => setCopiedItemId(null), 2000);
     }
   }, []);
+
+  const handleOpenAnnotation = useCallback((item: HistoryItem) => {
+    if (!isFullTab && typeof chrome !== 'undefined' && chrome.runtime?.id && chrome.tabs?.create) {
+      const url = chrome.runtime.getURL(`index.html?tab=true&edit=${encodeURIComponent(item.id)}`);
+      chrome.tabs.create({ url }).catch((error) => {
+        setStatusMessage(`Could not open editor: ${error?.message || 'Unknown error'}`);
+      });
+      return;
+    }
+    setIsAnnotatingDirectly(true);
+    setIsOcrDirectly(false);
+    setPreviewItem(item);
+  }, [isFullTab]);
 
   // P1-7 Upload and Edit: import local images, then open the editor for a single file.
   const handleImportFiles = useCallback(async (files: File[]) => {
@@ -425,15 +483,14 @@ export default function App() {
       }
     }
     if (imported.length === 0) return;
-    setHistory((prev) => [...imported, ...prev.filter((p) => !imported.some((i) => i.id === p.id))]);
+    setHistory((prev) => [...imported.map(indexItem), ...prev.filter((p) => !imported.some((i) => i.id === p.id))]);
     setStatusMessage(`Imported ${imported.length} image${imported.length === 1 ? '' : 's'}`);
     if (imported.length === 1) {
-      setIsAnnotatingDirectly(true);
-      setPreviewItem(imported[0]);
+      handleOpenAnnotation(imported[0]);
     } else {
       setView('history');
     }
-  }, []);
+  }, [handleOpenAnnotation]);
 
   // Paste an image anywhere in the Studio Hub to import it.
   useEffect(() => {
@@ -494,6 +551,10 @@ export default function App() {
       options: {
         title: 'Engine & Provenance Settings',
         subtitle: 'Configure Retina 2x scaling, anti-squish page slicing, sticky header suppression, and Yoink Proof™',
+      },
+      media: {
+        title: 'Page Media Yoinker (Images, SVGs, CSS BG & Video)',
+        subtitle: 'Extract highest-resolution srcset images, inline vector SVGs, CSS backgrounds, OpenGraph cards, and clean <video> frames',
       },
     };
 
@@ -592,6 +653,29 @@ export default function App() {
                         }`}
                       >
                         {history.length}
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={() => setView('media')}
+                      className={`w-full px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer flex items-center justify-between ${
+                        view === 'media'
+                          ? 'bg-purple-600 text-white font-semibold shadow-xs'
+                          : 'text-zinc-700 hover:bg-purple-50/80 hover:text-purple-950'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5">
+                        <ImageIcon size={15} className={view === 'media' ? 'text-white' : 'text-purple-600'} />
+                        <span>Yoink Page Media</span>
+                      </span>
+                      <span
+                        className={`text-[9.5px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                          view === 'media'
+                            ? 'bg-purple-700 text-purple-100'
+                            : 'bg-purple-100/80 text-purple-800'
+                        }`}
+                      >
+                        SVGs+IMG
                       </span>
                     </button>
                   </div>
@@ -893,7 +977,34 @@ export default function App() {
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3.5">
+                      {/* Card 0: Yoink Page Images, SVGs & Video Frames */}
+                      <button
+                        onClick={() => setView('media')}
+                        className="group text-left p-4 rounded-2xl bg-gradient-to-br from-purple-50/85 via-white to-white border border-purple-200/80 hover:border-purple-400 hover:shadow-md transition cursor-pointer flex flex-col justify-between gap-3"
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <div className="w-10 h-10 rounded-xl bg-purple-600 text-white flex items-center justify-center shadow-xs group-hover:scale-105 transition">
+                            <ImageIcon size={19} />
+                          </div>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-100 text-purple-800 border border-purple-200">
+                            IMG + SVG + Video
+                          </span>
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-zinc-900 group-hover:text-purple-700 transition">
+                            Yoink Page Media &amp; SVGs
+                          </h3>
+                          <p className="text-xs text-zinc-600 mt-0.5 leading-relaxed">
+                            Grab all high-res srcset images, inline SVGs, CSS backgrounds &amp; clean video frames from any tab.
+                          </p>
+                        </div>
+                        <div className="pt-2 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono font-semibold text-purple-700">
+                          <span>Scan Open Tab</span>
+                          <ArrowRight size={13} className="group-hover:translate-x-0.5 transition" />
+                        </div>
+                      </button>
+
                       {/* Card 1: Capture Screen / Window */}
                       <button
                         onClick={handleCaptureDesktop}
@@ -998,7 +1109,7 @@ export default function App() {
                             Verify Screenshot Proof™
                           </h3>
                           <p className="text-xs text-zinc-600 mt-0.5 leading-relaxed">
-                            Audit any PNG, JPEG, or WebP for authentic Yoink capture provenance and pixel-level integrity.
+                            Check a PNG, JPEG, or WebP for a valid signature and image integrity. Provenance is self-declared.
                           </p>
                         </div>
                         <div className="pt-2 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono font-semibold text-emerald-700">
@@ -1403,7 +1514,7 @@ export default function App() {
                           <p className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
                             <ShieldCheck size={12} />
                             {(settings.enableProof ?? true)
-                              ? `Yoink Proof™ Active (${settings.proofAuthor ? `Owner: ${settings.proofAuthor}` : 'IPTC + ECDSA + LSB'})`
+                              ? `Yoink Proof™ Active (${settings.proofAuthor ? `Creator: ${settings.proofAuthor}` : 'Signed image'})`
                               : 'Yoink Proof™ Signing Disabled'}
                           </p>
                         </div>
@@ -1429,17 +1540,14 @@ export default function App() {
                     setView('menu');
                   }}
                   recentBatchBanner={recentBatchCount}
-                  onDismissBatchBanner={() => setRecentBatchCount(null)}
+                  recentBatchFailures={recentBatchFailures}
+                  onDismissBatchBanner={dismissBatchReport}
                   onSelectPreview={(item) => {
                     setIsAnnotatingDirectly(false);
                     setIsOcrDirectly(false);
                     setPreviewItem(item);
                   }}
-                  onSelectAnnotate={(item) => {
-                    setIsAnnotatingDirectly(true);
-                    setIsOcrDirectly(false);
-                    setPreviewItem(item);
-                  }}
+                  onSelectAnnotate={handleOpenAnnotation}
                   onSelectOcr={(item) => {
                     setIsAnnotatingDirectly(false);
                     setIsOcrDirectly(true);
@@ -1493,6 +1601,21 @@ export default function App() {
                   }}
                 />
               )}
+
+              {/* VIEW 7: PAGE MEDIA YOINKER ('media') */}
+              {view === 'media' && (
+                <MediaYoinkerModal
+                  settings={settings}
+                  isFullTab={true}
+                  onBack={() => setView('menu')}
+                  onSendToStudio={(newItem) => {
+                    setHistory((prev) => [indexItem(newItem), ...prev.filter((i) => i.id !== newItem.id)]);
+                    setIsAnnotatingDirectly(false);
+                    setIsOcrDirectly(false);
+                    setPreviewItem(newItem);
+                  }}
+                />
+              )}
             </main>
           </div>
         </div>
@@ -1516,7 +1639,8 @@ export default function App() {
               setIsOcrDirectly(false);
             }}
             onSaved={(newItem) => {
-              setHistory((prev) => [newItem, ...prev.filter((i) => i.id !== newItem.id)]);
+              setHistory((prev) => [indexItem(newItem), ...prev.filter((i) => i.id !== newItem.id)]);
+              setPreviewItem(newItem);
             }}
           />
         )}
@@ -1531,6 +1655,13 @@ export default function App() {
       <div className="flex-1 overflow-hidden relative flex flex-col">
         {view === 'menu' && (
           <QuickMenu
+            lastCaptureError={lastCaptureError}
+            onDismissCaptureError={() => {
+              setLastCaptureError(null);
+              if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                chrome.storage.local.remove('yoink_last_capture_error').catch(() => {});
+              }
+            }}
             onCaptureFullPage={handleCaptureFullPage}
             onCaptureVisible={handleCaptureVisible}
             onCaptureSelection={handleCaptureSelection}
@@ -1546,6 +1677,7 @@ export default function App() {
               setVerifyTarget(null);
               setShowVerifyModal(true);
             }}
+            onOpenMediaYoinker={() => setView('media')}
             onUploadFiles={handleImportFiles}
             delaySec={settings.captureDelaySec}
             onSetDelaySec={(sec) => handleSaveSettings({ ...settings, captureDelaySec: sec })}
@@ -1582,17 +1714,14 @@ export default function App() {
               setView('menu');
             }}
             recentBatchBanner={recentBatchCount}
-            onDismissBatchBanner={() => setRecentBatchCount(null)}
+            recentBatchFailures={recentBatchFailures}
+            onDismissBatchBanner={dismissBatchReport}
             onSelectPreview={(item) => {
               setIsAnnotatingDirectly(false);
               setIsOcrDirectly(false);
               setPreviewItem(item);
             }}
-            onSelectAnnotate={(item) => {
-              setIsAnnotatingDirectly(true);
-              setIsOcrDirectly(false);
-              setPreviewItem(item);
-            }}
+            onSelectAnnotate={handleOpenAnnotation}
             onSelectOcr={(item) => {
               setIsAnnotatingDirectly(false);
               setIsOcrDirectly(true);
@@ -1618,6 +1747,20 @@ export default function App() {
             }}
           />
         )}
+
+        {view === 'media' && (
+          <MediaYoinkerModal
+            settings={settings}
+            isFullTab={false}
+            onBack={() => setView('menu')}
+            onSendToStudio={(newItem) => {
+              setHistory((prev) => [indexItem(newItem), ...prev.filter((i) => i.id !== newItem.id)]);
+              setIsAnnotatingDirectly(false);
+              setIsOcrDirectly(false);
+              setPreviewItem(newItem);
+            }}
+          />
+        )}
       </div>
 
       {/* Image Preview / Zoom Modal */}
@@ -1633,13 +1776,15 @@ export default function App() {
           item={previewItem}
           initialAnnotating={isAnnotatingDirectly}
           initialOcr={isOcrDirectly}
+          onOpenAnnotate={typeof chrome !== 'undefined' && !!chrome.runtime?.id && previewItem.historySaved !== false ? handleOpenAnnotation : undefined}
           onClose={() => {
             setPreviewItem(null);
             setIsAnnotatingDirectly(false);
             setIsOcrDirectly(false);
           }}
           onSaved={(newItem) => {
-            setHistory((prev) => [newItem, ...prev.filter((i) => i.id !== newItem.id)]);
+            setHistory((prev) => [indexItem(newItem), ...prev.filter((i) => i.id !== newItem.id)]);
+            setPreviewItem(newItem);
           }}
         />
       )}

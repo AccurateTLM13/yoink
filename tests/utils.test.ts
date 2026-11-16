@@ -296,6 +296,20 @@ describe('Storage Utilities', () => {
     const retrievedFull = await getFullResolutionImage('slim_item_1');
     assert.equal(retrievedFull, fullImage);
   });
+
+  test('keeps originals and history entries beyond forty captures', async () => {
+    for (let i = 0; i < 45; i++) {
+      await addHistoryItem({
+        id: `retained_${i}`, title: `Capture ${i}`, url: 'https://example.com',
+        dataUrl: `data:image/png;base64,original_${i}`, timestamp: i,
+        width: 100, height: 100, mode: 'visible', format: 'png',
+      });
+    }
+    const history = await getStoredHistory();
+    assert.equal(history.length, 45);
+    assert.ok(history.some((item) => item.id === 'retained_0'));
+    assert.equal(await getFullResolutionImage('retained_0'), 'data:image/png;base64,original_0');
+  });
 });
 
 describe('Coordinate Clamping & Boundary Guards', () => {

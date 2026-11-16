@@ -144,7 +144,7 @@ export async function downloadImageSlices(
         ? `${cleanBase}_part${item.part}_of_${item.total}.${ext}`
         : `${cleanBase}.${ext}`;
 
-    downloadDataUrl(item.dataUrl, filename);
+    await downloadDataUrl(item.dataUrl, filename);
     if (i < parts.length - 1) {
       await new Promise((r) => setTimeout(r, 200));
     }

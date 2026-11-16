@@ -1,4 +1,4 @@
-import { CaptureFormat, CaptureMode, CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
+import { BatchCaptureResult, CaptureFormat, CaptureMode, CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
 import { addHistoryItem, downloadDataUrl, copyImageToClipboard } from './storage';
 import { applyProofToCanvasAndEncode } from './proof';
 
@@ -276,7 +276,7 @@ export async function captureVisible(settings: CaptureSettings): Promise<History
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'visible', settings.format);
-    downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn);
   }
   return item;
 }
@@ -335,7 +335,7 @@ export async function captureSelection(settings: CaptureSettings): Promise<Histo
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'selection', settings.format);
-    downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn);
   }
   return item;
 }
@@ -394,7 +394,7 @@ export async function captureScrollingElement(settings: CaptureSettings): Promis
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'element', settings.format);
-    downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn);
   }
   return item;
 }
@@ -505,7 +505,7 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
           width,
           height
         );
-        downloadDataUrl(dataUrl, fn);
+        await downloadDataUrl(dataUrl, fn);
       }
 
       if (settings.copyToClipboard) {
@@ -561,7 +561,7 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'desktop', settings.format, width, height);
-    downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn);
   }
   return item;
 }
@@ -626,7 +626,7 @@ export async function captureFullPage(
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'full', settings.format);
-    downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn);
   }
   return item;
 }
@@ -637,7 +637,7 @@ export async function captureFullPage(
 export async function captureAllTabs(
   settings: CaptureSettings,
   onProgress?: (current: number, total: number, tabTitle: string) => void
-): Promise<HistoryItem[]> {
+): Promise<BatchCaptureResult> {
   if (isChromeExtension()) {
     const granted = await ensureAllSitesAccess();
     if (!granted) {
@@ -658,8 +658,10 @@ export async function captureAllTabs(
         },
         (response) => {
           chrome.runtime.onMessage.removeListener(progressListener);
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!response) return reject(new Error('Capture service did not return a result.'));
           if (response?.error) return reject(new Error(response.error));
-          resolve(response?.results || []);
+          resolve({ items: response?.results || [], failures: response?.failures || [] });
         }
       );
     });
@@ -694,12 +696,12 @@ export async function captureAllTabs(
     await addHistoryItem(item);
     if (settings.autoDownload) {
       const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'alltabs', settings.format);
-      downloadDataUrl(dataUrl, fn);
+      await downloadDataUrl(dataUrl, fn);
     }
     results.push(item);
   }
 
-  return results;
+  return { items: results, failures: [] };
 }
 
 /**
@@ -710,7 +712,7 @@ export async function captureUrlList(
   settings: CaptureSettings,
   delayMs: number = 3000,
   onProgress?: (current: number, total: number, url: string) => void
-): Promise<HistoryItem[]> {
+): Promise<BatchCaptureResult> {
   if (isChromeExtension()) {
     const granted = await ensureAllSitesAccess();
     if (!granted) {
@@ -731,8 +733,10 @@ export async function captureUrlList(
         },
         (response) => {
           chrome.runtime.onMessage.removeListener(progressListener);
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!response) return reject(new Error('Capture service did not return a result.'));
           if (response?.error) return reject(new Error(response.error));
-          resolve(response?.results || []);
+          resolve({ items: response?.results || [], failures: response?.failures || [] });
         }
       );
     });
@@ -761,12 +765,12 @@ export async function captureUrlList(
     await addHistoryItem(item);
     if (settings.autoDownload) {
       const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'urllist', settings.format);
-      downloadDataUrl(dataUrl, fn);
+      await downloadDataUrl(dataUrl, fn);
     }
     results.push(item);
   }
 
-  return results;
+  return { items: results, failures: [] };
 }
 
 /**
@@ -776,7 +780,7 @@ export async function captureMultiSize(
   resolutions: ResolutionConfig[],
   settings: CaptureSettings,
   onProgress?: (current: number, total: number, resName: string) => void
-): Promise<HistoryItem[]> {
+): Promise<BatchCaptureResult> {
   if (isChromeExtension()) {
     const granted = await ensureAllSitesAccess();
     if (!granted) {
@@ -805,8 +809,10 @@ export async function captureMultiSize(
           },
           (response) => {
             chrome.runtime.onMessage.removeListener(progressListener);
+            if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+            if (!response) return reject(new Error('Capture service did not return a result.'));
             if (response?.error) return reject(new Error(response.error));
-            resolve(response?.results || []);
+            resolve({ items: response?.results || [], failures: response?.failures || [] });
           }
         );
       });
@@ -836,12 +842,12 @@ export async function captureMultiSize(
     await addHistoryItem(item);
     if (settings.autoDownload) {
       const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'multisize', settings.format);
-      downloadDataUrl(dataUrl, fn);
+      await downloadDataUrl(dataUrl, fn);
     }
     results.push(item);
   }
 
-  return results;
+  return { items: results, failures: [] };
 }
 
 /**

@@ -51,6 +51,24 @@ const MAX_HISTORY_ITEMS = 40;
 // In-memory full-resolution image cache so signed full images are never lost if localStorage quota is reached
 const memoryFullImageCache = new Map<string, string>();
 
+function cacheFullImage(key: string, dataUrl: string): void {
+  if (!dataUrl) return;
+  memoryFullImageCache.delete(key);
+  memoryFullImageCache.set(key, dataUrl);
+  if (memoryFullImageCache.size > MAX_HISTORY_ITEMS) {
+    const oldestKey = memoryFullImageCache.keys().next().value;
+    if (oldestKey) memoryFullImageCache.delete(oldestKey);
+  }
+}
+
+async function mutateExtensionHistory(action: string, payload: object): Promise<HistoryItem[] | null> {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.id || !chrome.runtime.sendMessage) return null;
+  const response = await chrome.runtime.sendMessage({ action, payload });
+  if (response?.error) throw new Error(response.error);
+  if (!Array.isArray(response?.history)) throw new Error('Could not update capture history.');
+  return response.history as HistoryItem[];
+}
+
 /**
  * Generate a downscaled thumbnail from full dataUrl for fast index rendering
  */
@@ -95,29 +113,19 @@ export async function createThumbnail(dataUrl: string, targetWidth: number = 720
  */
 export async function saveFullResolutionImage(id: string, dataUrl: string): Promise<void> {
   const key = `${FULL_IMAGE_PREFIX}${id}`;
-  if (dataUrl) {
-    memoryFullImageCache.set(key, dataUrl);
-    if (memoryFullImageCache.size > MAX_HISTORY_ITEMS) {
-      const oldestKey = memoryFullImageCache.keys().next().value;
-      if (oldestKey) memoryFullImageCache.delete(oldestKey);
-    }
-  }
-
-  try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      await chrome.storage.local.set({ [key]: dataUrl });
-      return;
-    }
-  } catch (e) {
-    console.warn('Chrome storage full image save failed', e);
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    await chrome.storage.local.set({ [key]: dataUrl });
+    cacheFullImage(key, dataUrl);
+    return;
   }
 
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(key, dataUrl);
+      cacheFullImage(key, dataUrl);
     }
   } catch (e) {
-    console.warn('localStorage full image save failed (quota limit)', e);
+    throw new Error('Could not save the original image to local storage.', { cause: e });
   }
 }
 
@@ -133,7 +141,7 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       const res = await chrome.storage.local.get([key]);
       if (res && typeof res[key] === 'string' && res[key].length > 0) {
-        memoryFullImageCache.set(key, res[key] as string);
+        cacheFullImage(key, res[key] as string);
         return res[key] as string;
       }
     }
@@ -145,7 +153,7 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
     if (typeof localStorage !== 'undefined') {
       const local = localStorage.getItem(key);
       if (local && local.length > 0) {
-        memoryFullImageCache.set(key, local);
+        cacheFullImage(key, local);
         return local;
       }
     }
@@ -156,7 +164,6 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
     const history = await getStoredHistory();
     const item = history.find((i) => i.id === id);
     if (item && item.dataUrl && item.dataUrl.length > 0) return item.dataUrl;
-    if (item && item.thumbnailUrl && item.thumbnailUrl.length > 0) return item.thumbnailUrl;
   } catch {}
 
   return null;
@@ -276,12 +283,7 @@ export async function getStoredHistory(): Promise<HistoryItem[]> {
  * Save new item to history with lightweight indexing and separated full image storage.
  */
 export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> {
-  // 1. Save full resolution image separately to avoid inflating history index
-  if (item.dataUrl) {
-    await saveFullResolutionImage(item.id, item.dataUrl);
-  }
-
-  // 2. Generate thumbnail if needed
+  // Generate thumbnail before writing. The worker serializes all extension history writes.
   let thumb = item.thumbnailUrl;
   if (!thumb && item.dataUrl) {
     thumb = await createThumbnail(item.dataUrl);
@@ -289,29 +291,23 @@ export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> 
 
   const effectiveThumb = thumb || item.dataUrl || '';
 
+  const extensionHistory = await mutateExtensionHistory('HISTORY_ADD', { item: { ...item, thumbnailUrl: effectiveThumb } });
+  if (extensionHistory) {
+    cacheFullImage(`${FULL_IMAGE_PREFIX}${item.id}`, item.dataUrl);
+    return extensionHistory;
+  }
+  if (item.dataUrl) await saveFullResolutionImage(item.id, item.dataUrl);
+
   const indexItem: HistoryItem = { ...item, thumbnailUrl: effectiveThumb, dataUrl: '' };
 
   const current = await getStoredHistory();
   const merged = [indexItem, ...current.filter((i) => i.id !== item.id)];
-  const updated = merged.slice(0, MAX_HISTORY_ITEMS);
-  const evicted = merged.slice(MAX_HISTORY_ITEMS).map((i) => `${FULL_IMAGE_PREFIX}${i.id}`);
-  evicted.forEach((k) => memoryFullImageCache.delete(k));
-  if (evicted.length && typeof chrome !== 'undefined' && chrome.storage?.local) {
-    await chrome.storage.local.remove(evicted).catch(() => {});
-  }
+  const updated = merged;
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    try {
-      await chrome.storage.local.set({ [HISTORY_KEY]: updated });
-    } catch (e) {
-      console.warn('Chrome local storage history save failed', e);
-    }
+    await chrome.storage.local.set({ [HISTORY_KEY]: updated });
   } else if (typeof localStorage !== 'undefined') {
-    try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-    } catch (e) {
-      console.warn('localStorage history save failed', e);
-    }
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
   }
 
   return updated;
@@ -324,6 +320,8 @@ export async function updateStoredHistoryItem(
   id: string,
   updates: Partial<HistoryItem>
 ): Promise<HistoryItem[]> {
+  const extensionHistory = await mutateExtensionHistory('HISTORY_UPDATE', { id, updates });
+  if (extensionHistory) return extensionHistory;
   const current = await getStoredHistory();
   const updated = current.map((item) => {
     if (item.id === id) {
@@ -333,17 +331,9 @@ export async function updateStoredHistoryItem(
   });
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    try {
-      await chrome.storage.local.set({ [HISTORY_KEY]: updated });
-    } catch (e) {
-      console.warn('Chrome local storage history update failed', e);
-    }
+    await chrome.storage.local.set({ [HISTORY_KEY]: updated });
   } else if (typeof localStorage !== 'undefined') {
-    try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-    } catch (e) {
-      console.warn('localStorage history update failed', e);
-    }
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
   }
 
   return updated;
@@ -354,33 +344,24 @@ export async function updateStoredHistoryItem(
  */
 export async function deleteStoredHistoryItem(id: string): Promise<HistoryItem[]> {
   const key = `${FULL_IMAGE_PREFIX}${id}`;
-  memoryFullImageCache.delete(key);
-  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    try {
-      await chrome.storage.local.remove([key]);
-    } catch {}
-  } else if (typeof localStorage !== 'undefined') {
-    try {
-      localStorage.removeItem(key);
-    } catch {}
+  const extensionHistory = await mutateExtensionHistory('HISTORY_DELETE', { id });
+  if (extensionHistory) {
+    memoryFullImageCache.delete(key);
+    return extensionHistory;
   }
 
   const current = await getStoredHistory();
   const updated = current.filter((i) => i.id !== id);
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    try {
-      await chrome.storage.local.set({ [HISTORY_KEY]: updated });
-    } catch (e) {
-      console.warn('Chrome local storage history delete failed', e);
-    }
+    await chrome.storage.local.set({ [HISTORY_KEY]: updated });
+    await chrome.storage.local.remove([key]);
   } else if (typeof localStorage !== 'undefined') {
-    try {
-      localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-    } catch (e) {
-      console.warn('localStorage history delete failed', e);
-    }
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
+    localStorage.removeItem(key);
   }
+
+  memoryFullImageCache.delete(key);
 
   return updated;
 }
@@ -389,23 +370,20 @@ export async function deleteStoredHistoryItem(id: string): Promise<HistoryItem[]
  * Clear all history items and full-resolution image caches.
  */
 export async function clearStoredHistory(): Promise<void> {
+  const extensionHistory = await mutateExtensionHistory('HISTORY_CLEAR', {});
+  if (extensionHistory) {
+    memoryFullImageCache.clear();
+    return;
+  }
   const current = await getStoredHistory();
   const fullKeys = current.map((i) => `${FULL_IMAGE_PREFIX}${i.id}`);
   memoryFullImageCache.clear();
 
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    try {
-      await chrome.storage.local.remove([HISTORY_KEY, ...fullKeys]);
-    } catch (e) {
-      console.warn('Chrome local storage history clear failed', e);
-    }
+    await chrome.storage.local.remove([HISTORY_KEY, ...fullKeys]);
   } else if (typeof localStorage !== 'undefined') {
-    try {
-      localStorage.removeItem(HISTORY_KEY);
-      fullKeys.forEach((k) => localStorage.removeItem(k));
-    } catch (e) {
-      console.warn('localStorage history clear failed', e);
-    }
+    localStorage.removeItem(HISTORY_KEY);
+    fullKeys.forEach((k) => localStorage.removeItem(k));
   }
 }
 
@@ -461,12 +439,35 @@ function convertBlobToPng(blob: Blob): Promise<Blob> {
 /**
  * Trigger file download directly from dataUrl
  */
-export function downloadDataUrl(dataUrl: string, filename: string): void {
+export async function downloadDataUrl(dataUrl: string, filename: string): Promise<void> {
   if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.download) {
-    chrome.downloads.download({
+    const id = await chrome.downloads.download({
       url: dataUrl,
       filename: filename,
       saveAs: false,
+      conflictAction: 'uniquify',
+    });
+    await new Promise<void>((resolve, reject) => {
+      let finished = false;
+      const finish = (error?: string) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        chrome.downloads.onChanged.removeListener(onChanged);
+        if (error) reject(new Error(error)); else resolve();
+      };
+      const onChanged = (delta: chrome.downloads.DownloadDelta) => {
+        if (delta.id !== id) return;
+        if (delta.state?.current === 'complete') finish();
+        else if (delta.state?.current === 'interrupted') finish(delta.error?.current || 'Download interrupted');
+      };
+      const timer = setTimeout(() => finish('Timed out while checking download status'), 60000);
+      chrome.downloads.onChanged.addListener(onChanged);
+      chrome.downloads.search({ id }).then((items) => {
+        const item = items[0];
+        if (item?.state === 'complete') finish();
+        else if (item?.state === 'interrupted') finish(item.error || 'Download interrupted');
+      }, (error) => finish(error?.message || 'Could not check download status'));
     });
   } else {
     const link = document.createElement('a');

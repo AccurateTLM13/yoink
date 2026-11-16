@@ -18,7 +18,7 @@ import {
   ScanText,
   ShieldCheck,
 } from 'lucide-react';
-import { HistoryItem, CaptureMode } from '../types';
+import { BatchFailure, HistoryItem, CaptureMode } from '../types';
 import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage } from '../utils/storage';
 import { exportPdf } from '../utils/pdf';
 
@@ -29,10 +29,11 @@ interface Props {
   onSelectAnnotate?: (item: HistoryItem) => void;
   onSelectOcr?: (item: HistoryItem) => void;
   onSelectVerify?: (item: HistoryItem) => void;
-  onDeleteItem: (id: string) => void;
-  onClearAll: () => void;
+  onDeleteItem: (id: string) => void | Promise<void>;
+  onClearAll: () => void | Promise<void>;
   onOpenStudio?: () => void;
   recentBatchBanner?: number | null;
+  recentBatchFailures?: BatchFailure[];
   onDismissBatchBanner?: () => void;
   isFullTab?: boolean;
   onImportFiles?: (files: File[]) => void;
@@ -49,6 +50,7 @@ const MODE_LABELS: Record<string, { label: string; color: string }> = {
   annotated: { label: 'Annotated', color: 'bg-orange-50 text-orange-700 border-orange-200/70' },
   upload: { label: 'Uploaded', color: 'bg-teal-50 text-teal-700 border-teal-200/70' },
   desktop: { label: 'Desktop', color: 'bg-emerald-50 text-emerald-800 border-emerald-200/70' },
+  media: { label: 'Media', color: 'bg-violet-50 text-violet-800 border-violet-200/70' },
 };
 
 function safeHostname(url?: string): string {
@@ -82,7 +84,8 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
       setLoadFailed(false);
     }
 
-    // Always fetch the razor-sharp original image from storage
+    // Thumbnails stay lightweight; fetch the original only for legacy items without one.
+    if (item.thumbnailUrl || item.dataUrl) return;
     getFullResolutionImage(item.id).then((full) => {
       if (isMounted) {
         if (full) {
@@ -135,6 +138,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   onClearAll,
   onOpenStudio,
   recentBatchBanner,
+  recentBatchFailures = [],
   onDismissBatchBanner,
   isFullTab,
   onImportFiles,
@@ -144,8 +148,13 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   const [search, setSearch] = useState('');
   const [activeFilter, setActiveFilter] = useState<'all' | CaptureMode>('all');
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [actionMessage, setActionMessage] = useState('');
+  const [visibleCount, setVisibleCount] = useState(40);
+
+  useEffect(() => setVisibleCount(40), [search, activeFilter]);
 
   const filtered = useMemo(() => {
     let list = history;
@@ -169,8 +178,8 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   const handleCopy = async (e: React.MouseEvent, item: HistoryItem) => {
     e.stopPropagation();
-    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
-    if (!imageSrc) return;
+    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl;
+    if (!imageSrc) { setActionMessage(`The original image for “${item.title}” is unavailable.`); return; }
     const success = await copyImageToClipboard(imageSrc);
     if (success) {
       setCopiedId(item.id);
@@ -180,52 +189,61 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   const handleDownload = async (e: React.MouseEvent, item: HistoryItem) => {
     e.stopPropagation();
-    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
-    if (!imageSrc) return;
+    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl;
+    if (!imageSrc) { setActionMessage(`The original image for “${item.title}” is unavailable.`); return; }
     const ext = item.format || 'png';
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
     const filename = `${cleanTitle}_${Date.now()}.${ext}`;
-    downloadDataUrl(imageSrc, filename);
+    try {
+      await downloadDataUrl(imageSrc, filename);
+      setActionMessage(`Download ${typeof chrome !== 'undefined' && chrome.downloads?.download ? 'saved' : 'started'} for “${item.title}”.`);
+    } catch (error) {
+      setActionMessage(`Could not save “${item.title}”: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   const handleDownloadAll = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const itemsToDownload = filtered.length > 0 ? filtered : history;
+    const itemsToDownload = filtered;
     if (itemsToDownload.length === 0) return;
 
     setDownloadingAll(true);
-    for (let idx = 0; idx < itemsToDownload.length; idx++) {
+    const failures: string[] = [];
+    try { for (let idx = 0; idx < itemsToDownload.length; idx++) {
       const item = itemsToDownload[idx];
-      const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
+      const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl;
       if (imageSrc) {
         const ext = item.format || 'png';
         const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
         const filename = `${cleanTitle}_${item.id.slice(-4)}.${ext}`;
-        downloadDataUrl(imageSrc, filename);
+        try { await downloadDataUrl(imageSrc, filename); } catch { failures.push(item.title); }
         if (idx < itemsToDownload.length - 1) {
           await new Promise((r) => setTimeout(r, 150));
         }
-      }
+      } else failures.push(item.title);
     }
-    setDownloadingAll(false);
+    setActionMessage(failures.length ? `Could not save ${failures.length} capture(s): ${failures.join(', ')}.` : `Exported ${itemsToDownload.length} capture(s).`);
+    } finally { setDownloadingAll(false); }
   };
 
   const handleExportAllPdf = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const items = filtered.length > 0 ? filtered : history;
+    const items = filtered;
     if (items.length === 0 || exportingPdf) return;
     setExportingPdf(true);
     try {
       const sources: string[] = [];
       for (const item of items) {
-        const src = (await getFullResolutionImage(item.id)) || item.dataUrl || item.thumbnailUrl;
-        if (src) sources.push(src);
+        const src = (await getFullResolutionImage(item.id)) || item.dataUrl;
+        if (!src) throw new Error(`The original image for “${item.title}” is unavailable.`);
+        sources.push(src);
       }
       if (sources.length > 0) {
         await exportPdf(sources, `yoink_gallery_${sources.length}_captures`);
       }
     } catch (err) {
       console.error('Gallery PDF export failed:', err);
+      setActionMessage(`PDF export failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setExportingPdf(false);
     }
@@ -233,12 +251,25 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   const handleDelete = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    onDeleteItem(id);
+    setDeleteConfirmId(id);
   };
 
-  const confirmClearAll = () => {
-    onClearAll();
-    setShowClearConfirm(false);
+  const confirmClearAll = async () => {
+    try {
+      await onClearAll();
+      setShowClearConfirm(false);
+    } catch (error) {
+      setActionMessage(`Could not clear history: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const confirmDelete = async (id: string) => {
+    try {
+      await onDeleteItem(id);
+      setDeleteConfirmId(null);
+    } catch (error) {
+      setActionMessage(`Could not delete capture: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   return (
@@ -335,30 +366,30 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
       )}
 
       {/* Recent Batch Success Banner */}
-      {recentBatchBanner && recentBatchBanner > 0 && (
-        <div className="m-3 p-3 bg-blue-50/90 border border-blue-200/90 rounded-xl flex items-center justify-between shadow-xs animate-in fade-in slide-in-from-top-2 duration-300">
+      {(recentBatchBanner != null || recentBatchFailures.length > 0) && (
+        <div className="m-3 p-3 bg-blue-50/90 border border-blue-200/90 rounded-xl flex flex-wrap items-center justify-between gap-2 shadow-xs">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shrink-0 shadow-xs">
               <Layers size={16} />
             </div>
             <div className="min-w-0">
               <h4 className="text-xs font-bold text-blue-950 truncate">
-                {recentBatchBanner} Captures Ready
+                {recentBatchBanner || 0} captures processed{recentBatchFailures.length ? ` · ${recentBatchFailures.length} need attention` : ''}
               </h4>
               <p className="text-[11px] text-blue-700 truncate">
-                Saved to your gallery. Ready to inspect or export.
+                {recentBatchFailures.length ? 'Review the items below before retrying.' : 'Ready to inspect in your gallery.'}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0 ml-2">
-            <button
+            {history.length > 0 && <button
               onClick={handleDownloadAll}
               disabled={downloadingAll}
               className="px-2.5 py-1 text-[11px] font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition cursor-pointer flex items-center gap-1 shadow-xs disabled:opacity-50"
             >
               <Download size={12} />
-              <span>{downloadingAll ? 'Saving...' : 'Save All'}</span>
-            </button>
+              <span>{downloadingAll ? 'Saving...' : 'Export gallery'}</span>
+            </button>}
             {onDismissBatchBanner && (
               <button
                 onClick={onDismissBatchBanner}
@@ -369,6 +400,21 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
               </button>
             )}
           </div>
+          {recentBatchFailures.length > 0 && (
+            <details className="w-full text-xs text-blue-950">
+              <summary className="cursor-pointer font-semibold">Show details</summary>
+              <ul className="mt-2 space-y-1 break-words">
+                {recentBatchFailures.map((failure, index) => <li key={`${index}-${failure.target}`}>{failure.target}: {failure.error}</li>)}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+
+      {actionMessage && (
+        <div role="status" className="mx-3 mt-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs text-zinc-800">
+          {actionMessage}
+          <button onClick={() => setActionMessage('')} className="ml-2 font-semibold underline">Dismiss</button>
         </div>
       )}
 
@@ -408,7 +454,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
               All ({history.length})
             </button>
 
-            {(['visible', 'selection', 'full', 'element', 'desktop', 'alltabs', 'urllist', 'multisize', 'annotated', 'upload'] as CaptureMode[]).map((mode) => {
+            {(['visible', 'selection', 'full', 'element', 'desktop', 'alltabs', 'urllist', 'multisize', 'annotated', 'upload', 'media'] as CaptureMode[]).map((mode) => {
               const count = history.filter((h) => h.mode === mode).length;
               if (count === 0) return null;
               const meta = MODE_LABELS[mode] || { label: mode };
@@ -472,7 +518,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
           </div>
         ) : (
           <div className={isFullTab ? 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5' : 'space-y-2'}>
-            {filtered.map((item) => {
+            {filtered.slice(0, visibleCount).map((item) => {
               const meta = MODE_LABELS[item.mode] || {
                 label: item.mode,
                 color: 'bg-zinc-100 text-zinc-700 border-zinc-200',
@@ -521,6 +567,10 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                         {item.title}
                       </h4>
 
+                      {item.warning && (
+                        <p className="text-[11px] text-amber-800 font-medium" title={item.warning}>{item.warning}</p>
+                      )}
+
                       <p className="text-[10px] text-zinc-600 truncate font-mono tabular-nums">
                         {item.width > 0 ? `${item.width} × ${item.height}px • ` : ''}
                         {item.format.toUpperCase()}
@@ -529,12 +579,12 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                   </div>
 
                   {/* Quick Card Toolbar */}
-                  <div className="flex items-center justify-between gap-1.5 mt-2 pt-2 border-t border-zinc-100">
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 mt-2 pt-2 border-t border-zinc-100">
                     <span className="text-[10px] text-zinc-600 truncate max-w-[120px] font-mono">
                       {safeHostname(item.url)}
                     </span>
 
-                    <div className="flex items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-1">
                       {onSelectAnnotate && (
                         <button
                           onClick={(e) => {
@@ -598,18 +648,31 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                         <span>Save</span>
                       </button>
 
-                      <button
-                        onClick={(e) => handleDelete(e, item.id)}
-                        className="p-1 text-zinc-400 hover:text-rose-600 rounded-md hover:bg-rose-50 transition cursor-pointer"
-                        title="Delete capture"
-                      >
-                        <Trash2 size={12} />
-                      </button>
+                      {deleteConfirmId === item.id ? (
+                        <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button onClick={() => confirmDelete(item.id)} className="rounded-md bg-rose-700 px-2 py-1 text-[11px] font-semibold text-white">Delete?</button>
+                          <button onClick={() => setDeleteConfirmId(null)} className="rounded-md px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100">Cancel</button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={(e) => handleDelete(e, item.id)}
+                          className="p-1 text-zinc-400 hover:text-rose-600 rounded-md hover:bg-rose-50 transition cursor-pointer"
+                          title="Delete capture"
+                          aria-label={`Delete ${item.title}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
               );
             })}
+            {filtered.length > visibleCount && (
+              <button onClick={() => setVisibleCount((count) => count + 40)} className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 sm:col-span-full">
+                Show more ({filtered.length - visibleCount} remaining)
+              </button>
+            )}
           </div>
         )}
       </div>

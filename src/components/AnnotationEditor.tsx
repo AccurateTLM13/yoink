@@ -44,6 +44,7 @@ interface Props {
   imageSrc: string;
   onClose: () => void;
   onSaved?: (newItem: HistoryItem) => void;
+  onOcrSaved?: (updatedItem: HistoryItem) => void;
 }
 
 const COLOR_PALETTE = [
@@ -68,6 +69,7 @@ export const AnnotationEditor: React.FC<Props> = ({
   imageSrc,
   onClose,
   onSaved,
+  onOcrSaved,
 }) => {
   const [activeTool, setActiveTool] = useState<AnnotationTool>('arrow');
   const [selectedColor, setSelectedColor] = useState('#ef4444');
@@ -76,13 +78,13 @@ export const AnnotationEditor: React.FC<Props> = ({
   const [copied, setCopied] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [showOcr, setShowOcr] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [actionError, setActionError] = useState('');
 
   const handleSaveOcrText = async (newText: string) => {
     item.ocrText = newText;
     await updateStoredHistoryItem(item.id, { ocrText: newText });
-    if (onSaved) {
-      onSaved({ ...item, ocrText: newText });
-    }
+    if (onOcrSaved) onOcrSaved({ ...item, ocrText: newText });
   };
 
   // Annotations stack and undo/redo histories
@@ -324,6 +326,21 @@ export const AnnotationEditor: React.FC<Props> = ({
     setAnnotations([]);
   };
 
+  const requestClose = () => {
+    if (annotations.length > 0 || (textInputState && textValue.trim())) setConfirmDiscard(true);
+    else onClose();
+  };
+
+  useEffect(() => {
+    if (annotations.length === 0 && !(textInputState && textValue.trim())) return;
+    const warnBeforeClosing = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeClosing);
+    return () => window.removeEventListener('beforeunload', warnBeforeClosing);
+  }, [annotations.length, textInputState, textValue]);
+
   // Keyboard shortcuts (Escape to cancel, Ctrl+Z to undo)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -335,16 +352,20 @@ export const AnnotationEditor: React.FC<Props> = ({
         }
         e.preventDefault();
       } else if (e.key === 'Escape') {
-        if (textInputState) {
+        if (confirmDiscard) {
+          setConfirmDiscard(false);
+        } else if (showOcr) {
+          setShowOcr(false);
+        } else if (textInputState) {
           setTextInputState(null);
         } else {
-          onClose();
+          requestClose();
         }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undoStack, redoStack, annotations, textInputState, onClose]);
+  }, [undoStack, redoStack, annotations, textInputState, textValue, showOcr, confirmDiscard, onClose]);
 
   // Export & Action Handlers
   const handleCopyComposite = async () => {
@@ -357,6 +378,7 @@ export const AnnotationEditor: React.FC<Props> = ({
   };
 
   const handleDownloadComposite = async () => {
+    try {
     const format = item.format || 'png';
     const composite = await createAnnotatedComposite(
       imageSrc,
@@ -366,15 +388,25 @@ export const AnnotationEditor: React.FC<Props> = ({
     );
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
     const filename = `${cleanTitle}_annotated_${Date.now()}.${format}`;
-    downloadDataUrl(composite.dataUrl, filename);
+    await downloadDataUrl(composite.dataUrl, filename);
+    setActionError('');
+    } catch (error) {
+      setActionError(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   const handleExportPdf = async () => {
-    const composite = await createAnnotatedComposite(imageSrc, annotations, 'png');
-    await exportPdf([composite.dataUrl], `${item.title || 'capture'}_annotated`);
+    try {
+      const composite = await createAnnotatedComposite(imageSrc, annotations, 'png');
+      await exportPdf([composite.dataUrl], `${item.title || 'capture'}_annotated`);
+      setActionError('');
+    } catch (error) {
+      setActionError(`PDF export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   const handleSaveToGallery = async () => {
+    try {
     const composite = await createAnnotatedComposite(
       imageSrc,
       annotations,
@@ -397,6 +429,9 @@ export const AnnotationEditor: React.FC<Props> = ({
     setSavedSuccess(true);
     if (onSaved) onSaved(newItem);
     setTimeout(() => setSavedSuccess(false), 2200);
+    } catch (error) {
+      setActionError(`Could not save your edits: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
   };
 
   return (
@@ -407,7 +442,7 @@ export const AnnotationEditor: React.FC<Props> = ({
       className="fixed inset-0 z-50 flex flex-col bg-zinc-950 font-sans select-none animate-in fade-in duration-150"
     >
       {/* Top Application Bar */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-zinc-900 border-b border-zinc-800 text-white z-20">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-zinc-900 border-b border-zinc-800 text-white z-20">
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-7 h-7 rounded-lg bg-orange-500/20 border border-orange-500/40 flex items-center justify-center shrink-0">
             <Sparkles size={15} className="text-orange-400" />
@@ -415,9 +450,6 @@ export const AnnotationEditor: React.FC<Props> = ({
           <div className="min-w-0">
             <h3 className="text-xs font-semibold text-zinc-100 truncate flex items-center gap-2">
               <span>Annotation & Redaction Studio</span>
-              <span className="text-[10px] font-mono text-orange-400 bg-orange-500/10 px-1.5 py-0.2 rounded border border-orange-500/20">
-                P0-1 // P0-3
-              </span>
             </h3>
             <p className="text-[10px] text-zinc-400 font-mono truncate">
               {item.width} × {item.height}px • Non-destructive editor
@@ -426,7 +458,7 @@ export const AnnotationEditor: React.FC<Props> = ({
         </div>
 
         {/* Action Buttons */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           {/* Undo / Redo / Clear */}
           <div className="flex items-center bg-zinc-800 rounded-lg p-0.5 border border-zinc-700 mr-1">
             <button
@@ -540,7 +572,7 @@ export const AnnotationEditor: React.FC<Props> = ({
 
           {/* Close */}
           <button
-            onClick={onClose}
+            onClick={requestClose}
             className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg transition cursor-pointer ml-1"
             title="Exit editor (Esc)"
           >
@@ -548,6 +580,8 @@ export const AnnotationEditor: React.FC<Props> = ({
           </button>
         </div>
       </div>
+
+      {actionError && <div role="alert" className="bg-amber-100 px-4 py-2 text-xs text-amber-950">{actionError}</div>}
 
       {/* Main Canvas Workspace */}
       <div
@@ -610,9 +644,9 @@ export const AnnotationEditor: React.FC<Props> = ({
       </div>
 
       {/* Floating Bottom Toolbar Dock */}
-      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-zinc-900/95 backdrop-blur-md px-3.5 py-2 rounded-2xl border border-zinc-700/80 shadow-[0_12px_40px_rgba(0,0,0,0.6)] text-white">
+      <div className="absolute bottom-3 left-2 right-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-30 flex items-center gap-3 overflow-x-auto bg-zinc-900/95 px-3.5 py-2 rounded-2xl border border-zinc-700/80 text-white">
         {/* Tool selector pills */}
-        <div className="flex items-center gap-1 bg-zinc-800/80 p-0.5 rounded-xl border border-zinc-700/60">
+        <div className="flex shrink-0 items-center gap-1 bg-zinc-800/80 p-0.5 rounded-xl border border-zinc-700/60">
           <button
             onClick={() => setActiveTool('select')}
             className={`p-1.5 rounded-lg transition cursor-pointer ${
@@ -683,7 +717,7 @@ export const AnnotationEditor: React.FC<Props> = ({
                 ? 'bg-rose-600 text-white'
                 : 'text-rose-400 hover:text-rose-300'
             }`}
-            title="Pixelate / Redact Sensitive Data (P0-3)"
+            title="Pixelate / Redact Sensitive Data"
           >
             <EyeOff size={15} />
           </button>
@@ -693,7 +727,7 @@ export const AnnotationEditor: React.FC<Props> = ({
         <div className="w-px h-6 bg-zinc-700" />
 
         {/* Color Palette */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           {COLOR_PALETTE.map((c) => (
             <button
               key={c.hex}
@@ -716,7 +750,7 @@ export const AnnotationEditor: React.FC<Props> = ({
         <div className="w-px h-6 bg-zinc-700" />
 
         {/* Stroke Width Selector */}
-        <div className="flex items-center gap-1 bg-zinc-800/80 p-0.5 rounded-xl border border-zinc-700/60">
+        <div className="flex shrink-0 items-center gap-1 bg-zinc-800/80 p-0.5 rounded-xl border border-zinc-700/60">
           {STROKE_WIDTHS.map((s) => (
             <button
               key={s.width}
@@ -732,6 +766,19 @@ export const AnnotationEditor: React.FC<Props> = ({
           ))}
         </div>
       </div>
+
+      {confirmDiscard && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div role="alertdialog" aria-modal="true" aria-labelledby="discard-annotations-title" className="w-full max-w-sm rounded-xl bg-white p-4 text-zinc-900 shadow-xl">
+            <h2 id="discard-annotations-title" className="text-sm font-semibold">Discard unsaved annotations?</h2>
+            <p className="mt-2 text-xs text-zinc-600">Your original capture is safe. Changes in this editor have not been saved.</p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button onClick={() => setConfirmDiscard(false)} className="rounded-lg px-3 py-2 text-xs font-semibold hover:bg-zinc-100">Keep editing</button>
+              <button onClick={onClose} className="rounded-lg bg-rose-700 px-3 py-2 text-xs font-semibold text-white hover:bg-rose-800">Discard changes</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* OCR Drawer (P2-9) */}
       {showOcr && (

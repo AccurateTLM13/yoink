@@ -12,7 +12,32 @@ export type CaptureMode =
   | 'annotated'
   | 'upload'
   | 'element'
-  | 'desktop';
+  | 'desktop'
+  | 'media';
+
+export type YoinkMediaCategory = 'img' | 'svg' | 'bg' | 'video' | 'og' | 'canvas';
+
+export type YoinkMediaFormat = 'svg' | 'png' | 'jpeg' | 'webp' | 'gif' | 'avif' | 'unknown';
+
+export interface YoinkedMediaItem {
+  id: string;
+  url: string;
+  name: string;
+  category: YoinkMediaCategory;
+  format: YoinkMediaFormat;
+  width: number;
+  height: number;
+  sourceTag: string;
+  svgCode?: string;
+  pageUrl?: string;
+  pageTitle?: string;
+}
+
+export interface MediaFilterOptions {
+  category?: 'all' | YoinkMediaCategory;
+  minDimension?: number;
+  searchQuery?: string;
+}
 
 export interface CaptureSettings {
   format: CaptureFormat;
@@ -79,6 +104,18 @@ export interface HistoryItem {
   ocrText?: string;
   proofKeyId?: string;
   proofSigned?: boolean;
+  warning?: string;
+  historySaved?: boolean;
+}
+
+export interface BatchFailure {
+  target: string;
+  error: string;
+}
+
+export interface BatchCaptureResult {
+  items: HistoryItem[];
+  failures: BatchFailure[];
 }
 
 export interface SelectionRect {

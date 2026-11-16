@@ -39,7 +39,9 @@ describe('OCR Text Extraction (P2-9) & Local AI', () => {
   it('extractOcrText returns graceful fallback result when Shape Detection is unavailable', async () => {
     const fakeDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
     const res = await extractOcrText(fakeDataUrl);
-    assert.ok(res.text.length > 0);
+    assert.strictEqual(res.text, '');
+    assert.strictEqual(res.status, 'unavailable');
+    assert.match(res.message || '', /unavailable/i);
     assert.strictEqual(res.engine, 'fallback');
     assert.strictEqual(typeof res.confidence, 'number');
   });

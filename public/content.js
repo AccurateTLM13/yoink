@@ -26,7 +26,8 @@
         sendResponse({ started: false, error: 'Capture already running' });
         return false;
       }
-      startScrollCapture(message.payload?.scrollDelay || 600, message.payload?.hideSticky !== false);
+      startScrollCapture(message.payload?.scrollDelay || 600, message.payload?.hideSticky !== false)
+        .catch((error) => reportCaptureFailure('full', error));
       sendResponse({ started: true });
       return false;
     }
@@ -43,6 +44,13 @@
       return true;
     }
   });
+
+  function reportCaptureFailure(mode, error) {
+    chrome.runtime.sendMessage({
+      action: 'CAPTURE_ABORTED',
+      payload: { mode, error: error?.message || 'Capture was interrupted. Please try again.' },
+    }).catch(() => {});
+  }
 
   /**
    * 1. Full Page Scroll & Stitch Capture Engine
@@ -104,6 +112,7 @@
         const response = await chrome.runtime
           .sendMessage({ action: 'CAPTURE_VISIBLE_TAB', payload: { index: chunks.length } })
           .catch(() => null);
+        if (!response?.ok) throw new Error(response?.error || 'Could not capture a section. Keep this tab active and try again.');
         if (response && response.ok) {
           chunks.push({
             index: response.index,
@@ -673,7 +682,7 @@
       const target = hoveredTargetEl;
       removeElementInspector();
       if (target) {
-        captureScrollableElement(target, scrollDelay);
+        captureScrollableElement(target, scrollDelay).catch((error) => reportCaptureFailure('element', error));
       }
     };
 
@@ -731,7 +740,7 @@
       candidate = candidate.parentElement;
     }
 
-    captureScrollableElement(foundScrollable || targetEl, 600);
+    captureScrollableElement(foundScrollable || targetEl, 600).catch((error) => reportCaptureFailure('element', error));
   }
 
   async function captureScrollableElement(targetEl, scrollDelay = 600) {
@@ -765,6 +774,7 @@
         const response = await chrome.runtime
           .sendMessage({ action: 'CAPTURE_VISIBLE_TAB', payload: { index: chunks.length } })
           .catch(() => null);
+        if (!response?.ok) throw new Error(response?.error || 'Could not capture a section. Keep this tab active and try again.');
         if (response && response.ok) {
           chunks.push({
             index: response.index,

@@ -271,7 +271,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
               <div>
                 <div className="flex items-center gap-1.5">
                   <span className="font-semibold text-zinc-900 text-xs">
-                    Yoink Proof™ (Anti-AI & Ownership Seal)
+                    Yoink Proof™ (Image Integrity)
                   </span>
                   {form.enableProof !== false && (
                     <span className="px-1.5 py-0.2 rounded text-[9px] font-mono font-bold uppercase bg-emerald-600 text-white tracking-wider">
@@ -280,7 +280,11 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                   )}
                 </div>
                 <p className="text-[10px] text-zinc-600 leading-snug mt-0.5">
-                  IPTC screenCapture • ECDSA P-256 Signature • Invisible Pixel Watermark
+                  Signs the image with this browser’s key. Source and creator are self-declared.
+                </p>
+                <p className="text-[10px] text-zinc-600 leading-snug mt-1">
+                  Exported proof includes the site origin, page title, time, key and optional creator handle. Paths, query strings and fragments are omitted.
+                  Previously saved images retain their existing metadata.
                 </p>
               </div>
             </div>
@@ -301,7 +305,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-[10.5px] font-semibold text-zinc-800">
-                  Creator / Owner Handle (Sealed in Cryptographic Proof)
+                  Creator handle (self-declared)
                 </label>
                 {form.proofAuthor && (
                   <span className="text-[9.5px] font-mono text-emerald-700 font-semibold">
@@ -336,7 +340,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                   &ldquo;Receipt Mode&rdquo; Visual Provenance Footer
                 </span>
                 <span className="text-[10px] text-zinc-600 block mt-0.5 leading-snug">
-                  Renders a sleek footer bar on the screenshot showing URL, UTC timestamp, and your Key ID.
+                  Adds a footer showing the site origin, UTC timestamp, and your key ID.
                 </span>
               </div>
             </label>
@@ -689,7 +693,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
 
           <div className="bg-white border border-zinc-200/80 rounded-xl p-3 space-y-2 shadow-2xs text-xs">
             <p className="text-zinc-700 leading-relaxed text-[11.5px]">
-              Yoink uses Chromium native <b>Shape Detection API</b> (<code className="bg-zinc-100 px-1 py-0.5 rounded text-[10px] font-mono">window.TextDetector</code>) and Chrome Prompt API (<code className="bg-zinc-100 px-1 py-0.5 rounded text-[10px] font-mono">Gemini Nano</code>) for instant on-device text recognition.
+              Yoink uses the browser’s native <b>TextDetector</b> when available. If the browser does not support it, text recognition is unavailable.
             </p>
             <div className="p-2.5 rounded-lg bg-zinc-50 border border-zinc-200/60 text-[11px] text-zinc-600 space-y-1">
               <div className="font-semibold text-zinc-800">How to use OCR:</div>

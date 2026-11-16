@@ -408,6 +408,16 @@ function canonicalManifestString(m: Omit<YoinkProofManifest, 'sig'>): string {
   return parts.join('|');
 }
 
+/** Include only the site origin in newly created proof, never a path, query or fragment. */
+export function proofSiteOrigin(value?: string): string {
+  try {
+    const url = new URL(value || '');
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : '';
+  } catch {
+    return '';
+  }
+}
+
 export async function createSignedProofManifest(params: {
   rgba: Uint8ClampedArray | Uint8Array;
   width: number;
@@ -415,6 +425,7 @@ export async function createSignedProofManifest(params: {
   url?: string;
   title?: string;
   author?: string;
+  source?: string;
   timestamp?: number;
   identity?: ProofIdentity;
   bitstreamHash?: string;
@@ -427,7 +438,7 @@ export async function createSignedProofManifest(params: {
 
   const unsigned: Omit<YoinkProofManifest, 'sig'> = {
     v: PROOF_VERSION,
-    src: IPTC_SCREEN_CAPTURE_URI,
+    src: params.source ?? IPTC_SCREEN_CAPTURE_URI,
     alg: 'ES256',
     kid: identity.keyFingerprint,
     pub: identity.pubRawB64Url,
@@ -436,7 +447,7 @@ export async function createSignedProofManifest(params: {
     ts: params.timestamp ?? Date.now(),
     w: params.width,
     h: params.height,
-    u: (params.url || '').slice(0, 180),
+    u: proofSiteOrigin(params.url).slice(0, 180),
     t: (params.title || 'Screenshot').slice(0, 100),
     a: (params.author || '').trim().slice(0, 60),
   };
@@ -513,9 +524,10 @@ export function embedLsbWatermark(
     return false;
   }
 
-  // Normalize Alpha=255 across all pixels so premultiplied alpha never mutates RGB
+  // LSBs cannot be reliably preserved through canvas encoding on transparent pixels.
+  // Keep transparency intact and use signed container metadata instead.
   for (let i = 3; i < rgba.length; i += 4) {
-    rgba[i] = 255;
+    if (rgba[i] !== 255) return false;
   }
 
   const packet = new Uint8Array(packetLen);
@@ -611,7 +623,7 @@ function escapeXml(str: string): string {
 export function buildXmpPacket(manifest: YoinkProofManifest): string {
   const manifestB64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(manifest)));
   const isoDate = new Date(manifest.ts).toISOString();
-  const creator = escapeXml(manifest.a || `Yoink Verified User (${manifest.kid})`);
+  const creator = escapeXml(manifest.a || `Unspecified (${manifest.kid})`);
 
   return [
     '<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>',
@@ -622,10 +634,10 @@ export function buildXmpPacket(manifest: YoinkProofManifest): string {
     ' xmlns:dc="http://purl.org/dc/elements/1.1/"',
     ' xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"',
     ' xmlns:yoink="https://yoink.capture/ns/1.0/"',
-    ' xmp:CreatorTool="Yoink Chrome Extension (Verified Screen Capture)"',
+    ' xmp:CreatorTool="Yoink Chrome Extension"',
     ` xmp:CreateDate="${isoDate}"`,
-    ` Iptc4xmpExt:DigitalSourceType="${IPTC_SCREEN_CAPTURE_URI}"`,
-    ` yoink:DigitalSourceType="${IPTC_SCREEN_CAPTURE_URI}"`,
+    manifest.src ? ` Iptc4xmpExt:DigitalSourceType="${escapeXml(manifest.src)}"` : '',
+    manifest.src ? ` yoink:DigitalSourceType="${escapeXml(manifest.src)}"` : '',
     ` yoink:KeyFingerprint="${escapeXml(manifest.kid)}"`,
     ` yoink:PixelHash="${escapeXml(manifest.ph)}"`,
     ` yoink:Signature="${escapeXml(manifest.sig)}"`,
@@ -694,7 +706,7 @@ export function injectContainerMetadata(
     const insertOffset = 8 + 12 + ihdrLen; // Right after IHDR chunk (typically 33)
     if (insertOffset <= bytes.length) {
       const xmpChunk = makePngItxtChunk('XML:com.adobe.xmp', xmp);
-      const iptcChunk = makePngTextChunk('DigitalSourceType', IPTC_SCREEN_CAPTURE_URI);
+      const iptcChunk = manifest.src ? makePngTextChunk('DigitalSourceType', manifest.src) : new Uint8Array();
       const proofChunk = makePngTextChunk('yoink-proof', manifestJson);
 
       const out = new Uint8Array(
@@ -886,7 +898,7 @@ export async function verifyImageBufferAndPixels(params: {
   // falling back to the LSB pixel watermark when container metadata was stripped.
   const manifest = container.manifest || pixelManifest || undefined;
   const hasMetadataProof = !!container.manifest;
-  const hasPixelWatermark = !!pixelManifest || !!container.manifest;
+  const hasPixelWatermark = !!pixelManifest;
   const hasIptcScreenCapture =
     container.hasIptcScreenCapture || manifest?.src === IPTC_SCREEN_CAPTURE_URI;
 
@@ -930,7 +942,10 @@ export async function verifyImageBufferAndPixels(params: {
     bitstreamHashMatches = actualBh === container.manifest.bh;
   }
 
-  const pixelsIntact = pixelHashMatches || bitstreamHashMatches;
+  // A valid signed container hash covers transparency and the full encoded image.
+  // Use the pixel hash only when no valid signed container hash is available.
+  const hasSignedBitstream = signatureValid && activeManifest === container.manifest && !!container.manifest?.bh;
+  const pixelsIntact = hasSignedBitstream ? bitstreamHashMatches : pixelHashMatches;
   const isOwnCapture =
     activeManifest.pub === localIdentity.pubRawB64Url &&
     activeManifest.kid === localIdentity.keyFingerprint;
@@ -972,8 +987,8 @@ export async function verifyImageBufferAndPixels(params: {
     verified: true,
     status: 'authentic',
     summary: isOwnCapture
-      ? 'Verified Authentic Yoink Capture — Signed by your browser key and 100% untampered.'
-      : `Verified Authentic Yoink Capture — Signed by key #${activeManifest.kid} and 100% untampered.`,
+      ? 'Signature and image integrity verified with this browser’s key. The declared source and author are not independently verified.'
+      : `Signature and image integrity verified with key #${activeManifest.kid}. The signer, source, and author are not independently verified.`,
     hasMetadataProof,
     hasPixelWatermark,
     hasIptcScreenCapture,
@@ -1128,6 +1143,7 @@ export async function applyProofToCanvasAndEncode(
     proofVisualStamp?: boolean;
     url?: string;
     title?: string;
+    source?: string;
   }
 ): Promise<{
   dataUrl: string;
@@ -1146,7 +1162,7 @@ export async function applyProofToCanvasAndEncode(
 
   if (options.proofVisualStamp) {
     targetCanvas = renderVisualStampOnCanvas(sourceCanvas, {
-      url: options.url,
+      url: proofSiteOrigin(options.url),
       author: options.proofAuthor,
       keyFingerprint: identity.keyFingerprint,
       timestamp,
@@ -1155,14 +1171,12 @@ export async function applyProofToCanvasAndEncode(
 
   let pixelManifest: YoinkProofManifest | null = null;
   let precomputedPh: string | undefined;
+  let pixelWatermarkEmbedded = false;
 
   if (options.enableProof !== false) {
     const ctx = targetCanvas.getContext('2d');
     if (ctx && typeof ctx.getImageData === 'function' && typeof ctx.putImageData === 'function') {
       const imageData = ctx.getImageData(0, 0, targetCanvas.width, targetCanvas.height);
-      for (let i = 3; i < imageData.data.length; i += 4) {
-        imageData.data[i] = 255;
-      }
       precomputedPh = await computeMaskedPixelHash(
         imageData.data,
         targetCanvas.width,
@@ -1175,12 +1189,13 @@ export async function applyProofToCanvasAndEncode(
         url: options.url,
         title: options.title,
         author: options.proofAuthor,
+        source: options.source,
         timestamp,
         identity,
         precomputedPixelHash: precomputedPh,
       });
-      embedLsbWatermark(imageData.data, pixelManifest);
-      ctx.putImageData(imageData, 0, 0);
+      pixelWatermarkEmbedded = embedLsbWatermark(imageData.data, pixelManifest);
+      if (pixelWatermarkEmbedded) ctx.putImageData(imageData, 0, 0);
     }
   }
 
@@ -1197,6 +1212,7 @@ export async function applyProofToCanvasAndEncode(
         url: options.url,
         title: options.title,
         author: options.proofAuthor,
+        source: options.source,
         timestamp,
         identity,
         precomputedPixelHash: precomputedPh || pixelManifest.ph,
@@ -1220,6 +1236,6 @@ export async function applyProofToCanvasAndEncode(
     width: targetCanvas.width,
     height: targetCanvas.height,
     proofKeyId: pixelManifest?.kid,
-    proofSigned: !!pixelManifest,
+    proofSigned: pixelWatermarkEmbedded,
   };
 }

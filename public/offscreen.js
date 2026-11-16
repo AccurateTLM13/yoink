@@ -11,6 +11,15 @@ const MAX_AREA = 16000 * 8192;
 const JOB_TTL_MS = 2 * 60 * 1000;
 const DATA_IMAGE_RE = /^data:image\/(png|jpeg|webp);base64,/;
 
+function proofSiteOriginOffscreen(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : '';
+  } catch {
+    return '';
+  }
+}
+
 /** jobId -> stitch job */
 const jobs = new Map();
 
@@ -92,6 +101,7 @@ function initJobCanvas(job, img) {
     height = Math.max(h, Math.round(job.totalHeight * job.scale));
   }
 
+  job.requestedHeight = height;
   height = Math.max(1, Math.min(height, MAX_DIMENSION, Math.floor(MAX_AREA / width)));
   job.canvas = new OffscreenCanvas(width, height);
   job.ctx = job.canvas.getContext('2d', { willReadFrequently: true });
@@ -136,7 +146,14 @@ async function stitchEnd({ jobId }) {
   }
 
   try {
-    return await encodeCanvas(canvas, job.settings, job.proofContext);
+    const result = await encodeCanvas(canvas, job.settings, job.proofContext);
+    const incomplete = job.bottom + Math.max(2, job.scale) < job.requestedHeight;
+    return {
+      ...result,
+      warning: incomplete
+        ? 'Partial capture: the page exceeded the capture limit. The bottom is missing.'
+        : undefined,
+    };
   } finally {
     releaseCanvas(canvas);
   }
@@ -326,7 +343,7 @@ async function encodeCanvas(canvas, settings, proofContext) {
 
     if (useVisualStamp && targetCanvas.height + 60 <= MAX_DIMENSION) {
       stampedCanvas = drawVisualStampOffscreen(targetCanvas, {
-        url: proofContext.url,
+        url: proofSiteOriginOffscreen(proofContext.url),
         author: settings?.proofAuthor || proofContext.author || '',
         keyFingerprint: proofContext.identity.keyFingerprint,
         timestamp,
@@ -542,9 +559,10 @@ async function signAndWatermarkOffscreenCanvas(canvas, { identity, url, title, a
   const totalPixels = Math.min(Math.floor(rgba.length / 4), width * height);
   const carrierCount = Math.min(totalPixels, WATERMARK_CARRIER_PIXELS);
 
-  // Normalize Alpha to 255 across all pixels before hashing so premultiplied alpha never mutates RGB
+  // Preserve transparent pixels; transparent images use signed container metadata.
+  let opaque = true;
   for (let i = 3; i < rgba.length; i += 4) {
-    rgba[i] = 255;
+    if (rgba[i] !== 255) { opaque = false; break; }
   }
 
   // Compute masked pixel SHA-256 hash
@@ -561,6 +579,7 @@ async function signAndWatermarkOffscreenCanvas(canvas, { identity, url, title, a
     buf[i + 2] = buf[i + 2] & 0xfe;
     buf[i + 3] = 0xff;
   }
+  for (let i = carrierEndByte; i < buf.length; i += 4) buf[i + 3] = 0xff;
 
   const ph = bytesToBase64UrlOffscreen(new Uint8Array(await crypto.subtle.digest('SHA-256', buf)));
 
@@ -574,7 +593,7 @@ async function signAndWatermarkOffscreenCanvas(canvas, { identity, url, title, a
     ts: timestamp,
     w: width,
     h: height,
-    u: String(url || '').slice(0, 180),
+    u: proofSiteOriginOffscreen(url).slice(0, 180),
     t: String(title || 'Screenshot').slice(0, 100),
     a: String(author || '').trim().slice(0, 60),
   };
@@ -604,7 +623,7 @@ async function signAndWatermarkOffscreenCanvas(canvas, { identity, url, title, a
   const totalBits = packetLen * 8;
   const requiredPixels = Math.ceil(totalBits / 3);
 
-  if (requiredPixels <= carrierCount) {
+  if (opaque && requiredPixels <= carrierCount) {
     const packet = new Uint8Array(packetLen);
     packet.set(MAGIC_BYTES, 0);
     packet[4] = PROOF_VERSION;
@@ -706,7 +725,7 @@ function escapeXmlOffscreen(str) {
 function buildXmpPacketOffscreen(manifest) {
   const manifestB64 = bytesToBase64Offscreen(new TextEncoder().encode(JSON.stringify(manifest)));
   const isoDate = new Date(manifest.ts).toISOString();
-  const creator = escapeXmlOffscreen(manifest.a || `Yoink Verified User (${manifest.kid})`);
+  const creator = escapeXmlOffscreen(manifest.a || `Unspecified (${manifest.kid})`);
 
   return [
     '<?xpacket begin="\uFEFF" id="W5M0MpCehiHzreSzNTczkc9d"?>',
@@ -717,7 +736,7 @@ function buildXmpPacketOffscreen(manifest) {
     ' xmlns:dc="http://purl.org/dc/elements/1.1/"',
     ' xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"',
     ' xmlns:yoink="https://yoink.capture/ns/1.0/"',
-    ' xmp:CreatorTool="Yoink Chrome Extension (Verified Screen Capture)"',
+    ' xmp:CreatorTool="Yoink Chrome Extension"',
     ` xmp:CreateDate="${isoDate}"`,
     ` Iptc4xmpExt:DigitalSourceType="${IPTC_SCREEN_CAPTURE_URI}"`,
     ` yoink:DigitalSourceType="${IPTC_SCREEN_CAPTURE_URI}"`,

@@ -230,6 +230,9 @@ export async function createPdfBlobUrl(sources: string[], title: string): Promis
 export async function exportPdf(sources: string[], baseName: string): Promise<void> {
   const clean = (baseName || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) || 'capture';
   const url = await createPdfBlobUrl(sources, baseName || 'Yoink Export');
-  downloadDataUrl(url, `${clean}_${Date.now()}.pdf`);
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  try {
+    await downloadDataUrl(url, `${clean}_${Date.now()}.pdf`);
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
 }
