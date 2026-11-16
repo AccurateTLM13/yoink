@@ -63,35 +63,30 @@ function safeHostname(url?: string): string {
 }
 
 const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = React.memo(({ item, isFullTab }) => {
-  // If item has a full-resolution dataUrl (> 50KB), use it directly for crisp rendering
   const initial = (item.dataUrl && item.dataUrl.length > 50000) ? item.dataUrl : (item.thumbnailUrl || item.dataUrl || null);
   const [src, setSrc] = useState<string | null>(initial);
   const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
-
-    // If item.dataUrl is already the full high-res image, use it!
     if (item.dataUrl && item.dataUrl.length > 50000) {
       setSrc(item.dataUrl);
       setLoadFailed(false);
       return;
     }
 
-    // Set immediate preview
     if (item.thumbnailUrl || item.dataUrl) {
       setSrc(item.thumbnailUrl || item.dataUrl);
       setLoadFailed(false);
+      return;
     }
 
-    // Thumbnails stay lightweight; fetch the original only for legacy items without one.
-    if (item.thumbnailUrl || item.dataUrl) return;
     getFullResolutionImage(item.id).then((full) => {
       if (isMounted) {
         if (full) {
           setSrc(full);
           setLoadFailed(false);
-        } else if (!item.thumbnailUrl && !item.dataUrl) {
+        } else {
           setLoadFailed(true);
         }
       }
@@ -111,13 +106,15 @@ const HistoryThumbnail: React.FC<{ item: HistoryItem; isFullTab?: boolean }> = R
       src={src}
       alt={item.title}
       onError={() => {
-        getFullResolutionImage(item.id).then((full) => {
-          if (full && full !== src) {
-            setSrc(full);
-          } else {
-            setLoadFailed(true);
-          }
-        });
+        getFullResolutionImage(item.id)
+          .then((full) => {
+            if (full && full !== src) {
+              setSrc(full);
+            } else {
+              setLoadFailed(true);
+            }
+          })
+          .catch(() => setLoadFailed(true));
       }}
       className={`w-full h-full object-cover object-top transition-transform duration-200 ${
         isFullTab ? 'group-hover:scale-102' : 'group-hover:scale-105'
@@ -152,9 +149,16 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [actionMessage, setActionMessage] = useState('');
+  const [imageError, setImageError] = useState('');
   const [visibleCount, setVisibleCount] = useState(40);
 
   useEffect(() => setVisibleCount(40), [search, activeFilter]);
+
+  const originalFor = async (item: HistoryItem) => {
+    const src = (await getFullResolutionImage(item.id)) || item.dataUrl;
+    if (!src) setImageError(`Original image unavailable for ${item.title}. The thumbnail is preview only.`);
+    return src;
+  };
 
   const filtered = useMemo(() => {
     let list = history;
@@ -178,8 +182,8 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   const handleCopy = async (e: React.MouseEvent, item: HistoryItem) => {
     e.stopPropagation();
-    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl;
-    if (!imageSrc) { setActionMessage(`The original image for “${item.title}” is unavailable.`); return; }
+    const imageSrc = await originalFor(item);
+    if (!imageSrc) return;
     const success = await copyImageToClipboard(imageSrc);
     if (success) {
       setCopiedId(item.id);
@@ -189,8 +193,8 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   const handleDownload = async (e: React.MouseEvent, item: HistoryItem) => {
     e.stopPropagation();
-    const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl;
-    if (!imageSrc) { setActionMessage(`The original image for “${item.title}” is unavailable.`); return; }
+    const imageSrc = await originalFor(item);
+    if (!imageSrc) return;
     const ext = item.format || 'png';
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
     const filename = `${cleanTitle}_${Date.now()}.${ext}`;
@@ -209,21 +213,34 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
     setDownloadingAll(true);
     const failures: string[] = [];
-    try { for (let idx = 0; idx < itemsToDownload.length; idx++) {
-      const item = itemsToDownload[idx];
-      const imageSrc = (await getFullResolutionImage(item.id)) || item.dataUrl;
-      if (imageSrc) {
+    try {
+      for (let idx = 0; idx < itemsToDownload.length; idx++) {
+        const item = itemsToDownload[idx];
+        const imageSrc = await originalFor(item);
+        if (!imageSrc) {
+          setDownloadingAll(false);
+          return;
+        }
         const ext = item.format || 'png';
         const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
         const filename = `${cleanTitle}_${item.id.slice(-4)}.${ext}`;
-        try { await downloadDataUrl(imageSrc, filename); } catch { failures.push(item.title); }
+        try {
+          await downloadDataUrl(imageSrc, filename);
+        } catch {
+          failures.push(item.title);
+        }
         if (idx < itemsToDownload.length - 1) {
           await new Promise((r) => setTimeout(r, 150));
         }
-      } else failures.push(item.title);
+      }
+      setActionMessage(
+        failures.length
+          ? `Could not save ${failures.length} capture(s): ${failures.join(', ')}.`
+          : `Exported ${itemsToDownload.length} capture(s).`
+      );
+    } finally {
+      setDownloadingAll(false);
     }
-    setActionMessage(failures.length ? `Could not save ${failures.length} capture(s): ${failures.join(', ')}.` : `Exported ${itemsToDownload.length} capture(s).`);
-    } finally { setDownloadingAll(false); }
   };
 
   const handleExportAllPdf = async (e?: React.MouseEvent) => {
@@ -234,8 +251,8 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
     try {
       const sources: string[] = [];
       for (const item of items) {
-        const src = (await getFullResolutionImage(item.id)) || item.dataUrl;
-        if (!src) throw new Error(`The original image for “${item.title}” is unavailable.`);
+        const src = await originalFor(item);
+        if (!src) return;
         sources.push(src);
       }
       if (sources.length > 0) {
@@ -274,6 +291,14 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
   return (
     <div className="flex flex-col h-full bg-[#fbfbfd] text-zinc-900 font-sans select-none overflow-hidden">
+      {imageError && (
+        <div role="alert" className="p-3 bg-amber-50 text-amber-950 border border-amber-300 text-xs">
+          {imageError}{' '}
+          <button type="button" onClick={() => setImageError('')} className="underline font-semibold">
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-200/80 bg-white/90 backdrop-blur-xs">
         <button
@@ -382,14 +407,16 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
             </div>
           </div>
           <div className="flex items-center gap-1.5 shrink-0 ml-2">
-            {history.length > 0 && <button
-              onClick={handleDownloadAll}
-              disabled={downloadingAll}
-              className="px-2.5 py-1 text-[11px] font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition cursor-pointer flex items-center gap-1 shadow-xs disabled:opacity-50"
-            >
-              <Download size={12} />
-              <span>{downloadingAll ? 'Saving...' : 'Export gallery'}</span>
-            </button>}
+            {history.length > 0 && (
+              <button
+                onClick={handleDownloadAll}
+                disabled={downloadingAll}
+                className="px-2.5 py-1 text-[11px] font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition cursor-pointer flex items-center gap-1 shadow-xs disabled:opacity-50"
+              >
+                <Download size={12} />
+                <span>{downloadingAll ? 'Saving...' : 'Export gallery'}</span>
+              </button>
+            )}
             {onDismissBatchBanner && (
               <button
                 onClick={onDismissBatchBanner}
@@ -404,7 +431,11 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
             <details className="w-full text-xs text-blue-950">
               <summary className="cursor-pointer font-semibold">Show details</summary>
               <ul className="mt-2 space-y-1 break-words">
-                {recentBatchFailures.map((failure, index) => <li key={`${index}-${failure.target}`}>{failure.target}: {failure.error}</li>)}
+                {recentBatchFailures.map((failure, index) => (
+                  <li key={`${index}-${failure.target}`}>
+                    {failure.target}: {failure.error}
+                  </li>
+                ))}
               </ul>
             </details>
           )}
@@ -414,14 +445,15 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
       {actionMessage && (
         <div role="status" className="mx-3 mt-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs text-zinc-800">
           {actionMessage}
-          <button onClick={() => setActionMessage('')} className="ml-2 font-semibold underline">Dismiss</button>
+          <button onClick={() => setActionMessage('')} className="ml-2 font-semibold underline">
+            Dismiss
+          </button>
         </div>
       )}
 
       {/* Search & Mode Filters */}
       {history.length > 0 && (
         <div className="px-3.5 py-2.5 bg-zinc-50/80 border-b border-zinc-200/70 space-y-2">
-          {/* Search Box */}
           <div className="relative flex items-center">
             <Search size={13} className="absolute left-2.5 text-zinc-400" />
             <input
@@ -441,7 +473,6 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
             )}
           </div>
 
-          {/* Filter Pills */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 scrollbar-none text-[11px]">
             <button
               onClick={() => setActiveFilter('all')}
@@ -568,7 +599,9 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
                       </h4>
 
                       {item.warning && (
-                        <p className="text-[11px] text-amber-800 font-medium" title={item.warning}>{item.warning}</p>
+                        <p className="text-[11px] text-amber-800 font-medium" title={item.warning}>
+                          {item.warning}
+                        </p>
                       )}
 
                       <p className="text-[10px] text-zinc-600 truncate font-mono tabular-nums">
@@ -650,8 +683,12 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
 
                       {deleteConfirmId === item.id ? (
                         <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                          <button onClick={() => confirmDelete(item.id)} className="rounded-md bg-rose-700 px-2 py-1 text-[11px] font-semibold text-white">Delete?</button>
-                          <button onClick={() => setDeleteConfirmId(null)} className="rounded-md px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100">Cancel</button>
+                          <button onClick={() => confirmDelete(item.id)} className="rounded-md bg-rose-700 px-2 py-1 text-[11px] font-semibold text-white">
+                            Delete?
+                          </button>
+                          <button onClick={() => setDeleteConfirmId(null)} className="rounded-md px-2 py-1 text-[11px] text-zinc-700 hover:bg-zinc-100">
+                            Cancel
+                          </button>
                         </div>
                       ) : (
                         <button
@@ -669,7 +706,10 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
               );
             })}
             {filtered.length > visibleCount && (
-              <button onClick={() => setVisibleCount((count) => count + 40)} className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 sm:col-span-full">
+              <button
+                onClick={() => setVisibleCount((count) => count + 40)}
+                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 sm:col-span-full"
+              >
                 Show more ({filtered.length - visibleCount} remaining)
               </button>
             )}

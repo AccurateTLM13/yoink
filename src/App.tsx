@@ -25,6 +25,8 @@ import {
   Stamp,
   Zap,
   Image as ImageIcon,
+  RefreshCw,
+  Play,
 } from 'lucide-react';
 import { BatchFailure, CaptureSettings, HistoryItem } from './types';
 import {
@@ -37,6 +39,7 @@ import {
   addHistoryItem,
   applyOptimalQualityPreset,
   getFullResolutionImage,
+  saveFullResolutionImage,
   copyImageToClipboard,
 } from './utils/storage';
 import { fileToHistoryItem } from './utils/upload';
@@ -48,6 +51,8 @@ import {
   captureDesktop,
   captureAllTabs,
   ensureAllSitesAccess,
+  getInjectableOpenTabs,
+  OpenTabInfo,
 } from './utils/capture';
 import { getOrCreateProofIdentity } from './utils/proof';
 import { QuickMenu } from './components/QuickMenu';
@@ -105,6 +110,10 @@ export default function App() {
   const [copiedItemId, setCopiedItemId] = useState<string | null>(null);
   const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
+  const [openTabs, setOpenTabs] = useState<OpenTabInfo[]>([]);
+  const [selectedTabId, setSelectedTabId] = useState<number | undefined>(undefined);
+  const [isLoadingTabs, setIsLoadingTabs] = useState(false);
+
   const studioUploadRef = useRef<HTMLInputElement>(null);
 
   const [windowWidth, setWindowWidth] = useState(
@@ -133,13 +142,56 @@ export default function App() {
     }
   }, [isFullTab]);
 
+  const refreshOpenTabs = useCallback(async () => {
+    setIsLoadingTabs(true);
+    try {
+      const tabs = await getInjectableOpenTabs();
+      setOpenTabs(tabs);
+      setSelectedTabId((prev) => {
+        if (prev && tabs.some((t) => t.id === prev)) return prev;
+        return tabs[0]?.id;
+      });
+    } finally {
+      setIsLoadingTabs(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isFullTab && view === 'menu') {
+      void refreshOpenTabs();
+    }
+  }, [isFullTab, view, refreshOpenTabs]);
+
   // Load initial settings, history, and Proof Identity, plus check for pending_view from background captures
   useEffect(() => {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get(
+        ['pending_view', 'last_batch_count', 'yoink_last_batch_report', 'yoink_last_capture_error'],
+        (res) => {
+          const captureError = res.yoink_last_capture_error as { error?: string } | undefined;
+          if (captureError?.error) setLastCaptureError(captureError.error);
+          const report = res.yoink_last_batch_report as { count: number; failures: BatchFailure[] } | undefined;
+          if (report) {
+            setRecentBatchCount(report.count ?? 0);
+            setRecentBatchFailures(report.failures || []);
+          }
+          if (res.pending_view) {
+            setView(res.pending_view as CurrentView);
+            if (res.last_batch_count) {
+              setRecentBatchCount(res.last_batch_count);
+            }
+            chrome.storage.local.remove(['pending_view', 'last_batch_count']);
+          }
+        }
+      );
+    }
+
     async function loadInitialData() {
       const s = await getStoredSettings();
       setSettings(s);
       const h = await getStoredHistory();
       setHistory(h);
+
       const editId = new URLSearchParams(window.location.search).get('edit');
       if (editId) {
         const target = h.find((item) => item.id === editId);
@@ -151,6 +203,7 @@ export default function App() {
           setStatusMessage('This capture is no longer available in the gallery.');
         }
       }
+
       try {
         const identity = await getOrCreateProofIdentity();
         setProofKeyId(`#${identity.keyFingerprint}`);
@@ -158,26 +211,7 @@ export default function App() {
         setProofKeyId('Local ECDSA P-256');
       }
     }
-    loadInitialData();
-
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.get(['pending_view', 'last_batch_count', 'yoink_last_batch_report', 'yoink_last_capture_error'], (res) => {
-        const captureError = res.yoink_last_capture_error as { error?: string } | undefined;
-        if (captureError?.error) setLastCaptureError(captureError.error);
-        const report = res.yoink_last_batch_report as { count: number; failures: BatchFailure[] } | undefined;
-        if (report) {
-          setRecentBatchCount(report.count ?? 0);
-          setRecentBatchFailures(report.failures || []);
-        }
-        if (res.pending_view) {
-          setView(res.pending_view as CurrentView);
-          if (res.last_batch_count) {
-            setRecentBatchCount(res.last_batch_count);
-          }
-          chrome.storage.local.remove(['pending_view', 'last_batch_count']);
-        }
-      });
-    }
+    void loadInitialData();
 
     // Listen for storage changes from background worker or popup
     let storageCleanup: (() => void) | undefined;
@@ -218,7 +252,12 @@ export default function App() {
       const msgListener = (msg: any) => {
         if (msg.action === 'CAPTURE_FINISHED' && msg.payload?.item) {
           const item = msg.payload.item as HistoryItem;
-          if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+          if (item.dataUrl) {
+            saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
+          }
+          if (item.historySaved !== false) {
+            setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+          }
           setPreviewItem(item);
           setIsCapturing(false);
           setStatusMessage(item.warning || 'Capture complete!');
@@ -234,20 +273,28 @@ export default function App() {
     };
   }, []);
 
+  const targetTabForCapture = isFullTab ? selectedTabId : undefined;
+
   const handleCaptureFullPage = useCallback(async () => {
     setIsCapturing(true);
     setStatusMessage(settings.captureDelaySec ? `Capturing in ${settings.captureDelaySec}s…` : 'Scanning page...');
     try {
-      // P1-6: close the popup during a countdown so the user can interact with the page.
       if (!isFullTab && settings.captureDelaySec > 0 && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureFullPage(settings, (msg) => {
-        setStatusMessage(msg);
-      });
+      const item = await captureFullPage(
+        settings,
+        (msg) => {
+          setStatusMessage(msg);
+        },
+        targetTabForCapture
+      );
       setStatusMessage(item.warning || 'Full page capture complete!');
       if (item && item.dataUrl) {
-        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
+        if (item.historySaved !== false) {
+          setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        }
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -255,7 +302,7 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureVisible = useCallback(async () => {
     setIsCapturing(true);
@@ -264,10 +311,13 @@ export default function App() {
       if (!isFullTab && settings.captureDelaySec > 0 && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureVisible(settings);
+      const item = await captureVisible(settings, targetTabForCapture);
       setStatusMessage(item.warning || 'Visible viewport captured!');
       if (item && item.dataUrl) {
-        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
+        if (item.historySaved !== false) {
+          setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        }
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -275,20 +325,22 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureSelection = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Select region on page...');
+    setStatusMessage('Select region on target page...');
     try {
-      // In popup mode, close popup after brief delay so user can draw rectangle on webpage
       if (!isFullTab && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureSelection(settings);
+      const item = await captureSelection(settings, targetTabForCapture);
       setStatusMessage(item.warning || 'Selection captured!');
       if (item && item.dataUrl) {
-        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
+        if (item.historySaved !== false) {
+          setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        }
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -296,19 +348,22 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureElement = useCallback(async () => {
     setIsCapturing(true);
-    setStatusMessage('Select scrollable element on page...');
+    setStatusMessage('Select scrollable element on target page...');
     try {
       if (!isFullTab && typeof window !== 'undefined') {
         setTimeout(() => window.close(), 300);
       }
-      const item = await captureScrollingElement(settings);
+      const item = await captureScrollingElement(settings, targetTabForCapture);
       setStatusMessage(item.warning || 'Scrollable element captured!');
       if (item && item.dataUrl) {
-        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
+        if (item.historySaved !== false) {
+          setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        }
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -316,7 +371,7 @@ export default function App() {
     } finally {
       setIsCapturing(false);
     }
-  }, [settings, isFullTab]);
+  }, [settings, isFullTab, targetTabForCapture]);
 
   const handleCaptureDesktop = useCallback(async () => {
     setIsCapturing(true);
@@ -325,7 +380,10 @@ export default function App() {
       const item = await captureDesktop(settings);
       setStatusMessage(item.warning || 'Desktop screen captured!');
       if (item && item.dataUrl) {
-        if (item.historySaved !== false) setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        saveFullResolutionImage(item.id, item.dataUrl).catch(() => {});
+        if (item.historySaved !== false) {
+          setHistory((prev) => [indexItem(item), ...prev.filter((i) => i.id !== item.id)]);
+        }
         setPreviewItem(item);
       }
     } catch (err: any) {
@@ -343,17 +401,26 @@ export default function App() {
       }
       setIsCapturing(true);
       setStatusMessage('Capturing all tabs in window...');
-      const results = await captureAllTabs(settings, (curr, total, title) => {
-        setStatusMessage(`Capturing tab ${curr}/${total}: ${title}`);
-      });
+      let outcomeFailures: BatchFailure[] = [];
+      const results = await captureAllTabs(
+        settings,
+        (curr, total, title) => {
+          setStatusMessage(`Capturing tab ${curr}/${total}: ${title}`);
+        },
+        (outcome) => {
+          outcomeFailures = outcome.failures.map((f) => ({ target: f.target, error: f.reason }));
+        }
+      );
       const updated = await getStoredHistory();
       setHistory(updated);
-      setStatusMessage(results.failures.length
-        ? `Captured ${results.items.length}; ${results.failures.length} items need attention.`
-        : `Captured ${results.items.length} tabs.`);
-      if (results.items.length > 0 || results.failures.length > 0) {
-        setRecentBatchCount(results.items.length);
-        setRecentBatchFailures(results.failures);
+      setStatusMessage(
+        outcomeFailures.length
+          ? `Captured ${results.length}; ${outcomeFailures.length} items need attention.`
+          : `All ${results.length} tabs captured!`
+      );
+      if (results.length > 0 || outcomeFailures.length > 0) {
+        setRecentBatchCount(results.length);
+        setRecentBatchFailures(outcomeFailures);
         setView('history');
       }
     } catch (err: any) {
@@ -428,8 +495,11 @@ export default function App() {
   // Open Yoink Proof™ Inspector for a specific HistoryItem
   const handleSelectVerifyItem = useCallback(async (item: HistoryItem) => {
     const fullUrl = await getFullResolutionImage(item.id);
-    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null);
-    if (!dataUrl) { setStatusMessage('The original image is unavailable.'); return; }
+    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null) || item.thumbnailUrl;
+    if (!dataUrl) {
+      setStatusMessage('The original image is unavailable.');
+      return;
+    }
     setVerifyTarget({ dataUrl, title: item.title });
     if (isFullTab) {
       setView('verify');
@@ -442,8 +512,11 @@ export default function App() {
   const handleQuickCopyItem = useCallback(async (item: HistoryItem, e: React.MouseEvent) => {
     e.stopPropagation();
     const fullUrl = await getFullResolutionImage(item.id);
-    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null);
-    if (!dataUrl) { setStatusMessage('The original image is unavailable.'); return; }
+    const dataUrl = fullUrl || (item.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null) || item.thumbnailUrl;
+    if (!dataUrl) {
+      setStatusMessage('The original image is unavailable.');
+      return;
+    }
     const ok = await copyImageToClipboard(dataUrl);
     if (ok) {
       setCopiedItemId(item.id);
@@ -496,7 +569,6 @@ export default function App() {
   useEffect(() => {
     if (!isFullTab) return;
     const onPaste = (e: ClipboardEvent) => {
-      // Do not intercept paste when user is inside Verify view (VerifyModal handles its own paste)
       if (view === 'verify' || showVerifyModal) return;
       const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'));
       if (files.length > 0) {
@@ -518,19 +590,21 @@ export default function App() {
 
   const handleCopyShortcut = useCallback((shortcut: string, label: string) => {
     if (typeof navigator !== 'undefined' && navigator.clipboard) {
-      navigator.clipboard.writeText(shortcut);
+      void navigator.clipboard.writeText(shortcut);
     }
     setCopiedShortcut(shortcut);
     setStatusMessage(`Shortcut ${shortcut} copied! Navigate to any tab and press it to ${label.toLowerCase()}.`);
     setTimeout(() => setCopiedShortcut(null), 2500);
   }, []);
 
+  const selectedTabObj = openTabs.find((t) => t.id === selectedTabId) || openTabs[0];
+
   // Full Tab Studio Hub View — Reworked Sidebar + Command Center Architecture
   if (isFullTab) {
     const viewMeta: Record<CurrentView, { title: string; subtitle: string }> = {
       menu: {
         title: 'Studio Command Center',
-        subtitle: 'Launch captures, annotate, extract OCR text, automate batches, or verify cryptographic provenance',
+        subtitle: 'Launch captures on any open tab, yoink page media/SVGs, annotate, run offline OCR, or verify provenance',
       },
       history: {
         title: 'Capture Gallery & Vault',
@@ -718,7 +792,7 @@ export default function App() {
                     </button>
 
                     <button
-                      onClick={handleCaptureAllTabs}
+                      onClick={() => handleCaptureAllTabs()}
                       disabled={isCapturing}
                       className="w-full px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer flex items-center justify-between text-zinc-700 hover:bg-indigo-50/80 hover:text-indigo-900 disabled:opacity-50"
                       title="Capture every open tab in this browser window"
@@ -824,7 +898,6 @@ export default function App() {
                   Live Capture Toggles
                 </div>
 
-                {/* Toggle 1: Optimal HD */}
                 <button
                   onClick={handleToggleOptimalHD}
                   className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-zinc-50 transition cursor-pointer text-left"
@@ -845,7 +918,6 @@ export default function App() {
                   </span>
                 </button>
 
-                {/* Toggle 2: Yoink Proof Signing */}
                 <button
                   onClick={handleToggleProof}
                   className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-zinc-50 transition cursor-pointer text-left"
@@ -866,7 +938,6 @@ export default function App() {
                   </span>
                 </button>
 
-                {/* Toggle 3: Receipt Mode Visual Stamp */}
                 <button
                   onClick={handleToggleReceiptStamp}
                   className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-zinc-50 transition cursor-pointer text-left"
@@ -905,7 +976,6 @@ export default function App() {
 
               {/* Right Quick Actions & Status Pill */}
               <div className="flex items-center gap-2 flex-wrap">
-                {/* Live Status Pill */}
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-50 border border-zinc-200/80 text-xs font-mono text-zinc-700 max-w-xs truncate">
                   {isCapturing ? (
                     <Loader2 size={13} className="animate-spin text-blue-600 shrink-0" />
@@ -915,7 +985,6 @@ export default function App() {
                   <span className="truncate">{statusMessage}</span>
                 </div>
 
-                {/* Quick Action: Import Image */}
                 <button
                   onClick={() => studioUploadRef.current?.click()}
                   className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-zinc-100 hover:bg-zinc-200/80 text-zinc-800 transition cursor-pointer flex items-center gap-1.5"
@@ -925,7 +994,6 @@ export default function App() {
                   <span className="hidden lg:inline">Import Image</span>
                 </button>
 
-                {/* Quick Action: Desktop Screen Capture */}
                 <button
                   onClick={handleCaptureDesktop}
                   disabled={isCapturing}
@@ -963,7 +1031,70 @@ export default function App() {
               {/* VIEW 1: COMMAND CENTER ('menu') */}
               {view === 'menu' && (
                 <div className="flex-1 p-5 sm:p-6 lg:p-7 overflow-y-auto space-y-6">
-                  {/* SECTION 1: 4-CARD INSTANT LAUNCHPAD */}
+                  {/* Live Target Browser Tab Selector Bar */}
+                  <div className="bg-gradient-to-r from-blue-50/80 via-white to-indigo-50/50 p-3.5 rounded-2xl border border-blue-200/80 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                        {selectedTabObj?.favIconUrl ? (
+                          <img src={selectedTabObj.favIconUrl} alt="" className="w-4 h-4 rounded-xs object-contain bg-white p-0.5" />
+                        ) : (
+                          <Globe size={15} />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                            Active Target Browser Tab
+                          </label>
+                          <span className="text-[10px] font-mono text-zinc-500">
+                            ({openTabs.length} capturable {openTabs.length === 1 ? 'tab' : 'tabs'} open)
+                          </span>
+                        </div>
+                        {openTabs.length > 0 ? (
+                          <select
+                            value={selectedTabId ?? openTabs[0]?.id ?? ''}
+                            onChange={(e) => setSelectedTabId(Number(e.target.value))}
+                            className="mt-1 w-full text-xs font-semibold text-zinc-900 bg-white hover:bg-zinc-50 border border-zinc-200/90 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer truncate"
+                          >
+                            {openTabs.map((tab) => (
+                              <option key={tab.id} value={tab.id}>
+                                {tab.title} — {tab.url}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <p className="text-xs text-amber-700 font-medium mt-0.5">
+                            No capturable web tabs detected. Open any http:// or https:// website in another tab and click Refresh.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleCaptureFullPage}
+                        disabled={isCapturing}
+                        className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer shadow-2xs disabled:opacity-50"
+                        title="Scroll and stitch the selected target tab"
+                      >
+                        <Play size={11} className="fill-current" />
+                        <span>Capture Target Tab</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={refreshOpenTabs}
+                        disabled={isLoadingTabs}
+                        className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-zinc-100 text-zinc-700 border border-zinc-200 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
+                        title="Refresh open browser tabs"
+                      >
+                        <RefreshCw size={12} className={isLoadingTabs ? 'animate-spin text-blue-600' : ''} />
+                        <span>Refresh</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* SECTION 1: 5-CARD INSTANT LAUNCHPAD */}
                   <div>
                     <div className="flex items-center justify-between mb-3">
                       <div className="flex items-center gap-2">
@@ -1035,7 +1166,7 @@ export default function App() {
 
                       {/* Card 2: Capture All Open Tabs */}
                       <button
-                        onClick={handleCaptureAllTabs}
+                        onClick={() => handleCaptureAllTabs()}
                         disabled={isCapturing}
                         className="group text-left p-4 rounded-2xl bg-gradient-to-br from-indigo-50/70 via-white to-white border border-indigo-200/80 hover:border-indigo-400 hover:shadow-md transition cursor-pointer flex flex-col justify-between gap-3"
                       >
@@ -1109,7 +1240,7 @@ export default function App() {
                             Verify Screenshot Proof™
                           </h3>
                           <p className="text-xs text-zinc-600 mt-0.5 leading-relaxed">
-                            Check a PNG, JPEG, or WebP for a valid signature and image integrity. Provenance is self-declared.
+                            Audit any PNG, JPEG, or WebP for authentic Yoink capture provenance and pixel-level integrity.
                           </p>
                         </div>
                         <div className="pt-2 border-t border-zinc-100 flex items-center justify-between text-[11px] font-mono font-semibold text-emerald-700">
@@ -1153,7 +1284,7 @@ export default function App() {
                               Your Capture Workbench is Empty
                             </h3>
                             <p className="text-xs text-zinc-600 mt-0.5">
-                              Press <kbd className="px-1.5 py-0.5 bg-zinc-100 rounded border border-zinc-200 font-mono text-[10.5px]">Alt+Shift+1</kbd> on any webpage, click <b>Capture Screen</b> above, or drop an image file here to start editing.
+                              Press <kbd className="px-1.5 py-0.5 bg-zinc-100 rounded border border-zinc-200 font-mono text-[10.5px]">Alt+Shift+1</kbd> on any webpage, click <b>Capture Target Tab</b> above, or drop an image file here to start editing.
                             </p>
                           </div>
                         </div>
@@ -1177,7 +1308,6 @@ export default function App() {
                             }}
                             className="group bg-white rounded-xl border border-zinc-200/90 hover:border-blue-300 hover:shadow-md transition overflow-hidden flex flex-col cursor-pointer"
                           >
-                            {/* Thumbnail Preview */}
                             <div className="relative h-32 bg-zinc-100 overflow-hidden border-b border-zinc-100">
                               <img
                                 src={item.thumbnailUrl || item.dataUrl}
@@ -1202,7 +1332,6 @@ export default function App() {
                               </div>
                             </div>
 
-                            {/* Metadata & Direct Tool Strip */}
                             <div className="p-3 flex-1 flex flex-col justify-between gap-2.5">
                               <div>
                                 <h4 className="text-xs font-bold text-zinc-900 truncate group-hover:text-blue-600 transition">
@@ -1213,14 +1342,11 @@ export default function App() {
                                 </p>
                               </div>
 
-                              {/* 1-Click Tool Buttons */}
                               <div className="grid grid-cols-4 gap-1 pt-2 border-t border-zinc-100">
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setIsAnnotatingDirectly(true);
-                                    setIsOcrDirectly(false);
-                                    setPreviewItem(item);
+                                    handleOpenAnnotation(item);
                                   }}
                                   className="py-1 px-1.5 rounded-lg bg-zinc-50 hover:bg-blue-50 text-zinc-700 hover:text-blue-700 font-medium text-[10px] flex items-center justify-center gap-1 transition cursor-pointer"
                                   title="Annotate, Blur PII, or Add Callouts"
@@ -1275,28 +1401,28 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* SECTION 3: TWO-COLUMN SPLIT — WEBPAGE HOTKEYS & AUTOMATION PIPELINES */}
+                  {/* SECTION 3: TWO-COLUMN SPLIT — TARGET TAB CAPTURES & AUTOMATION PIPELINES */}
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                    {/* Left Column (7 cols): Webpage Capture Shortcuts */}
+                    {/* Left Column (7 cols): Webpage Capture Actions & Hotkeys */}
                     <div className="lg:col-span-7 bg-white rounded-2xl border border-zinc-200/90 p-5 space-y-3.5 shadow-2xs">
                       <div className="flex items-center justify-between">
                         <div>
                           <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-zinc-800">
-                            Active Webpage Capture Hotkeys
+                            Target Webpage Capture Modes &amp; Hotkeys
                           </h3>
                           <p className="text-xs text-zinc-500 mt-0.5">
-                            Use these global shortcuts on any website tab, or trigger from the toolbar popup.
+                            Click any row to capture <b className="text-zinc-700">{selectedTabObj ? selectedTabObj.title : 'your target tab'}</b>, or copy its global shortcut.
                           </p>
                         </div>
                         <span className="text-[10.5px] font-mono text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200/70">
-                          Click to copy hotkey
+                          Click to launch
                         </span>
                       </div>
 
                       <div className="space-y-2.5">
                         {/* Row 1: Full Page Stitch */}
                         <div
-                          onClick={() => handleCopyShortcut('Alt+Shift+1', 'Full Page Capture')}
+                          onClick={handleCaptureFullPage}
                           className="p-3 rounded-xl border border-zinc-200/80 hover:border-blue-300 hover:bg-blue-50/30 transition cursor-pointer flex items-center justify-between gap-3"
                         >
                           <div className="flex items-center gap-3 min-w-0">
@@ -1333,7 +1459,7 @@ export default function App() {
 
                         {/* Row 2: Visible Viewport */}
                         <div
-                          onClick={() => handleCopyShortcut('Alt+Shift+3', 'Visible Viewport')}
+                          onClick={handleCaptureVisible}
                           className="p-3 rounded-xl border border-zinc-200/80 hover:border-blue-300 hover:bg-blue-50/30 transition cursor-pointer flex items-center justify-between gap-3"
                         >
                           <div className="flex items-center gap-3 min-w-0">
@@ -1370,7 +1496,7 @@ export default function App() {
 
                         {/* Row 3: Selection Region */}
                         <div
-                          onClick={() => handleCopyShortcut('Alt+Shift+4', 'Selection Region')}
+                          onClick={handleCaptureSelection}
                           className="p-3 rounded-xl border border-zinc-200/80 hover:border-blue-300 hover:bg-blue-50/30 transition cursor-pointer flex items-center justify-between gap-3"
                         >
                           <div className="flex items-center gap-3 min-w-0">
@@ -1380,7 +1506,7 @@ export default function App() {
                             <div className="min-w-0">
                               <h4 className="text-xs font-bold text-zinc-900">Precision Area Selection</h4>
                               <p className="text-[11px] text-zinc-600 truncate">
-                                Interactive crosshair crop overlay with live pixel dimensions on any webpage.
+                                Interactive crosshair crop overlay with live pixel dimensions on your target tab.
                               </p>
                             </div>
                           </div>
@@ -1406,7 +1532,10 @@ export default function App() {
                         </div>
 
                         {/* Row 4: Scrollable DOM Container */}
-                        <div className="p-3 rounded-xl border border-zinc-200/80 bg-zinc-50/50 flex items-center justify-between gap-3">
+                        <div
+                          onClick={handleCaptureElement}
+                          className="p-3 rounded-xl border border-zinc-200/80 hover:border-cyan-300 hover:bg-cyan-50/30 transition cursor-pointer flex items-center justify-between gap-3"
+                        >
                           <div className="flex items-center gap-3 min-w-0">
                             <div className="w-9 h-9 rounded-xl bg-cyan-50 text-cyan-600 flex items-center justify-center shrink-0">
                               <ScrollText size={18} />
@@ -1414,12 +1543,12 @@ export default function App() {
                             <div className="min-w-0">
                               <h4 className="text-xs font-bold text-zinc-900">Scrollable Element Inspector</h4>
                               <p className="text-[11px] text-zinc-600 truncate">
-                                Hover &amp; click nested overflow containers (chat panels, code blocks, tables) via the toolbar popup.
+                                Hover &amp; click nested overflow containers (chat panels, code blocks, tables) on your target tab.
                               </p>
                             </div>
                           </div>
                           <span className="px-2.5 py-1 rounded-lg bg-cyan-50 text-cyan-800 border border-cyan-200 font-mono text-[10.5px] font-semibold shrink-0">
-                            Via Popup
+                            Inspector
                           </span>
                         </div>
                       </div>
@@ -1471,7 +1600,7 @@ export default function App() {
                                   Responsive Device Matrix
                                 </h4>
                                 <p className="text-[11px] text-zinc-600">
-                                  Test Mobile (375px), Tablet (768px), Laptop, and Desktop in one run.
+                                  Test Mobile (390px), Tablet (820px), Laptop, and Desktop in one run.
                                 </p>
                               </div>
                             </div>
@@ -1479,7 +1608,6 @@ export default function App() {
                           </button>
                         </div>
 
-                        {/* Built-in Studio Power Features Summary */}
                         <div className="pt-2 border-t border-zinc-100">
                           <div className="text-[10px] font-mono font-bold uppercase tracking-wider text-zinc-400 mb-2">
                             Included Post-Capture Tools
@@ -1501,7 +1629,6 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Active Engine Status Footer Card */}
                       <div className="p-4 bg-zinc-900 text-white rounded-2xl flex items-center justify-between gap-3 shadow-xs">
                         <div className="space-y-0.5">
                           <div className="flex items-center gap-2 text-[11px] font-mono text-zinc-400">
@@ -1514,7 +1641,7 @@ export default function App() {
                           <p className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
                             <ShieldCheck size={12} />
                             {(settings.enableProof ?? true)
-                              ? `Yoink Proof™ Active (${settings.proofAuthor ? `Creator: ${settings.proofAuthor}` : 'Signed image'})`
+                              ? `Yoink Proof™ Active (${settings.proofAuthor ? `Owner: ${settings.proofAuthor}` : 'IPTC + ECDSA + LSB'})`
                               : 'Yoink Proof™ Signing Disabled'}
                           </p>
                         </div>
@@ -1567,6 +1694,7 @@ export default function App() {
                   onBack={() => setView('menu')}
                   onFinished={handleBatchResults}
                   onPreview={(item) => setPreviewItem(item)}
+                  isFullTab={true}
                 />
               )}
 
@@ -1577,6 +1705,7 @@ export default function App() {
                   onBack={() => setView('menu')}
                   onFinished={handleBatchResults}
                   onPreview={(item) => setPreviewItem(item)}
+                  isFullTab={true}
                 />
               )}
 
@@ -1599,6 +1728,7 @@ export default function App() {
                     setVerifyTarget(null);
                     setView('verify');
                   }}
+                  isFullTab={true}
                 />
               )}
 
@@ -1609,6 +1739,9 @@ export default function App() {
                   isFullTab={true}
                   onBack={() => setView('menu')}
                   onSendToStudio={(newItem) => {
+                    if (newItem.dataUrl) {
+                      saveFullResolutionImage(newItem.id, newItem.dataUrl).catch(() => {});
+                    }
                     setHistory((prev) => [indexItem(newItem), ...prev.filter((i) => i.id !== newItem.id)]);
                     setIsAnnotatingDirectly(false);
                     setIsOcrDirectly(false);
@@ -1633,6 +1766,7 @@ export default function App() {
             item={previewItem}
             initialAnnotating={isAnnotatingDirectly}
             initialOcr={isOcrDirectly}
+            maxSliceHeight={settings.maxSliceHeight}
             onClose={() => {
               setPreviewItem(null);
               setIsAnnotatingDirectly(false);
@@ -1667,7 +1801,7 @@ export default function App() {
             onCaptureSelection={handleCaptureSelection}
             onCaptureElement={handleCaptureElement}
             onCaptureDesktop={handleCaptureDesktop}
-            onCaptureAllTabs={handleCaptureAllTabs}
+            onCaptureAllTabs={() => handleCaptureAllTabs()}
             onOpenUrlBatch={() => setView('urllist')}
             onOpenMultiSize={() => setView('multisize')}
             onOpenHistory={() => setView('history')}
@@ -1754,6 +1888,9 @@ export default function App() {
             isFullTab={false}
             onBack={() => setView('menu')}
             onSendToStudio={(newItem) => {
+              if (newItem.dataUrl) {
+                saveFullResolutionImage(newItem.id, newItem.dataUrl).catch(() => {});
+              }
               setHistory((prev) => [indexItem(newItem), ...prev.filter((i) => i.id !== newItem.id)]);
               setIsAnnotatingDirectly(false);
               setIsOcrDirectly(false);
@@ -1776,7 +1913,12 @@ export default function App() {
           item={previewItem}
           initialAnnotating={isAnnotatingDirectly}
           initialOcr={isOcrDirectly}
-          onOpenAnnotate={typeof chrome !== 'undefined' && !!chrome.runtime?.id && previewItem.historySaved !== false ? handleOpenAnnotation : undefined}
+          maxSliceHeight={settings.maxSliceHeight}
+          onOpenAnnotate={
+            typeof chrome !== 'undefined' && !!chrome.runtime?.id && previewItem.historySaved !== false
+              ? handleOpenAnnotation
+              : undefined
+          }
           onClose={() => {
             setPreviewItem(null);
             setIsAnnotatingDirectly(false);

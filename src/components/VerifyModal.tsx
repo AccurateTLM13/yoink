@@ -70,7 +70,7 @@ export const VerifyModal: React.FC<Props> = ({
 
   useEffect(() => {
     if (initialDataUrl) {
-      runVerification(initialDataUrl, initialTitle || 'Gallery Capture');
+      void runVerification(initialDataUrl, initialTitle || 'Gallery Capture');
     }
   }, [initialDataUrl, initialTitle, runVerification]);
 
@@ -83,7 +83,7 @@ export const VerifyModal: React.FC<Props> = ({
       const reader = new FileReader();
       reader.onload = () => {
         if (typeof reader.result === 'string') {
-          runVerification(reader.result, file.name);
+          void runVerification(reader.result, file.name);
         }
       };
       reader.onerror = () => setError('Failed to read image file.');
@@ -119,7 +119,7 @@ export const VerifyModal: React.FC<Props> = ({
 
   const handleCopyKey = () => {
     if (!identity) return;
-    navigator.clipboard?.writeText(identity.keyFingerprint);
+    void navigator.clipboard?.writeText(identity.keyFingerprint);
     setCopiedKey(true);
     setTimeout(() => setCopiedKey(false), 1800);
   };

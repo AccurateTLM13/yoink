@@ -25,13 +25,6 @@ import {
 } from 'lucide-react';
 import { AnnotationItem, AnnotationTool, HistoryItem } from '../types';
 import {
-  drawArrow,
-  drawRectangle,
-  drawEllipse,
-  drawPen,
-  drawHighlighter,
-  drawPixelateRedaction,
-  drawTextBadge,
   renderAnnotations,
   createAnnotatedComposite,
 } from '../utils/annotation';
@@ -80,9 +73,10 @@ export const AnnotationEditor: React.FC<Props> = ({
   const [showOcr, setShowOcr] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [actionError, setActionError] = useState('');
+  const [ocrTextOverride, setOcrTextOverride] = useState<string | null>(null);
 
   const handleSaveOcrText = async (newText: string) => {
-    item.ocrText = newText;
+    setOcrTextOverride(newText);
     await updateStoredHistoryItem(item.id, { ocrText: newText });
     if (onOcrSaved) onOcrSaved({ ...item, ocrText: newText });
   };
@@ -112,6 +106,29 @@ export const AnnotationEditor: React.FC<Props> = ({
   const currentPointsRef = useRef<{ x: number; y: number }[]>([]);
   const baseImageRef = useRef<HTMLImageElement | null>(null);
 
+  // Redraw annotations on draw canvas
+  const redrawAll = useCallback(
+    (previewItem?: AnnotationItem) => {
+      const drawCanvas = drawCanvasRef.current;
+      const baseCanvas = baseCanvasRef.current;
+      if (!drawCanvas || !baseCanvas) return;
+
+      const ctx = drawCanvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+      // Render committed annotations
+      renderAnnotations(ctx, annotations, baseCanvas);
+
+      // Render active shape preview during drag
+      if (previewItem) {
+        renderAnnotations(ctx, [previewItem], baseCanvas);
+      }
+    },
+    [annotations]
+  );
+
   // Initialize base canvas with original image
   useEffect(() => {
     const img = new Image();
@@ -135,30 +152,7 @@ export const AnnotationEditor: React.FC<Props> = ({
       }
     };
     img.src = imageSrc;
-  }, [imageSrc]);
-
-  // Redraw annotations on draw canvas
-  const redrawAll = useCallback(
-    (previewItem?: AnnotationItem) => {
-      const drawCanvas = drawCanvasRef.current;
-      const baseCanvas = baseCanvasRef.current;
-      if (!drawCanvas || !baseCanvas) return;
-
-      const ctx = drawCanvas.getContext('2d');
-      if (!ctx) return;
-
-      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-
-      // Render committed annotations
-      renderAnnotations(ctx, annotations, baseCanvas);
-
-      // Render active shape preview during drag
-      if (previewItem) {
-        renderAnnotations(ctx, [previewItem], baseCanvas);
-      }
-    },
-    [annotations]
-  );
+  }, [imageSrc, redrawAll]);
 
   useEffect(() => {
     redrawAll();
@@ -231,7 +225,6 @@ export const AnnotationEditor: React.FC<Props> = ({
       return;
     }
 
-    // Shapes & redaction previews
     const preview: AnnotationItem = {
       id: 'preview',
       tool: activeTool,
@@ -253,7 +246,6 @@ export const AnnotationEditor: React.FC<Props> = ({
     const startX = startPosRef.current.x;
     const startY = startPosRef.current.y;
 
-    // Minimum movement check
     const dist = Math.hypot(x - startX, y - startY);
 
     if (activeTool === 'pen' || activeTool === 'highlighter') {
@@ -303,21 +295,21 @@ export const AnnotationEditor: React.FC<Props> = ({
     setTextValue('');
   };
 
-  const handleUndo = () => {
+  const handleUndo = useCallback(() => {
     if (undoStack.length === 0) return;
     const prev = undoStack[undoStack.length - 1];
     setRedoStack((r) => [...r, annotations]);
     setUndoStack((u) => u.slice(0, -1));
     setAnnotations(prev);
-  };
+  }, [undoStack, annotations]);
 
-  const handleRedo = () => {
+  const handleRedo = useCallback(() => {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     setUndoStack((u) => [...u, annotations]);
     setRedoStack((r) => r.slice(0, -1));
     setAnnotations(next);
-  };
+  }, [redoStack, annotations]);
 
   const handleClearAll = () => {
     if (annotations.length === 0) return;
@@ -326,10 +318,10 @@ export const AnnotationEditor: React.FC<Props> = ({
     setAnnotations([]);
   };
 
-  const requestClose = () => {
+  const requestClose = useCallback(() => {
     if (annotations.length > 0 || (textInputState && textValue.trim())) setConfirmDiscard(true);
     else onClose();
-  };
+  }, [annotations.length, textInputState, textValue, onClose]);
 
   useEffect(() => {
     if (annotations.length === 0 && !(textInputState && textValue.trim())) return;
@@ -365,7 +357,7 @@ export const AnnotationEditor: React.FC<Props> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [undoStack, redoStack, annotations, textInputState, textValue, showOcr, confirmDiscard, onClose]);
+  }, [handleUndo, handleRedo, textInputState, showOcr, confirmDiscard, requestClose]);
 
   // Export & Action Handlers
   const handleCopyComposite = async () => {
@@ -379,17 +371,17 @@ export const AnnotationEditor: React.FC<Props> = ({
 
   const handleDownloadComposite = async () => {
     try {
-    const format = item.format || 'png';
-    const composite = await createAnnotatedComposite(
-      imageSrc,
-      annotations,
-      format,
-      0.95
-    );
-    const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
-    const filename = `${cleanTitle}_annotated_${Date.now()}.${format}`;
-    await downloadDataUrl(composite.dataUrl, filename);
-    setActionError('');
+      const format = item.format || 'png';
+      const composite = await createAnnotatedComposite(
+        imageSrc,
+        annotations,
+        format,
+        0.95
+      );
+      const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
+      const filename = `${cleanTitle}_annotated_${Date.now()}.${format}`;
+      await downloadDataUrl(composite.dataUrl, filename);
+      setActionError('');
     } catch (error) {
       setActionError(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -407,28 +399,28 @@ export const AnnotationEditor: React.FC<Props> = ({
 
   const handleSaveToGallery = async () => {
     try {
-    const composite = await createAnnotatedComposite(
-      imageSrc,
-      annotations,
-      item.format || 'png',
-      0.95
-    );
-    const newItem: HistoryItem = {
-      id: `annotated_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      title: `${item.title || 'Capture'} (Annotated)`,
-      url: item.url || '',
-      dataUrl: composite.dataUrl,
-      timestamp: Date.now(),
-      width: composite.width,
-      height: composite.height,
-      mode: 'annotated',
-      format: item.format || 'png',
-    };
+      const composite = await createAnnotatedComposite(
+        imageSrc,
+        annotations,
+        item.format || 'png',
+        0.95
+      );
+      const newItem: HistoryItem = {
+        id: `annotated_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        title: `${item.title || 'Capture'} (Annotated)`,
+        url: item.url || '',
+        dataUrl: composite.dataUrl,
+        timestamp: Date.now(),
+        width: composite.width,
+        height: composite.height,
+        mode: 'annotated',
+        format: item.format || 'png',
+      };
 
-    await addHistoryItem(newItem);
-    setSavedSuccess(true);
-    if (onSaved) onSaved(newItem);
-    setTimeout(() => setSavedSuccess(false), 2200);
+      await addHistoryItem(newItem);
+      setSavedSuccess(true);
+      if (onSaved) onSaved(newItem);
+      setTimeout(() => setSavedSuccess(false), 2200);
     } catch (error) {
       setActionError(`Could not save your edits: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -592,10 +584,7 @@ export const AnnotationEditor: React.FC<Props> = ({
           className="relative transition-transform duration-100 ease-out origin-center inline-block shadow-2xl rounded border border-zinc-800"
           style={{ transform: `scale(${zoomLevel})` }}
         >
-          {/* Base pristine image canvas */}
           <canvas ref={baseCanvasRef} className="block max-w-none" />
-
-          {/* Interactive drawing and redaction canvas overlay */}
           <canvas
             ref={drawCanvasRef}
             onPointerDown={handlePointerDown}
@@ -604,7 +593,6 @@ export const AnnotationEditor: React.FC<Props> = ({
             className="absolute inset-0 block max-w-none touch-none"
           />
 
-          {/* Floating inline text input modal */}
           {textInputState && (
             <div
               className="absolute z-30 flex items-center gap-1 bg-zinc-900 border border-zinc-700 p-1.5 rounded-lg shadow-xl"
@@ -645,7 +633,6 @@ export const AnnotationEditor: React.FC<Props> = ({
 
       {/* Floating Bottom Toolbar Dock */}
       <div className="absolute bottom-3 left-2 right-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 z-30 flex items-center gap-3 overflow-x-auto bg-zinc-900/95 px-3.5 py-2 rounded-2xl border border-zinc-700/80 text-white">
-        {/* Tool selector pills */}
         <div className="flex shrink-0 items-center gap-1 bg-zinc-800/80 p-0.5 rounded-xl border border-zinc-700/60">
           <button
             onClick={() => setActiveTool('select')}
@@ -723,10 +710,8 @@ export const AnnotationEditor: React.FC<Props> = ({
           </button>
         </div>
 
-        {/* Separator */}
         <div className="w-px h-6 bg-zinc-700" />
 
-        {/* Color Palette */}
         <div className="flex shrink-0 items-center gap-1.5">
           {COLOR_PALETTE.map((c) => (
             <button
@@ -746,10 +731,8 @@ export const AnnotationEditor: React.FC<Props> = ({
           ))}
         </div>
 
-        {/* Separator */}
         <div className="w-px h-6 bg-zinc-700" />
 
-        {/* Stroke Width Selector */}
         <div className="flex shrink-0 items-center gap-1 bg-zinc-800/80 p-0.5 rounded-xl border border-zinc-700/60">
           {STROKE_WIDTHS.map((s) => (
             <button
@@ -784,7 +767,7 @@ export const AnnotationEditor: React.FC<Props> = ({
       {showOcr && (
         <OcrDrawer
           dataUrl={imageSrc}
-          initialText={item.ocrText}
+          initialText={ocrTextOverride ?? item.ocrText}
           onSaveText={handleSaveOcrText}
           onClose={() => setShowOcr(false)}
         />

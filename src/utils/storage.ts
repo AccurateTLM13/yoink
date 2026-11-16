@@ -48,7 +48,7 @@ const HISTORY_KEY = 'omnicapture_history';
 const FULL_IMAGE_PREFIX = 'yoink_full_';
 const MAX_HISTORY_ITEMS = 40;
 
-// In-memory full-resolution image cache so signed full images are never lost if localStorage quota is reached
+// In-memory full-resolution image cache
 const memoryFullImageCache = new Map<string, string>();
 
 function cacheFullImage(key: string, dataUrl: string): void {
@@ -113,19 +113,23 @@ export async function createThumbnail(dataUrl: string, targetWidth: number = 720
  */
 export async function saveFullResolutionImage(id: string, dataUrl: string): Promise<void> {
   const key = `${FULL_IMAGE_PREFIX}${id}`;
-  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-    await chrome.storage.local.set({ [key]: dataUrl });
-    cacheFullImage(key, dataUrl);
-    return;
+  cacheFullImage(key, dataUrl);
+
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+      await chrome.storage.local.set({ [key]: dataUrl });
+      return;
+    }
+  } catch (e) {
+    throw new Error('Could not save the original image to the gallery.', { cause: e });
   }
 
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(key, dataUrl);
-      cacheFullImage(key, dataUrl);
     }
   } catch (e) {
-    throw new Error('Could not save the original image to local storage.', { cause: e });
+    throw new Error('Could not save the original image to the gallery.', { cause: e });
   }
 }
 
@@ -134,9 +138,6 @@ export async function saveFullResolutionImage(id: string, dataUrl: string): Prom
  */
 export async function getFullResolutionImage(id: string): Promise<string | null> {
   const key = `${FULL_IMAGE_PREFIX}${id}`;
-  const mem = memoryFullImageCache.get(key);
-  if (mem && mem.length > 0) return mem;
-
   try {
     if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
       const res = await chrome.storage.local.get([key]);
@@ -283,7 +284,6 @@ export async function getStoredHistory(): Promise<HistoryItem[]> {
  * Save new item to history with lightweight indexing and separated full image storage.
  */
 export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> {
-  // Generate thumbnail before writing. The worker serializes all extension history writes.
   let thumb = item.thumbnailUrl;
   if (!thumb && item.dataUrl) {
     thumb = await createThumbnail(item.dataUrl);
@@ -301,9 +301,7 @@ export async function addHistoryItem(item: HistoryItem): Promise<HistoryItem[]> 
   const indexItem: HistoryItem = { ...item, thumbnailUrl: effectiveThumb, dataUrl: '' };
 
   const current = await getStoredHistory();
-  const merged = [indexItem, ...current.filter((i) => i.id !== item.id)];
-  const updated = merged;
-
+  const updated = [indexItem, ...current.filter((i) => i.id !== item.id)];
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
     await chrome.storage.local.set({ [HISTORY_KEY]: updated });
   } else if (typeof localStorage !== 'undefined') {
@@ -394,8 +392,7 @@ export async function copyImageToClipboard(dataUrl: string): Promise<boolean> {
   try {
     const res = await fetch(dataUrl);
     const blob = await res.blob();
-    
-    // Ensure it is image/png for ClipboardItem compatibility across browsers
+
     let pngBlob = blob;
     if (blob.type !== 'image/png') {
       pngBlob = await convertBlobToPng(blob);

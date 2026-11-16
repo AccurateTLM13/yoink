@@ -46,8 +46,20 @@ let activeJobs = 0;
 let lastCaptureAt = 0;
 let captureQueue = Promise.resolve();
 let historyQueue = Promise.resolve();
-/** tabId -> { dataUrls: (string|null)[] } */
+/** tabId -> { jobId, kind, settings, chunkCount, streamedCount, dataUrls, originalZoom } */
 const scrollSessions = new Map();
+
+async function abortScrollSession(tabId) {
+  const session = scrollSessions.get(tabId);
+  if (!session) return;
+  scrollSessions.delete(tabId);
+  if (session.originalZoom != null) {
+    chrome.tabs.setZoom(tabId, session.originalZoom).catch(() => {});
+  }
+  if (session.jobId) {
+    await callOffscreen('STITCH_ABORT', { jobId: session.jobId }).catch(() => {});
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Top-level listener registration (synchronous)
@@ -62,7 +74,7 @@ chrome.runtime.onMessage.addListener(onMessage);
 chrome.alarms.onAlarm.addListener((alarm) => {
   onAlarm(alarm).catch((e) => console.warn('Offscreen idle cleanup failed:', e));
 });
-chrome.tabs.onRemoved.addListener((tabId) => scrollSessions.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => abortScrollSession(tabId));
 
 // ---------------------------------------------------------------------------
 // Message routing
@@ -101,8 +113,8 @@ const ROUTES = {
   },
   CAPTURE_CANCELLED: {
     from: 'content',
-    run: (p, s) => {
-      scrollSessions.delete(s.tab.id);
+    run: async (p, s) => {
+      await abortScrollSession(s.tab.id);
       return { ok: true };
     },
   },
@@ -224,7 +236,8 @@ function captureVisible(windowId, options) {
 async function captureAndEncode(windowId, settings, meta = {}) {
   const png = await captureVisible(windowId, { format: 'png' });
   const proofContext = await buildProofContext(settings, meta.url, meta.title);
-  return callOffscreen('PROCESS_CAPTURE', { dataUrl: png, settings, proofContext });
+  const res = await callOffscreen('PROCESS_CAPTURE', { dataUrl: png, settings, proofContext });
+  return typeof res === 'object' && res ? { ...res, dataUrl: res.dataUrl || png } : res;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +258,7 @@ async function handleCommand(command, tab) {
 // ---------------------------------------------------------------------------
 // 1. Visible viewport
 // ---------------------------------------------------------------------------
-async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings }) {
+async function handleCaptureVisiblePart({ tabId, windowId, title, url, returnToTabId, settings }) {
   const s = await getSettings(settings);
   await runCaptureCountdown(s.captureDelaySec);
 
@@ -258,12 +271,24 @@ async function handleCaptureVisiblePart({ tabId, windowId, title, url, settings 
       winId = winId ?? tab.windowId;
       tabTitle = tabTitle || tab.title;
       tabUrl = tabUrl || tab.url;
+      if (!tab.active && chrome.tabs.update) {
+        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+        await sleep(300);
+      }
     }
   }
 
-  const encoded = await withJob(() =>
-    captureAndEncode(winId, s, { title: tabTitle || 'Visible Viewport', url: tabUrl || '' })
-  );
+  let encoded;
+  try {
+    encoded = await withJob(() =>
+      captureAndEncode(winId, s, { title: tabTitle || 'Visible Viewport', url: tabUrl || '' })
+    );
+  } finally {
+    if (returnToTabId && returnToTabId !== tabId && chrome.tabs.update) {
+      await chrome.tabs.update(returnToTabId, { active: true }).catch(() => {});
+    }
+  }
+
   const item = await finishCapture({
     ...encoded,
     mode: 'visible',
@@ -284,6 +309,10 @@ async function getInjectableTab(tabId, label) {
   if (!tab || !isInjectableUrl(tab.url)) {
     throw new Error(`${label} cannot run on internal browser pages. Please navigate to a standard website.`);
   }
+  if (!tab.active && chrome.tabs.update) {
+    await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    await sleep(250);
+  }
   return tab;
 }
 
@@ -291,19 +320,37 @@ async function injectContentScript(tabId) {
   await chrome.scripting.executeScript({ target: { tabId, allFrames: false }, files: ['content.js'] });
 }
 
-async function handleCaptureSelectionStart({ tabId, settings }) {
+async function handleCaptureSelectionStart({ tabId, returnToTabId, settings }) {
   const tab = await getInjectableTab(tabId, 'Selection capture');
   const s = await getSettings(settings);
-  scrollSessions.set(tab.id, { dataUrls: [], originalZoom: null, settings: s });
+  scrollSessions.set(tab.id, {
+    jobId: null,
+    kind: 'selection',
+    settings: s,
+    chunkCount: 0,
+    streamedCount: 0,
+    dataUrls: [],
+    originalZoom: null,
+    returnToTabId: returnToTabId || null,
+  });
   await injectContentScript(tab.id);
   await chrome.tabs.sendMessage(tab.id, { action: 'START_SELECTION_CAPTURE' });
   return { success: true };
 }
 
-async function handleCaptureElementScrollStart({ tabId, settings }) {
+async function handleCaptureElementScrollStart({ tabId, returnToTabId, settings }) {
   const tab = await getInjectableTab(tabId, 'Scrolling element capture');
   const s = await getSettings(settings);
-  scrollSessions.set(tab.id, { dataUrls: [], originalZoom: null, settings: s });
+  scrollSessions.set(tab.id, {
+    jobId: null,
+    kind: 'element',
+    settings: s,
+    chunkCount: 0,
+    streamedCount: 0,
+    dataUrls: [],
+    originalZoom: null,
+    returnToTabId: returnToTabId || null,
+  });
   await injectContentScript(tab.id);
   ensureOffscreen().catch(() => {});
   await chrome.tabs.sendMessage(tab.id, {
@@ -313,7 +360,7 @@ async function handleCaptureElementScrollStart({ tabId, settings }) {
   return { success: true };
 }
 
-async function handleCaptureFullPage({ tabId, settings }) {
+async function handleCaptureFullPage({ tabId, returnToTabId, settings }) {
   const tab = await getInjectableTab(tabId, 'Full page capture');
   const s = await getSettings(settings);
   await runCaptureCountdown(s.captureDelaySec);
@@ -331,7 +378,17 @@ async function handleCaptureFullPage({ tabId, settings }) {
     }
   }
 
-  scrollSessions.set(tab.id, { dataUrls: [], originalZoom, settings: s });
+  abortScrollSession(tab.id);
+  scrollSessions.set(tab.id, {
+    jobId: null,
+    kind: 'full',
+    settings: s,
+    chunkCount: 0,
+    streamedCount: 0,
+    dataUrls: [],
+    originalZoom,
+    returnToTabId: returnToTabId || null,
+  });
 
   try {
     await chrome.tabs.sendMessage(tab.id, {
@@ -339,37 +396,74 @@ async function handleCaptureFullPage({ tabId, settings }) {
       payload: { scrollDelay: s.scrollDelayMs, hideSticky: s.hideStickyElements },
     });
   } catch (err) {
-    if (originalZoom != null) {
-      chrome.tabs.setZoom(tab.id, originalZoom).catch(() => {});
-    }
+    abortScrollSession(tab.id);
     throw err;
   }
   return { success: true };
 }
 
 // ---------------------------------------------------------------------------
-// 3. Content-script pipeline (chunks stay in the worker)
+// 3. Content-script pipeline (chunks stream directly to offscreen canvas)
 // ---------------------------------------------------------------------------
 async function handleChunkCapture(payload, sender) {
   const tabId = sender.tab.id;
   const index = Math.max(0, Math.floor(Number(payload.index) || 0));
+  const kind = payload.kind === 'element' ? 'element' : 'full';
+
   if (index === 0) {
     const existing = scrollSessions.get(tabId);
+    if (existing?.jobId) {
+      callOffscreen('STITCH_ABORT', { jobId: existing.jobId }).catch(() => {});
+    }
+    const s = existing?.settings || (await getSettings());
+    const jobId = crypto.randomUUID();
+    const capTitle = str(payload.title, 200) || (kind === 'element' ? 'Scrolling Element Capture' : 'Full Page Capture');
+    const capUrl = sender.url || sender.tab.url || '';
+    const proofContext = await buildProofContext(s, capUrl, capTitle);
+    await callOffscreen('STITCH_BEGIN', {
+      jobId,
+      kind,
+      totalWidth: num(payload.totalWidth, 0),
+      totalHeight: num(payload.totalHeight, 0),
+      dpr: num(payload.dpr, 1),
+      cropRect: kind === 'element' ? sanitizeRect(payload.cropRect) : null,
+      settings: s,
+      proofContext,
+    });
     scrollSessions.set(tabId, {
+      jobId,
+      kind,
+      settings: s,
+      chunkCount: 0,
+      streamedCount: 0,
       dataUrls: [],
       originalZoom: existing?.originalZoom ?? null,
-      settings: existing?.settings ?? null,
+      returnToTabId: existing?.returnToTabId ?? null,
     });
   }
 
   const session = scrollSessions.get(tabId);
   if (!session) throw new Error('No active scroll session');
-  if (session.dataUrls.length >= MAX_CHUNKS) throw new Error('Chunk limit reached');
+  if (session.chunkCount >= MAX_CHUNKS) throw new Error('Chunk limit reached');
   if (!sender.tab.active) throw new Error('Tab is not visible');
 
   const dataUrl = await captureVisible(sender.tab.windowId, { format: 'png' });
-  session.dataUrls.push(dataUrl);
-  return { ok: true, index: session.dataUrls.length - 1 };
+  const capturedIndex = session.chunkCount++;
+
+  if (session.jobId) {
+    await withJob(() =>
+      callOffscreen('STITCH_ADD', {
+        jobId: session.jobId,
+        dataUrl,
+        yOffset: num(payload.yOffset, 0),
+      })
+    );
+    session.streamedCount++;
+  } else {
+    session.dataUrls.push(dataUrl);
+  }
+
+  return { ok: true, index: capturedIndex };
 }
 
 function handleFinalizeStitching(payload, sender, kind) {
@@ -380,12 +474,15 @@ function handleFinalizeStitching(payload, sender, kind) {
   if (session?.originalZoom != null) {
     chrome.tabs.setZoom(tabId, session.originalZoom).catch(() => {});
   }
+  if (session?.returnToTabId && session.returnToTabId !== tabId && chrome.tabs.update) {
+    chrome.tabs.update(session.returnToTabId, { active: true }).catch(() => {});
+  }
 
   runPipeline(kind, async () => {
-    if (!session || session.dataUrls.length === 0) throw new Error('No image chunks received for stitching');
+    if (!session || (session.streamedCount === 0 && session.dataUrls.length === 0)) {
+      throw new Error('No image chunks received for stitching');
+    }
     const s = await getSettings(session.settings);
-    const meta = Array.isArray(payload.chunks) ? payload.chunks : [];
-    const jobId = crypto.randomUUID();
 
     const fallbackTitle = kind === 'element' ? 'Scrolling Element Capture' : 'Full Page Capture';
     const capTitle = str(payload.title, 200) || fallbackTitle;
@@ -393,6 +490,11 @@ function handleFinalizeStitching(payload, sender, kind) {
     const proofContext = await buildProofContext(s, capUrl, capTitle);
 
     const result = await withJob(async () => {
+      if (session.jobId && session.streamedCount > 0) {
+        return callOffscreen('STITCH_END', { jobId: session.jobId });
+      }
+      const meta = Array.isArray(payload.chunks) ? payload.chunks : [];
+      const jobId = crypto.randomUUID();
       await callOffscreen('STITCH_BEGIN', {
         jobId,
         kind,
@@ -408,7 +510,7 @@ function handleFinalizeStitching(payload, sender, kind) {
         const dataUrl = session.dataUrls[i];
         if (!dataUrl) continue;
         await callOffscreen('STITCH_ADD', { jobId, dataUrl, yOffset: num(m.yOffset, 0) });
-        session.dataUrls[i] = null; // Release memory as soon as the chunk is drawn.
+        session.dataUrls[i] = null;
       }
       return callOffscreen('STITCH_END', { jobId });
     });
@@ -428,7 +530,6 @@ function handleFinalizeStitching(payload, sender, kind) {
 function handleCaptureSelectionFinish(payload, sender) {
   const rect = sanitizeRect(payload);
   if (!rect) throw new Error('Invalid selection bounds');
-
   const tabId = sender.tab.id;
   const session = scrollSessions.get(tabId);
   scrollSessions.delete(tabId);
@@ -439,7 +540,9 @@ function handleCaptureSelectionFinish(payload, sender) {
     const capUrl = sender.url || sender.tab.url || '';
     const proofContext = await buildProofContext(s, capUrl, capTitle);
     const raw = await captureVisible(sender.tab.windowId, { format: 'png' });
-    // Build the payload explicitly. Never spread untrusted input over trusted fields.
+    if (session?.returnToTabId && session.returnToTabId !== tabId && chrome.tabs.update) {
+      chrome.tabs.update(session.returnToTabId, { active: true }).catch(() => {});
+    }
     const result = await withJob(() =>
       callOffscreen('CROP_SELECTION', {
         dataUrl: raw,
@@ -501,6 +604,7 @@ async function finishCapture(o) {
     height,
     mode: o.mode,
     format: s.format,
+    ...(o.viewport ? { viewport: o.viewport } : {}),
     proofKeyId: o.proofKeyId || undefined,
     proofSigned: o.proofSigned === true,
     warning: o.warning || undefined,
@@ -530,22 +634,22 @@ async function finishCapture(o) {
     try {
       if (s.autoSliceLongPages && o.mode === 'full' && height > (s.maxSliceHeight || 4000)) {
         try {
-        const sliceProofContext = await buildProofContext(s, item.url, item.title);
-        const sliceRes = await callOffscreen('SLICE_IMAGE', {
-          dataUrl: item.dataUrl,
-          maxSliceHeight: s.maxSliceHeight || 4000,
-          settings: s,
-          proofContext: sliceProofContext,
-        });
-        if (sliceRes && Array.isArray(sliceRes.slices) && sliceRes.slices.length > 1) {
-          for (const slice of sliceRes.slices) {
-            const partFn = filename.replace(/(\.[a-z0-9]+)$/i, `_part${slice.part}_of_${slice.total}$1`);
-            await downloadSafe(slice.dataUrl, partFn);
-            await sleep(150);
+          const sliceProofContext = await buildProofContext(s, item.url, item.title);
+          const sliceRes = await callOffscreen('SLICE_IMAGE', {
+            dataUrl: item.dataUrl,
+            maxSliceHeight: s.maxSliceHeight || 4000,
+            settings: s,
+            proofContext: sliceProofContext,
+          });
+          if (sliceRes && Array.isArray(sliceRes.slices) && sliceRes.slices.length > 1) {
+            for (const slice of sliceRes.slices) {
+              const partFn = filename.replace(/(\.[a-z0-9]+)$/i, `_part${slice.part}_of_${slice.total}$1`);
+              await downloadSafe(slice.dataUrl, partFn);
+              await sleep(150);
+            }
+          } else {
+            await downloadSafe(item.dataUrl, filename);
           }
-        } else {
-          await downloadSafe(item.dataUrl, filename);
-        }
         } catch (err) {
           console.warn('Auto-slice download failed, falling back to full image download:', err);
           await downloadSafe(item.dataUrl, filename);
@@ -584,6 +688,7 @@ async function finishCapture(o) {
 
 async function downloadSafe(url, filename) {
   const id = await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' });
+  if (!chrome.downloads?.onChanged || !chrome.downloads?.search) return;
   await new Promise((resolve, reject) => {
     let finished = false;
     const finish = (error) => {
@@ -625,8 +730,6 @@ async function handleDesktopCapture({ settings }) {
   await runCaptureCountdown(s.captureDelaySec);
   await ensureOffscreen();
 
-  // No target tab: the stream id is then bound to the extension origin,
-  // which is the origin of the offscreen document that consumes it.
   const streamId = await new Promise((resolve, reject) => {
     chrome.desktopCapture.chooseDesktopMedia(['screen', 'window'], (id) => {
       if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
@@ -660,51 +763,41 @@ async function requireAllUrls(label) {
 }
 
 function waitForTabComplete(tabId, timeoutMs) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let done = false;
-    const finish = () => {
+    const finish = (error) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
+      if (error) reject(error); else resolve();
     };
     const listener = (id, info) => {
       if (id === tabId && info.status === 'complete') finish();
     };
-    const timer = setTimeout(finish, timeoutMs);
+    const timer = setTimeout(() => finish(new Error('Page did not finish loading in time.')), timeoutMs);
     chrome.tabs.onUpdated.addListener(listener);
-    // The tab can finish loading before the listener is attached.
     chrome.tabs.get(tabId).then((t) => {
       if (t.status === 'complete') finish();
-    }, finish);
+    }, (error) => finish(error));
   });
 }
 
-async function openGallery(count, failures = []) {
-  await chrome.storage.local
-    .set({ pending_view: 'history', last_batch_count: count, yoink_last_batch_report: { count, failures } })
-    .catch((e) => console.error('Failed to set pending_view:', e));
-  if (count > 0 || failures.length > 0) {
-    await chrome.tabs
-      .create({ url: chrome.runtime.getURL(`index.html?view=history&batch=${count}`), active: true })
-      .catch((e) => console.error('Failed to open history gallery tab:', e));
-  }
-}
-
-async function handleCaptureAllTabs({ settings }) {
+async function handleCaptureAllTabs({ settings, tabIds }) {
   await requireAllUrls('Capture all tabs');
   const s = await getSettings(settings);
-  const tabs = await chrome.tabs.query({ lastFocusedWindow: true, windowType: 'normal' });
-  const original = tabs.find((t) => t.active);
+  const allTabs = await chrome.tabs.query({ lastFocusedWindow: true, windowType: 'normal' });
+  const tabs = Array.isArray(tabIds) ? allTabs.filter((tab) => tabIds.includes(tab.id)) : allTabs;
+  const original = allTabs.find((t) => t.active);
   const results = [];
   const failures = [];
+  const skipped = [];
 
   try {
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
       if (!tab.id || !isInjectableUrl(tab.url)) {
-        failures.push({ target: tab.title || 'Browser page', error: 'This page cannot be captured.' });
+        skipped.push({ target: tab.title || tab.url || 'Unknown tab', reason: 'This browser page cannot be captured.' });
         continue;
       }
 
@@ -733,34 +826,39 @@ async function handleCaptureAllTabs({ settings }) {
           skipClipboard: true,
         });
         results.push(slimItem(item));
-        if (item.warning) failures.push({ target: tab.title || 'Tab', error: item.warning });
       } catch (e) {
-        console.error(`Failed to capture tab ${tab.id}:`, e);
-        failures.push({ target: tab.title || 'Tab', error: e?.message || 'Capture failed.' });
+        const msg = e?.message || 'Capture failed';
+        failures.push({ target: tab.title || tab.url || String(tab.id), reason: msg, error: msg, tabId: tab.id });
       }
     }
   } finally {
     if (original?.id) await chrome.tabs.update(original.id, { active: true }).catch(() => {});
   }
 
-  await openGallery(results.length, failures);
-  return { success: failures.length === 0, results, failures };
+  return { success: true, results, failures, skipped };
 }
 
 async function handleCaptureUrlList({ urls, settings, delayMs }) {
   await requireAllUrls('URL batch capture');
   const s = await getSettings(settings);
   const requested = Array.isArray(urls) ? urls : [];
+  const results = [];
   const failures = [];
+  const skipped = [];
   const list = [];
+
   for (const raw of requested) {
     const url = normalizeHttpUrl(raw);
-    if (!url) failures.push({ target: String(raw).slice(0, 200), error: 'Invalid URL.' });
-    else if (list.length >= 100) failures.push({ target: url, error: 'Batch limit is 100 URLs.' });
-    else list.push(url);
+    if (!url) {
+      failures.push({ target: String(raw).slice(0, 200), reason: 'Invalid URL.', error: 'Invalid URL.' });
+    } else if (list.length >= 100) {
+      skipped.push({ target: url, reason: 'Batch limit is 100 URLs.' });
+    } else {
+      list.push(url);
+    }
   }
+
   const hydrationDelay = clampNum(delayMs, 0, 30000, 3000);
-  const results = [];
 
   for (let i = 0; i < list.length; i++) {
     const url = list[i];
@@ -793,17 +891,15 @@ async function handleCaptureUrlList({ urls, settings, delayMs }) {
         skipClipboard: true,
       });
       results.push(slimItem(item));
-      if (item.warning) failures.push({ target: url, error: item.warning });
     } catch (err) {
-      console.error(`Failed to capture URL ${url}:`, err);
-      failures.push({ target: url, error: err?.message || 'Capture failed.' });
+      const msg = err?.message || 'Capture failed';
+      failures.push({ target: url, reason: msg, error: msg });
     } finally {
       if (win?.id) await chrome.windows.remove(win.id).catch(() => {});
     }
   }
 
-  await openGallery(results.length, failures);
-  return { success: failures.length === 0, results, failures };
+  return { success: true, results, failures, skipped };
 }
 
 async function handleCaptureMultiSize({ url, resolutions, settings }) {
@@ -820,7 +916,14 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
     }))
     .filter((r) => r.width && r.height)
     .slice(0, 20);
-  if (sizes.length === 0) return { success: false, results: [], failures: [{ target: 'Viewports', error: 'No valid viewport sizes were provided.' }] };
+  if (sizes.length === 0) {
+    return {
+      success: false,
+      results: [],
+      failures: [{ target: 'Viewports', reason: 'No valid viewport sizes were provided.', error: 'No valid viewport sizes were provided.' }],
+      skipped: [],
+    };
+  }
 
   const results = [];
   const failures = [];
@@ -848,12 +951,30 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
         name: res.name,
       });
 
-      if (i > 0) {
-        await chrome.windows.update(win.id, { width: res.width, height: res.height, state: 'normal' });
-        await sleep(1000);
-      }
-
       try {
+        let viewport;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const measured = await chrome.scripting.executeScript({
+            target: { tabId },
+            func: () => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio }),
+          });
+          viewport = measured[0]?.result;
+          if (!viewport) throw new Error('Could not measure the page viewport.');
+          if (viewport.width === res.width && viewport.height === res.height) break;
+          const current = await chrome.windows.get(win.id);
+          await chrome.windows.update(win.id, {
+            width: Math.max(320, current.width + res.width - viewport.width),
+            height: Math.max(240, current.height + res.height - viewport.height),
+            state: 'normal',
+          });
+          await sleep(1000);
+        }
+        const finalMeasurement = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio }),
+        });
+        viewport = finalMeasurement[0]?.result;
+        if (!viewport) throw new Error('Could not measure the page viewport.');
         const encoded = await withJob(() =>
           captureAndEncode(win.id, s, { title: `Responsive ${label}`, url: target })
         );
@@ -864,6 +985,7 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
           title: `Responsive ${label}`,
           filenameTitle: `${res.name || 'responsive'}_${res.width}x${res.height}`,
           url: target,
+          viewport: { ...viewport, requestedWidth: res.width, requestedHeight: res.height },
           width: encoded.width || res.width,
           height: encoded.height || res.height,
           settings: s,
@@ -871,23 +993,18 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
           skipClipboard: true,
         });
         results.push(slimItem(item));
-        if (item.warning) failures.push({ target: label, error: item.warning });
       } catch (e) {
-        console.error(`Failed capture at ${label}:`, e);
-        failures.push({ target: label, error: e?.message || 'Capture failed.' });
+        const msg = e?.message || 'Capture failed';
+        failures.push({ target: label, reason: msg, error: msg });
       }
     }
   } finally {
     if (win?.id) await chrome.windows.remove(win.id).catch(() => {});
   }
 
-  if (failures.length) await openGallery(results.length, failures);
-  return { success: failures.length === 0, results, failures };
+  return { success: true, results, failures, skipped: [] };
 }
 
-// ---------------------------------------------------------------------------
-// Countdown
-// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // 8. Yoink Page Media (Images, SVGs, CSS Backgrounds, OpenGraph, Clean <video> Frames)
 // ---------------------------------------------------------------------------
@@ -1225,6 +1342,9 @@ function extractAllPageMediaInTab() {
   return items;
 }
 
+// ---------------------------------------------------------------------------
+// Countdown
+// ---------------------------------------------------------------------------
 async function runCaptureCountdown(seconds) {
   const total = Math.round(clampNum(seconds, 0, 30, 0));
   if (total === 0) return;
@@ -1309,6 +1429,7 @@ async function getOrCreateProofIdentity() {
       return stored;
     }
   } catch {}
+  if (typeof crypto === 'undefined' || !crypto?.subtle?.generateKey) return null;
 
   const keyPair = await crypto.subtle.generateKey(
     { name: 'ECDSA', namedCurve: 'P-256' },
@@ -1346,6 +1467,7 @@ async function buildProofContext(settings, url, title) {
   }
   try {
     const identity = await getOrCreateProofIdentity();
+    if (!identity) return null;
     return {
       identity,
       url: String(url || ''),
@@ -1392,13 +1514,11 @@ function mutateHistory(operation, payload) {
     if (!id) throw new Error('Missing capture ID.');
     if (operation === 'update') {
       const updates = payload.updates && typeof payload.updates === 'object' ? payload.updates : {};
-      const history = list.map((item) => item.id === id ? { ...item, ...updates, id: item.id, dataUrl: '' } : item);
+      const history = list.map((item) => (item.id === id ? { ...item, ...updates, id: item.id, dataUrl: '' } : item));
       await chrome.storage.local.set({ [HISTORY_KEY]: history });
       return { history };
     }
     const history = list.filter((item) => item.id !== id);
-    // Remove the index first. A failed blob cleanup leaves a recoverable orphan,
-    // rather than an index pointing at an irretrievably deleted image.
     await chrome.storage.local.set({ [HISTORY_KEY]: history });
     await chrome.storage.local.remove(FULL_PREFIX + id).catch((error) => console.warn('Image cleanup failed:', error));
     return { history };
@@ -1457,7 +1577,6 @@ async function generateThumbnail(dataUrl, targetWidth = 720) {
     return { thumbnailUrl: `data:image/jpeg;base64,${btoa(binary)}`, width, height };
   } catch (e) {
     console.warn('Thumbnail generation failed:', e);
-    // Never fall back to the full image: that would bloat the history index.
     return { thumbnailUrl: '', width: 0, height: 0 };
   }
 }
@@ -1510,10 +1629,24 @@ function isInjectableUrl(url) {
 function normalizeHttpUrl(v) {
   try {
     const u = new URL(String(v).trim());
-    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null;
+    if (!['http:', 'https:', 'file:'].includes(u.protocol)) return null;
+    return u.href;
   } catch {
     return null;
   }
+}
+
+function sanitizeFilenameSegment(value) {
+  let out = '';
+  for (const ch of String(value || '')) {
+    const code = ch.charCodeAt(0);
+    if (code < 32 || '\\/:*?"<>|'.includes(ch)) {
+      out += '_';
+    } else {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 function formatFilename(template, title, url, mode, format, width, height) {
@@ -1527,21 +1660,27 @@ function formatFilename(template, title, url, mode, format, width, height) {
     if (url) domain = new URL(url).hostname.replace(/[^a-zA-Z0-9]/g, '_') || 'page';
   } catch {}
 
-  const cleanTitle = (title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  let cleanTitle = (title || 'capture')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 40);
+  if (!cleanTitle) cleanTitle = 'capture';
   const w = width ? String(Math.round(width)) : '';
   const h = height ? String(Math.round(height)) : '';
 
   // Keep in sync with src/utils/capture.ts.
-  let filename = template
+  const substituted = template
     .split('{title}').join(cleanTitle)
     .split('{date}').join(dateStr)
     .split('{time}').join(timeStr)
     .split('{domain}').join(domain)
     .split('{type}').join(mode)
     .split('{width}').join(w)
-    .split('{height}').join(h)
-    // The template is user input: remove path separators and reserved characters.
-    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
+    .split('{height}').join(h);
+
+  // The template is user input: remove path separators and reserved characters.
+  let filename = sanitizeFilenameSegment(substituted)
     .replace(/^\.+/, '')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')

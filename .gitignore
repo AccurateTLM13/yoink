@@ -8,3 +8,9 @@ coverage/
 .env*
 !.env.example
 *.zip
+.vscode/
+*.pem
+*.crx
+/eng.traineddata
+.codacy/
+.github/instructions/
