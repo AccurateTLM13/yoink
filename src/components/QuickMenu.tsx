@@ -18,7 +18,11 @@ import {
   Clock,
   ShieldCheck,
   Image as ImageIcon,
+  FolderOpen,
+  HardDrive,
+  AlertTriangle,
 } from 'lucide-react';
+import { FolderAccessState, SaveLocationMode } from '../types';
 
 interface Props {
   lastCaptureError?: string | null;
@@ -40,6 +44,10 @@ interface Props {
   delaySec?: number;
   onSetDelaySec?: (sec: number) => void;
   optimalQualityMode?: boolean;
+  saveLocationMode?: SaveLocationMode;
+  customSaveFolderName?: string;
+  folderStatusState?: FolderAccessState;
+  onOpenFolderPicker?: () => void;
   historyCount: number;
   isCapturing: boolean;
   activeAction: string | null;
@@ -67,6 +75,10 @@ export const QuickMenu: React.FC<Props> = React.memo(({
   delaySec = 0,
   onSetDelaySec,
   optimalQualityMode = false,
+  saveLocationMode = 'downloads',
+  customSaveFolderName = '',
+  folderStatusState = 'unset',
+  onOpenFolderPicker,
   historyCount,
   isCapturing,
   activeAction,
@@ -174,6 +186,51 @@ export const QuickMenu: React.FC<Props> = React.memo(({
             </div>
           </div>
         )}
+
+        {/* Save Destination Strip */}
+        <button
+          type="button"
+          onClick={() => {
+            if (saveLocationMode === 'folder' && (folderStatusState === 'needs_permission' || folderStatusState === 'not_found') && onOpenFolderPicker) {
+              onOpenFolderPicker();
+            } else if (onOpenFolderPicker) {
+              onOpenFolderPicker();
+            } else {
+              onOpenOptions();
+            }
+          }}
+          className={`flex items-center justify-between px-2.5 py-1.5 rounded-xl border transition cursor-pointer text-left ${
+            saveLocationMode === 'folder' && (folderStatusState === 'needs_permission' || folderStatusState === 'not_found')
+              ? 'bg-amber-50 border-amber-200 hover:bg-amber-100/70'
+              : 'bg-white border-zinc-200/80 hover:border-blue-300 shadow-[0_1px_2px_rgba(0,0,0,0.02)]'
+          }`}
+          title="Choose where screenshots & yoinked images are saved (any local folder or external drive)"
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            {saveLocationMode === 'folder' && (folderStatusState === 'needs_permission' || folderStatusState === 'not_found') ? (
+              <AlertTriangle size={12} className="text-amber-600 shrink-0" />
+            ) : saveLocationMode === 'folder' ? (
+              <HardDrive size={12} className="text-blue-600 shrink-0" />
+            ) : (
+              <FolderOpen size={12} className="text-zinc-500 shrink-0" />
+            )}
+            <span className="text-[11px] font-semibold text-zinc-700 shrink-0">Save To</span>
+            <span className="text-[10.5px] font-mono text-zinc-600 truncate">
+              {saveLocationMode === 'folder'
+                ? customSaveFolderName || 'Custom Folder'
+                : saveLocationMode === 'ask'
+                ? 'Ask Each Time'
+                : 'Downloads'}
+            </span>
+          </div>
+          <span className="text-[10px] font-semibold text-blue-700 shrink-0 ml-2">
+            {saveLocationMode === 'folder' && folderStatusState === 'needs_permission'
+              ? 'Grant Access'
+              : saveLocationMode === 'folder' && folderStatusState === 'not_found'
+              ? 'Reconnect'
+              : 'Select…'}
+          </span>
+        </button>
 
         {/* Card 1: Core Capture Actions */}
         <div className="space-y-1">

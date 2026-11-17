@@ -14,6 +14,7 @@ const IDLE_ALARM = 'yoink-offscreen-idle';
 const HISTORY_KEY = 'omnicapture_history';
 const SETTINGS_KEY = 'omnicapture_settings';
 const PROOF_IDENTITY_KEY = 'yoink_proof_identity';
+const FOLDER_STATUS_KEY = 'yoink_folder_status';
 const FULL_PREFIX = 'yoink_full_';
 const MAX_CHUNKS = 80;
 // Chrome limit: MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND = 2.
@@ -36,6 +37,8 @@ const DEFAULT_SETTINGS = Object.freeze({
   enableProof: true,
   proofAuthor: '',
   proofVisualStamp: false,
+  saveLocationMode: 'downloads',
+  customSaveFolderName: '',
 });
 
 // ---------------------------------------------------------------------------
@@ -644,23 +647,27 @@ async function finishCapture(o) {
           if (sliceRes && Array.isArray(sliceRes.slices) && sliceRes.slices.length > 1) {
             for (const slice of sliceRes.slices) {
               const partFn = filename.replace(/(\.[a-z0-9]+)$/i, `_part${slice.part}_of_${slice.total}$1`);
-              await downloadSafe(slice.dataUrl, partFn);
+              await downloadSafe(slice.dataUrl, partFn, s);
               await sleep(150);
             }
           } else {
-            await downloadSafe(item.dataUrl, filename);
+            await downloadSafe(item.dataUrl, filename, s);
           }
         } catch (err) {
+          if (s.saveLocationMode === 'folder') throw err;
           console.warn('Auto-slice download failed, falling back to full image download:', err);
-          await downloadSafe(item.dataUrl, filename);
+          await downloadSafe(item.dataUrl, filename, s);
           downloadWarning = 'Some slices could not be saved. The full image was downloaded instead.';
         }
       } else {
-        await downloadSafe(item.dataUrl, filename);
+        await downloadSafe(item.dataUrl, filename, s);
       }
       downloaded = true;
     } catch (error) {
-      downloadWarning = `Download could not be confirmed: ${error?.message || 'Unknown error'}. Check Downloads and try again from the gallery.`;
+      downloadWarning =
+        s.saveLocationMode === 'folder'
+          ? `${error?.message || 'Could not save to selected folder.'} Saved to Gallery — open Yoink to grant access or download manually.`
+          : `Download could not be confirmed: ${error?.message || 'Unknown error'}. Check Downloads and try again from the gallery.`;
     }
   }
 
@@ -686,8 +693,36 @@ async function finishCapture(o) {
   return item;
 }
 
-async function downloadSafe(url, filename) {
-  const id = await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'uniquify' });
+async function downloadSafe(url, filename, settings) {
+  const mode = settings?.saveLocationMode || 'downloads';
+  if (mode === 'folder') {
+    const res = await callOffscreen('SAVE_TO_FOLDER', { url, filename });
+    if (res?.ok) {
+      await chrome.storage.local.set({
+        [FOLDER_STATUS_KEY]: {
+          state: 'ready',
+          folderName: res.folderName || settings?.customSaveFolderName || '',
+          updatedAt: Date.now(),
+        },
+      }).catch(() => {});
+      return;
+    }
+    const reason = res?.reason || 'error';
+    const folderName = res?.folderName || settings?.customSaveFolderName || '';
+    const errMsg = res?.message || res?.error || 'Could not save to selected folder.';
+    await chrome.storage.local.set({
+      [FOLDER_STATUS_KEY]: {
+        state: reason,
+        folderName,
+        error: errMsg,
+        updatedAt: Date.now(),
+      },
+    }).catch(() => {});
+    throw new Error(errMsg);
+  }
+
+  const saveAs = mode === 'ask';
+  const id = await chrome.downloads.download({ url, filename, saveAs, conflictAction: 'uniquify' });
   if (!chrome.downloads?.onChanged || !chrome.downloads?.search) return;
   await new Promise((resolve, reject) => {
     let finished = false;
@@ -1411,6 +1446,8 @@ function sanitizeSettings(raw) {
     enableProof: s.enableProof !== false,
     proofAuthor: typeof s.proofAuthor === 'string' ? s.proofAuthor.trim().slice(0, 60) : '',
     proofVisualStamp: s.proofVisualStamp === true,
+    saveLocationMode: ['downloads', 'folder', 'ask'].includes(s.saveLocationMode) ? s.saveLocationMode : 'downloads',
+    customSaveFolderName: typeof s.customSaveFolderName === 'string' ? s.customSaveFolderName.trim().slice(0, 120) : '',
   };
 }
 

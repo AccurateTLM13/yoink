@@ -1,4 +1,5 @@
 import { CaptureSettings, HistoryItem } from '../types';
+import { saveToCustomFolder } from './saveDestination';
 
 export const DEFAULT_SETTINGS: CaptureSettings = {
   format: 'png',
@@ -17,6 +18,8 @@ export const DEFAULT_SETTINGS: CaptureSettings = {
   enableProof: true,
   proofAuthor: '',
   proofVisualStamp: false,
+  saveLocationMode: 'downloads',
+  customSaveFolderName: '',
 };
 
 /**
@@ -434,14 +437,31 @@ function convertBlobToPng(blob: Blob): Promise<Blob> {
 }
 
 /**
- * Trigger file download directly from dataUrl
+ * Trigger file download directly from dataUrl or URL, routing to custom local/external folder,
+ * Save-As prompt, or default Chrome Downloads folder based on user settings.
  */
-export async function downloadDataUrl(dataUrl: string, filename: string): Promise<void> {
+export async function downloadDataUrl(
+  dataUrl: string,
+  filename: string,
+  options?: { settings?: CaptureSettings; requestPermission?: boolean }
+): Promise<void> {
+  const effectiveSettings = options?.settings ?? (await getStoredSettings());
+  const mode = effectiveSettings.saveLocationMode || 'downloads';
+
+  if (mode === 'folder') {
+    await saveToCustomFolder(dataUrl, filename, {
+      requestPermission: options?.requestPermission ?? true,
+    });
+    return;
+  }
+
+  const saveAs = mode === 'ask';
+
   if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.download) {
     const id = await chrome.downloads.download({
       url: dataUrl,
       filename: filename,
-      saveAs: false,
+      saveAs,
       conflictAction: 'uniquify',
     });
     await new Promise<void>((resolve, reject) => {

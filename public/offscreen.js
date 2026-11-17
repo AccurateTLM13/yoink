@@ -34,6 +34,7 @@ const HANDLERS = {
   CAPTURE_DESKTOP_FRAME: captureDesktopFrame,
   SLICE_IMAGE: sliceImageTask,
   PROCESS_CAPTURE: processCapture,
+  SAVE_TO_FOLDER: saveToFolderTask,
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -961,4 +962,146 @@ function releaseCanvas(canvas) {
 
 function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v));
+}
+
+// ---------------------------------------------------------------------------
+// Custom Folder / External Drive Saving (File System Access API + IndexedDB)
+// ---------------------------------------------------------------------------
+const FS_DB_NAME = 'yoink_fs_db';
+const FS_STORE_NAME = 'handles';
+const FS_HANDLE_KEY = 'save_directory';
+var __testDirHandleOverride = null;
+
+function openFsHandleDbOffscreen() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      reject(new Error('IndexedDB is unavailable.'));
+      return;
+    }
+    const req = indexedDB.open(FS_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(FS_STORE_NAME)) {
+        db.createObjectStore(FS_STORE_NAME);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('Could not open folder storage database.'));
+  });
+}
+
+async function getSavedDirHandleOffscreen() {
+  if (__testDirHandleOverride) return __testDirHandleOverride;
+  const db = await openFsHandleDbOffscreen();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(FS_STORE_NAME, 'readonly');
+      const req = tx.objectStore(FS_STORE_NAME).get(FS_HANDLE_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error('Could not read saved folder handle.'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function sanitizeOutputFilenameOffscreen(filename) {
+  const parts = String(filename || '').split(/[\\/]+/);
+  const base = (parts[parts.length - 1] || '').trim();
+  let cleaned = '';
+  for (const ch of base) {
+    const code = ch.charCodeAt(0);
+    cleaned += code < 32 || '<>:"/\\|?*'.includes(ch) ? '_' : ch;
+  }
+  cleaned = cleaned.replace(/^\.+/, '').trim();
+  return cleaned ? cleaned.slice(0, 180) : 'capture.png';
+}
+
+async function uniquifyFilenameOffscreen(dirHandle, rawFilename) {
+  const base = sanitizeOutputFilenameOffscreen(rawFilename);
+  const dotIdx = base.lastIndexOf('.');
+  const stem = dotIdx > 0 ? base.slice(0, dotIdx) : base;
+  const ext = dotIdx > 0 ? base.slice(dotIdx) : '';
+
+  const exists = async (candidate) => {
+    try {
+      await dirHandle.getFileHandle(candidate, { create: false });
+      return true;
+    } catch (err) {
+      if (err && err.name === 'NotFoundError') return false;
+      throw err;
+    }
+  };
+
+  if (!(await exists(base))) return base;
+  for (let i = 1; i <= 999; i++) {
+    const candidate = `${stem} (${i})${ext}`;
+    if (!(await exists(candidate))) return candidate;
+  }
+  return `${stem}_${Date.now()}${ext}`;
+}
+
+async function saveToFolderTask({ url, filename }) {
+  const dirHandle = await getSavedDirHandleOffscreen().catch(() => null);
+  if (!dirHandle) {
+    return {
+      ok: false,
+      reason: 'unset',
+      folderName: '',
+      message: 'No custom save folder selected.',
+    };
+  }
+
+  const folderName = dirHandle.name || 'Selected Folder';
+  try {
+    const perm = dirHandle.queryPermission
+      ? await dirHandle.queryPermission({ mode: 'readwrite' })
+      : 'granted';
+    if (perm !== 'granted') {
+      return {
+        ok: false,
+        reason: 'needs_permission',
+        folderName,
+        message: `Permission needed to save to "${folderName}".`,
+      };
+    }
+
+    if (typeof dirHandle.values === 'function') {
+      await dirHandle.values().next();
+    }
+
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status} while reading capture bytes.`);
+    const blob = await res.blob();
+
+    const finalName = await uniquifyFilenameOffscreen(dirHandle, filename);
+    const fileHandle = await dirHandle.getFileHandle(finalName, { create: true });
+    const writable = await fileHandle.createWritable();
+    try {
+      await writable.write(blob);
+      await writable.close();
+    } catch (writeErr) {
+      if (typeof writable.abort === 'function') {
+        await writable.abort().catch(() => {});
+      }
+      throw writeErr;
+    }
+
+    return { ok: true, filename: finalName, folderName };
+  } catch (err) {
+    if (err && err.name === 'NotFoundError') {
+      return {
+        ok: false,
+        reason: 'not_found',
+        folderName,
+        message: `Folder or drive "${folderName}" is disconnected or missing.`,
+      };
+    }
+    return {
+      ok: false,
+      reason: 'error',
+      folderName,
+      message: err?.message || String(err),
+    };
+  }
 }

@@ -27,8 +27,9 @@ import {
   Image as ImageIcon,
   RefreshCw,
   Play,
+  HardDrive,
 } from 'lucide-react';
-import { BatchFailure, CaptureSettings, HistoryItem } from './types';
+import { BatchFailure, CaptureSettings, FolderAccessState, HistoryItem } from './types';
 import {
   DEFAULT_SETTINGS,
   getStoredSettings,
@@ -42,6 +43,7 @@ import {
   saveFullResolutionImage,
   copyImageToClipboard,
 } from './utils/storage';
+import { checkSavedDirectoryStatus, FOLDER_STATUS_KEY } from './utils/saveDestination';
 import { fileToHistoryItem } from './utils/upload';
 import {
   captureFullPage,
@@ -52,6 +54,7 @@ import {
   captureAllTabs,
   ensureAllSitesAccess,
   getInjectableOpenTabs,
+  isChromeExtension,
   OpenTabInfo,
 } from './utils/capture';
 import { getOrCreateProofIdentity } from './utils/proof';
@@ -113,6 +116,7 @@ export default function App() {
   const [openTabs, setOpenTabs] = useState<OpenTabInfo[]>([]);
   const [selectedTabId, setSelectedTabId] = useState<number | undefined>(undefined);
   const [isLoadingTabs, setIsLoadingTabs] = useState(false);
+  const [folderStatusState, setFolderStatusState] = useState<FolderAccessState>('unset');
 
   const studioUploadRef = useRef<HTMLInputElement>(null);
 
@@ -129,6 +133,8 @@ export default function App() {
   const searchParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
   const forcePopup = searchParams?.get('popup') === 'true';
   const forceTab = searchParams?.get('tab') === 'true';
+  const highlightFolderPicker =
+    searchParams?.get('pickFolder') === '1' || searchParams?.get('reauthFolder') === '1';
 
   // Full Tab Studio Hub vs Chrome Extension Popup window
   const isFullTab = !forcePopup && (forceTab || windowWidth > 480);
@@ -189,6 +195,8 @@ export default function App() {
     async function loadInitialData() {
       const s = await getStoredSettings();
       setSettings(s);
+      const fsStatus = await checkSavedDirectoryStatus();
+      setFolderStatusState(fsStatus.state);
       const h = await getStoredHistory();
       setHistory(h);
 
@@ -239,6 +247,9 @@ export default function App() {
           if (changes.last_batch_count && changes.last_batch_count.newValue) {
             setRecentBatchCount(changes.last_batch_count.newValue);
             chrome.storage.local.remove(['last_batch_count']);
+          }
+          if (changes[FOLDER_STATUS_KEY]?.newValue?.state) {
+            setFolderStatusState(changes[FOLDER_STATUS_KEY].newValue.state);
           }
         }
       };
@@ -955,6 +966,40 @@ export default function App() {
                     }`}
                   >
                     {settings.proofVisualStamp ? 'ON' : 'OFF'}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setView('options')}
+                  className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-zinc-50 transition cursor-pointer text-left"
+                  title="Configure save folder or external drive for screenshots and yoinked images"
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-700 min-w-0">
+                    <HardDrive size={12} className={settings.saveLocationMode === 'folder' ? 'text-blue-600 shrink-0' : 'text-zinc-400 shrink-0'} />
+                    <span className="truncate">
+                      {settings.saveLocationMode === 'folder'
+                        ? settings.customSaveFolderName || 'Custom Folder'
+                        : settings.saveLocationMode === 'ask'
+                        ? 'Ask Each Save'
+                        : 'Downloads'}
+                    </span>
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[9.5px] font-mono font-bold uppercase shrink-0 ${
+                      settings.saveLocationMode === 'folder' && folderStatusState !== 'ready'
+                        ? 'bg-amber-100 text-amber-800'
+                        : settings.saveLocationMode === 'folder'
+                        ? 'bg-blue-100 text-blue-700'
+                        : 'bg-zinc-100 text-zinc-500'
+                    }`}
+                  >
+                    {settings.saveLocationMode === 'folder'
+                      ? folderStatusState === 'ready'
+                        ? 'DRIVE'
+                        : 'CHECK'
+                      : settings.saveLocationMode === 'ask'
+                      ? 'ASK'
+                      : 'STD'}
                   </span>
                 </button>
               </div>
@@ -1729,6 +1774,7 @@ export default function App() {
                     setView('verify');
                   }}
                   isFullTab={true}
+                  highlightFolderPicker={highlightFolderPicker}
                 />
               )}
 
@@ -1737,7 +1783,9 @@ export default function App() {
                 <MediaYoinkerModal
                   settings={settings}
                   isFullTab={true}
+                  highlightFolderPicker={highlightFolderPicker}
                   onBack={() => setView('menu')}
+                  onUpdateSettings={handleSaveSettings}
                   onSendToStudio={(newItem) => {
                     if (newItem.dataUrl) {
                       saveFullResolutionImage(newItem.id, newItem.dataUrl).catch(() => {});
@@ -1816,6 +1864,22 @@ export default function App() {
             delaySec={settings.captureDelaySec}
             onSetDelaySec={(sec) => handleSaveSettings({ ...settings, captureDelaySec: sec })}
             optimalQualityMode={settings.optimalQualityMode}
+            saveLocationMode={settings.saveLocationMode}
+            customSaveFolderName={settings.customSaveFolderName}
+            folderStatusState={folderStatusState}
+            onOpenFolderPicker={() => {
+              if (isChromeExtension() && chrome.tabs?.create && chrome.runtime?.getURL) {
+                const param =
+                  settings.saveLocationMode === 'folder' && folderStatusState === 'needs_permission'
+                    ? 'reauthFolder=1'
+                    : 'pickFolder=1';
+                chrome.tabs.create({
+                  url: chrome.runtime.getURL(`index.html?tab=true&view=options&${param}`),
+                });
+              } else {
+                setView('options');
+              }
+            }}
             historyCount={history.length}
             isCapturing={isCapturing}
             activeAction={statusMessage}
@@ -1887,6 +1951,7 @@ export default function App() {
             settings={settings}
             isFullTab={false}
             onBack={() => setView('menu')}
+            onUpdateSettings={handleSaveSettings}
             onSendToStudio={(newItem) => {
               if (newItem.dataUrl) {
                 saveFullResolutionImage(newItem.id, newItem.dataUrl).catch(() => {});

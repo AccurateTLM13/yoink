@@ -412,7 +412,7 @@ export async function captureVisible(settings: CaptureSettings, targetTabId?: nu
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'visible', settings.format);
-    await downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn, { settings });
   }
   return item;
 }
@@ -466,7 +466,7 @@ export async function captureSelection(settings: CaptureSettings, targetTabId?: 
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'selection', settings.format);
-    await downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn, { settings });
   }
   return item;
 }
@@ -520,7 +520,7 @@ export async function captureScrollingElement(settings: CaptureSettings, targetT
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'element', settings.format);
-    await downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn, { settings });
   }
   return item;
 }
@@ -629,7 +629,7 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
           width,
           height
         );
-        await downloadDataUrl(dataUrl, fn);
+        await downloadDataUrl(dataUrl, fn, { settings });
       }
 
       if (settings.copyToClipboard) {
@@ -685,7 +685,7 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'desktop', settings.format, width, height);
-    await downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn, { settings });
   }
   return item;
 }
@@ -746,7 +746,7 @@ export async function captureFullPage(
   await addHistoryItem(item);
   if (settings.autoDownload) {
     const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'full', settings.format);
-    await downloadDataUrl(dataUrl, fn);
+    await downloadDataUrl(dataUrl, fn, { settings });
   }
   return item;
 }
@@ -819,7 +819,7 @@ export async function captureAllTabs(
     await addHistoryItem(item);
     if (settings.autoDownload) {
       const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'alltabs', settings.format);
-      await downloadDataUrl(dataUrl, fn);
+      await downloadDataUrl(dataUrl, fn, { settings });
     }
     results.push(item);
   }
@@ -890,7 +890,7 @@ export async function captureUrlList(
     await addHistoryItem(item);
     if (settings.autoDownload) {
       const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'urllist', settings.format);
-      await downloadDataUrl(dataUrl, fn);
+      await downloadDataUrl(dataUrl, fn, { settings });
     }
     results.push(item);
   }
@@ -986,7 +986,7 @@ export async function captureMultiSize(
     await addHistoryItem(item);
     if (settings.autoDownload) {
       const fn = formatFilename(settings.filenameTemplate, item.title, item.url, 'multisize', settings.format);
-      await downloadDataUrl(dataUrl, fn);
+      await downloadDataUrl(dataUrl, fn, { settings });
     }
     results.push(item);
   }

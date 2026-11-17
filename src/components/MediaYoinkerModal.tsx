@@ -32,13 +32,16 @@ import {
   svgToPngDataUrl,
   yoinkMediaFromTab,
 } from '../utils/mediaExtractor';
-import { copyImageToClipboard, downloadDataUrl } from '../utils/storage';
+import { copyImageToClipboard, downloadDataUrl, saveStoredSettings } from '../utils/storage';
+import { SaveDestinationControl } from './SaveDestinationControl';
 
 interface Props {
   settings: CaptureSettings;
   onBack: () => void;
   onSendToStudio?: (item: HistoryItem) => void;
+  onUpdateSettings?: (newSettings: CaptureSettings) => void;
   isFullTab?: boolean;
+  highlightFolderPicker?: boolean;
 }
 
 const CATEGORY_TABS: { id: 'all' | YoinkMediaCategory; label: string }[] = [
@@ -61,7 +64,9 @@ export const MediaYoinkerModal: React.FC<Props> = ({
   settings,
   onBack,
   onSendToStudio,
+  onUpdateSettings,
   isFullTab = false,
+  highlightFolderPicker = false,
 }) => {
   const [items, setItems] = useState<YoinkedMediaItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -150,7 +155,7 @@ export const MediaYoinkerModal: React.FC<Props> = ({
   };
 
   const startDownload = async (url: string, filename: string) => {
-    await downloadDataUrl(url, filename);
+    await downloadDataUrl(url, filename, { settings });
   };
 
   const triggerDownloadItem = async (item: YoinkedMediaItem, asRasterPng = false) => {
@@ -185,7 +190,11 @@ export const MediaYoinkerModal: React.FC<Props> = ({
   const handleDownloadItem = async (item: YoinkedMediaItem, asRasterPng = false) => {
     try {
       await triggerDownloadItem(item, asRasterPng);
-      setStatusNote(`Download ${typeof chrome !== 'undefined' && chrome.downloads?.download ? 'saved' : 'started'} for "${item.name}".`);
+      if (settings.saveLocationMode === 'folder') {
+        setStatusNote(`Saved "${item.name}" to "${settings.customSaveFolderName || 'selected folder'}".`);
+      } else {
+        setStatusNote(`Download ${typeof chrome !== 'undefined' && chrome.downloads?.download ? 'saved' : 'started'} for "${item.name}".`);
+      }
     } catch (error) {
       setStatusNote(`Download failed for "${item.name}": ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
@@ -197,20 +206,32 @@ export const MediaYoinkerModal: React.FC<Props> = ({
     setBatchDownloading(true);
     setStatusNote(`Yoinking ${targets.length} asset${targets.length === 1 ? '' : 's'}…`);
     const failed: string[] = [];
+    let lastError = '';
     try {
       for (let i = 0; i < targets.length; i++) {
         try {
           await triggerDownloadItem(targets[i]);
-        } catch {
+        } catch (err) {
           failed.push(targets[i].name);
+          if (!lastError && err instanceof Error) lastError = err.message;
         }
         if (i < targets.length - 1) {
           await new Promise((r) => setTimeout(r, 160));
         }
       }
-      setStatusNote(failed.length
-        ? `Saved ${targets.length - failed.length}; failed ${failed.length}: ${failed.join(', ')}. Try those again.`
-        : `${typeof chrome !== 'undefined' && chrome.downloads?.download ? 'Saved' : 'Started'} ${targets.length} download${targets.length === 1 ? '' : 's'}.`);
+      if (failed.length) {
+        setStatusNote(
+          `Saved ${targets.length - failed.length}; failed ${failed.length}: ${failed.join(', ')}.${lastError ? ` (${lastError})` : ''}`
+        );
+      } else if (settings.saveLocationMode === 'folder') {
+        setStatusNote(
+          `Saved ${targets.length} asset${targets.length === 1 ? '' : 's'} to "${settings.customSaveFolderName || 'selected folder'}".`
+        );
+      } else {
+        setStatusNote(
+          `${typeof chrome !== 'undefined' && chrome.downloads?.download ? 'Saved' : 'Started'} ${targets.length} download${targets.length === 1 ? '' : 's'}.`
+        );
+      }
     } finally {
       setBatchDownloading(false);
     }
@@ -431,6 +452,19 @@ export const MediaYoinkerModal: React.FC<Props> = ({
             )}
           </div>
         </div>
+
+        <SaveDestinationControl
+          settings={settings}
+          onUpdateSettings={(patch) => {
+            const next = { ...settings, ...patch };
+            if (onUpdateSettings) onUpdateSettings(next);
+            else void saveStoredSettings(next);
+          }}
+          isFullTab={isFullTab}
+          returnView="media"
+          variant="compact"
+          highlightPicker={highlightFolderPicker}
+        />
 
         {statusNote && (
           <div className="px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200/80 text-[11px] font-mono text-blue-800 flex items-center justify-between">

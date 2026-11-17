@@ -15,6 +15,7 @@ import { CaptureSettings, CaptureFormat } from '../types';
 import { DEFAULT_SETTINGS, applyOptimalQualityPreset } from '../utils/storage';
 import { formatFilename } from '../utils/capture';
 import { getOrCreateProofIdentity } from '../utils/proof';
+import { SaveDestinationControl } from './SaveDestinationControl';
 
 interface Props {
   settings: CaptureSettings;
@@ -22,6 +23,7 @@ interface Props {
   onSave: (newSettings: CaptureSettings) => void;
   onOpenVerify?: () => void;
   isFullTab?: boolean;
+  highlightFolderPicker?: boolean;
 }
 
 const AVAILABLE_TOKENS = [
@@ -36,7 +38,7 @@ const AVAILABLE_TOKENS = [
 
 const DELAY_OPTIONS = [0, 3, 5, 10];
 
-export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, onSave, onOpenVerify, isFullTab = false }) => {
+export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, onSave, onOpenVerify, isFullTab = false, highlightFolderPicker = false }) => {
   const [keyFingerprint, setKeyFingerprint] = useState<string>('');
   const enableProofId = useId();
   const visualStampId = useId();
@@ -494,13 +496,26 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                   />
                   <div className="flex-1 min-w-0">
                     <span className="font-semibold text-zinc-900 block leading-tight">
-                      Auto-Save to Downloads
+                      Auto-Save Captures
                     </span>
                     <span className="text-[11px] text-zinc-600 block mt-0.5 leading-snug">
-                      Automatically downloads each finished capture to your local drive.
+                      {form.saveLocationMode === 'folder'
+                        ? `Automatically saves each finished capture directly to "${form.customSaveFolderName || 'selected folder'}".`
+                        : form.saveLocationMode === 'ask'
+                        ? 'Prompts with the OS "Save As" dialog for each finished capture.'
+                        : 'Automatically downloads each finished capture to your Downloads folder.'}
                     </span>
                   </div>
                 </label>
+
+                <SaveDestinationControl
+                  settings={form}
+                  onUpdateSettings={updateForm}
+                  isFullTab={isFullTab}
+                  returnView="options"
+                  variant="full"
+                  highlightPicker={highlightFolderPicker}
+                />
 
                 <div className="p-3 hover:bg-zinc-50/70 transition space-y-2">
                   <label htmlFor={autoSliceId} className="flex items-start gap-3 cursor-pointer">

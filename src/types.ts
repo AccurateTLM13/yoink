@@ -2,6 +2,8 @@
  * Yoink Type Definitions
  */
 export type CaptureFormat = 'png' | 'jpeg' | 'webp';
+export type SaveLocationMode = 'downloads' | 'folder' | 'ask';
+export type FolderAccessState = 'ready' | 'needs_permission' | 'not_found' | 'unset' | 'unsupported';
 export type CaptureMode =
   | 'visible'
   | 'full'
@@ -56,6 +58,8 @@ export interface CaptureSettings {
   enableProof?: boolean; // Yoink Proof: Embed IPTC screenCapture + ECDSA signature + LSB pixel watermark
   proofAuthor?: string; // Creator handle / name embedded in proof manifest
   proofVisualStamp?: boolean; // Optional "Receipt Mode" provenance footer bar rendered on screenshot
+  saveLocationMode?: SaveLocationMode; // 'downloads' (default), 'folder' (custom local/external drive), or 'ask'
+  customSaveFolderName?: string; // Display name of selected custom folder or external drive
 }
 
 export interface YoinkProofManifest {
