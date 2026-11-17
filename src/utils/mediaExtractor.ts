@@ -299,10 +299,14 @@ export async function getInjectableOpenTabs(): Promise<OpenWebsiteTab[]> {
         const valid = (tabs || [])
           .filter((t) => {
             if (!t.id || !t.url) return false;
-            return (
-              (t.url.startsWith('http://') || t.url.startsWith('https://') || t.url.startsWith('file://')) &&
-              !t.url.includes('chromewebstore.google.com')
-            );
+            try {
+              const parsed = new URL(t.url);
+              const isAllowedProtocol =
+                parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'file:';
+              return isAllowedProtocol && parsed.hostname !== 'chromewebstore.google.com';
+            } catch {
+              return false;
+            }
           })
           .map((t) => ({
             id: t.id!,

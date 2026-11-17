@@ -276,7 +276,7 @@ describe('Phase 2: Architecture, Shared Logic & Target-Tab Capture APIs', () => 
     );
   });
 
-  it('excludes signing keys and packed artifacts from git and pins Codacy action SHA', () => {
+  it('excludes signing keys and packed artifacts from git and configures CodeQL workflow', () => {
     const trackedSecrets = execFileSync(
       'git',
       ['ls-files', 'dist.pem', 'dist.crx', 'eng.traineddata', '.vscode/settings.json'],
@@ -292,12 +292,10 @@ describe('Phase 2: Architecture, Shared Logic & Target-Tab Capture APIs', () => 
       assert.ok(gitignoreLines.includes(pattern), `.gitignore must include "${pattern}"`);
     }
 
-    const codacyWorkflow = fs.readFileSync('./.github/workflows/codacy.yml', 'utf8');
-    assert.match(
-      codacyWorkflow,
-      /uses:\s*codacy\/analysis-cli-action@[0-9a-f]{40}/,
-      'codacy/analysis-cli-action must be pinned to a full 40-char commit SHA'
-    );
+    assert.equal(fs.existsSync('./.github/workflows/codacy.yml'), false, 'codacy.yml should be removed');
+    const codeqlWorkflow = fs.readFileSync('./.github/workflows/codeql.yml', 'utf8');
+    assert.match(codeqlWorkflow, /uses:\s*github\/codeql-action\/init@v4/);
+    assert.match(codeqlWorkflow, /uses:\s*github\/codeql-action\/analyze@v4/);
   });
 });
 
