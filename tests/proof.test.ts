@@ -13,6 +13,8 @@ import {
   injectContainerMetadata,
   extractContainerMetadata,
   verifyImageBufferAndPixels,
+  extractProofManifestFromDataUrl,
+  bytesToDataUrl,
 } from '../src/utils/proof';
 
 function createSyntheticRgba(width: number, height: number): Uint8ClampedArray {
@@ -309,5 +311,106 @@ describe('Yoink Proof™ — Cryptographic Provenance & Steganography Engine', (
     assert.equal(result.verified, true);
     assert.equal(result.isOwnCapture, false);
     assert.match(result.summary, /not independently verified/);
+  });
+
+  test('distinguishes edited/re-signed derivatives from original captures and records parent signature', async () => {
+    const id = await generateProofIdentity();
+    const origRgba = createSyntheticRgba(80, 80);
+    const origManifest = await createSignedProofManifest({
+      rgba: origRgba,
+      width: 80,
+      height: 80,
+      url: 'https://bank.example/statement',
+      title: 'Original Capture',
+      identity: id,
+    });
+    embedLsbWatermark(origRgba, origManifest);
+
+    const origVerify = await verifyImageBufferAndPixels({ rgba: origRgba, width: 80, height: 80, localIdentity: id });
+    assert.equal(origVerify.verified, true);
+    assert.equal(origVerify.captureKind, 'original');
+    assert.equal(origVerify.isDerivative, false);
+
+    // Produce redacted/edited derivative image
+    const editedRgba = new Uint8ClampedArray(origRgba);
+    editedRgba[80 * 40] = 0;
+    editedRgba[80 * 40 + 1] = 0;
+    editedRgba[80 * 40 + 2] = 0;
+
+    const derivManifest = await createSignedProofManifest({
+      rgba: editedRgba,
+      width: 80,
+      height: 80,
+      url: 'https://bank.example/statement',
+      title: 'Redacted Capture',
+      source: '',
+      kind: 'derivative',
+      parent: {
+        kid: origManifest.kid,
+        sig: origManifest.sig,
+        ph: origManifest.ph,
+        ts: origManifest.ts,
+        u: origManifest.u,
+      },
+      identity: id,
+    });
+    embedLsbWatermark(editedRgba, derivManifest);
+
+    const derivVerify = await verifyImageBufferAndPixels({ rgba: editedRgba, width: 80, height: 80, localIdentity: id });
+    assert.equal(derivVerify.verified, true);
+    assert.equal(derivVerify.captureKind, 'derivative');
+    assert.equal(derivVerify.isDerivative, true);
+    assert.equal(derivVerify.manifest?.parent?.sig, origManifest.sig);
+    assert.equal(derivVerify.manifest?.parent?.kid, origManifest.kid);
+    assert.match(derivVerify.summary, /derivative|edited/i);
+
+    // Tampering with kind or parent signature must invalidate ECDSA signature
+    assert.equal(
+      await verifyProofManifestSignature({ ...derivManifest, kind: 'original' }),
+      false
+    );
+    assert.equal(
+      await verifyProofManifestSignature({
+        ...derivManifest,
+        parent: { ...derivManifest.parent!, sig: 'forged' },
+      }),
+      false
+    );
+  });
+
+  test('extractProofManifestFromDataUrl rejects forged manifests and identifies imported assets accurately', async () => {
+    const id = await generateProofIdentity();
+    const rgba = createSyntheticRgba(80, 80);
+    const raw = createMinimalPngBytes();
+    const bh = await computeVisualBitstreamHash(raw);
+    const validImported = await createSignedProofManifest({
+      rgba,
+      width: 80,
+      height: 80,
+      identity: id,
+      bitstreamHash: bh,
+      source: '',
+      kind: 'imported',
+    });
+    const taggedValid = injectContainerMetadata(raw, 'image/png', validImported);
+    const extractedValid = await extractProofManifestFromDataUrl(bytesToDataUrl(taggedValid, 'image/png'));
+    assert.ok(extractedValid);
+
+    const verifyImported = await verifyImageBufferAndPixels({
+      fileBytes: taggedValid,
+      rgba,
+      width: 80,
+      height: 80,
+      localIdentity: id,
+    });
+    assert.equal(verifyImported.verified, true);
+    assert.equal(verifyImported.captureKind, 'imported');
+    assert.equal(verifyImported.isDerivative, false);
+
+    // Forged signature in container metadata must be rejected by extractProofManifestFromDataUrl
+    const forgedManifest = { ...validImported, a: '@forged_author' };
+    const taggedForged = injectContainerMetadata(raw, 'image/png', forgedManifest);
+    const extractedForged = await extractProofManifestFromDataUrl(bytesToDataUrl(taggedForged, 'image/png'));
+    assert.equal(extractedForged, null, 'Forged parent manifest must not be accepted for derivative lineage');
   });
 });

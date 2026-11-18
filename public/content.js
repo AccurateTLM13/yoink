@@ -212,10 +212,25 @@
       }
     };
 
+    const measureTotalHeight = () =>
+      innerContainer
+        ? Math.max(totalHeight, innerContainer.scrollHeight || 0, stepHeight)
+        : Math.max(
+            totalHeight,
+            document.body.scrollHeight || 0,
+            document.documentElement.scrollHeight || 0,
+            document.body.offsetHeight || 0,
+            document.documentElement.offsetHeight || 0
+          );
+
     // Scroll to top to begin
     setScrollY(0);
     await new Promise((r) => setTimeout(r, 400));
 
+    let stoppedAtSafetyCap = false;
+    let scrollStalled = false;
+    let missedSections = 0;
+    let captureIndex = 0;
     try {
       while (true) {
         const actualY = getScrollY();
@@ -227,22 +242,39 @@
           suppressStickyElements();
         }
 
+        const sendChunk = () =>
+          chrome.runtime
+            .sendMessage({
+              action: 'CAPTURE_VISIBLE_TAB',
+              payload: {
+                index: captureIndex,
+                yOffset: actualY,
+                kind: 'full',
+                totalWidth: window.innerWidth,
+                totalHeight,
+                dpr: window.devicePixelRatio || 1,
+              },
+            })
+            .catch(() => null);
+
         // Request background script to capture the visible tab and stream chunk to offscreen canvas
-        const response = await chrome.runtime
-          .sendMessage({
-            action: 'CAPTURE_VISIBLE_TAB',
-            payload: {
-              index: chunks.length,
-              yOffset: actualY,
-              kind: 'full',
-              totalWidth: window.innerWidth,
-              totalHeight,
-              dpr: window.devicePixelRatio || 1,
-            },
-          })
-          .catch(() => null);
-        if (!response?.ok) throw new Error(response?.error || 'Could not capture a section. Keep this tab active and try again.');
-        if (response && response.ok) {
+        let response = await sendChunk();
+        if (!response?.ok && chunks.length > 0) {
+          const fatal = /Tab is not visible|No active scroll session/i.test(response?.error || '');
+          if (!fatal) {
+            await new Promise((r) => setTimeout(r, 250));
+            response = await sendChunk();
+          }
+        }
+
+        if (!response?.ok) {
+          const fatal = /Tab is not visible|No active scroll session/i.test(response?.error || '');
+          if (chunks.length === 0 || fatal) {
+            throw new Error(response?.error || 'Could not capture a section. Keep this tab active and try again.');
+          }
+          missedSections++;
+        } else {
+          captureIndex++;
           chunks.push({
             index: response.index,
             yOffset: actualY,
@@ -250,15 +282,7 @@
         }
 
         // Refresh totalHeight & maxScroll in case lazy-loaded content expanded the page
-        totalHeight = innerContainer
-          ? Math.max(totalHeight, innerContainer.scrollHeight || 0, stepHeight)
-          : Math.max(
-            totalHeight,
-            document.body.scrollHeight || 0,
-            document.documentElement.scrollHeight || 0,
-            document.body.offsetHeight || 0,
-            document.documentElement.offsetHeight || 0
-          );
+        totalHeight = measureTotalHeight();
         maxScroll = Math.max(0, totalHeight - stepHeight);
 
         // Notify progress to popup/hub
@@ -270,8 +294,20 @@
           })
           .catch(() => { });
 
-        if (actualY >= maxScroll || chunks.length >= 80) {
+        if (response?.limitReached || captureIndex >= 240) {
+          stoppedAtSafetyCap = !!response?.limitReached || actualY < maxScroll;
           break;
+        }
+
+        if (actualY >= maxScroll) {
+          // Brief settle check for lazy-loaded footers or dynamic sections at the bottom
+          await new Promise((r) => setTimeout(r, Math.min(250, Math.max(80, Math.round(scrollDelay / 3)))));
+          const refreshedHeight = measureTotalHeight();
+          if (refreshedHeight <= totalHeight) {
+            break;
+          }
+          totalHeight = refreshedHeight;
+          maxScroll = Math.max(0, totalHeight - stepHeight);
         }
 
         // Hide fixed/sticky headers before scrolling to the next viewport
@@ -285,10 +321,25 @@
         // Pause for lazy-loading to catch up
         await new Promise((r) => setTimeout(r, scrollDelay));
 
-        const nextY = getScrollY();
-        if (nextY === actualY && actualY > 0) {
-          // Bottom reached
-          break;
+        let nextY = getScrollY();
+        if (nextY === actualY && currentTop > actualY) {
+          // Wait once more in case lazy content is about to expand scrollHeight or page locked scroll
+          await new Promise((r) => setTimeout(r, Math.min(300, Math.max(120, Math.round(scrollDelay / 2)))));
+          const expandedHeight = measureTotalHeight();
+          if (expandedHeight > totalHeight) {
+            totalHeight = expandedHeight;
+            maxScroll = Math.max(0, totalHeight - stepHeight);
+            currentTop = Math.min(maxScroll, actualY + stepHeight);
+            setScrollY(currentTop);
+            await new Promise((r) => setTimeout(r, Math.min(250, scrollDelay)));
+            nextY = getScrollY();
+          }
+          if (nextY === actualY) {
+            if (actualY < maxScroll) {
+              scrollStalled = true;
+            }
+            break;
+          }
         }
       }
     } finally {
@@ -313,6 +364,9 @@
         dpr: window.devicePixelRatio || 1,
         title: document.title,
         url: window.location.href,
+        limitReached: stoppedAtSafetyCap,
+        scrollStalled,
+        missedSections,
       },
     });
   }

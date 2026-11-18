@@ -100,9 +100,7 @@ export const OcrDrawer: React.FC<Props> = ({
               {engine === 'shape-detection'
                 ? 'Offline Native Shape Detection'
                 : engine === 'tesseract'
-                ? 'Client-side OCR (Tesseract.js)'
-                : engine === 'byok'
-                ? 'BYOK Vision Model'
+                ? 'Offline OCR (Bundled Tesseract WASM)'
                 : 'OCR unavailable'}
             </span>
           </div>

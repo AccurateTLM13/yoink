@@ -29,7 +29,7 @@ import {
   Play,
   HardDrive,
 } from 'lucide-react';
-import { BatchFailure, CaptureSettings, FolderAccessState, HistoryItem } from './types';
+import { BatchFailure, BatchIssue, BatchReport, CaptureSettings, FolderAccessState, HistoryItem } from './types';
 import {
   DEFAULT_SETTINGS,
   getStoredSettings,
@@ -96,8 +96,10 @@ const getInitialBatchCount = (): number | null => {
 
 export default function App() {
   const [view, setView] = useState<CurrentView>(getInitialView);
-  const [recentBatchCount, setRecentBatchCount] = useState<number | null>(getInitialBatchCount);
-  const [recentBatchFailures, setRecentBatchFailures] = useState<BatchFailure[]>([]);
+  const [recentBatchReport, setRecentBatchReport] = useState<BatchReport | null>(() => {
+    const initialCount = getInitialBatchCount();
+    return initialCount != null ? { count: initialCount, captured: [], skipped: [], failures: [] } : null;
+  });
   const [settings, setSettings] = useState<CaptureSettings>(DEFAULT_SETTINGS);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [previewItem, setPreviewItem] = useState<HistoryItem | null>(null);
@@ -176,15 +178,24 @@ export default function App() {
         (res) => {
           const captureError = res.yoink_last_capture_error as { error?: string } | undefined;
           if (captureError?.error) setLastCaptureError(captureError.error);
-          const report = res.yoink_last_batch_report as { count: number; failures: BatchFailure[] } | undefined;
+          const report = res.yoink_last_batch_report as Partial<BatchReport> | undefined;
           if (report) {
-            setRecentBatchCount(report.count ?? 0);
-            setRecentBatchFailures(report.failures || []);
+            setRecentBatchReport({
+              count: report.count ?? 0,
+              captured: report.captured || [],
+              skipped: report.skipped || [],
+              failures: report.failures || [],
+            });
           }
           if (res.pending_view) {
             setView(res.pending_view as CurrentView);
             if (res.last_batch_count) {
-              setRecentBatchCount(res.last_batch_count);
+              setRecentBatchReport({
+                count: res.last_batch_count,
+                captured: [],
+                skipped: [],
+                failures: [],
+              });
             }
             chrome.storage.local.remove(['pending_view', 'last_batch_count']);
           }
@@ -233,9 +244,17 @@ export default function App() {
             setHistory(changes.omnicapture_history.newValue || []);
           }
           if (changes.yoink_last_batch_report) {
-            const report = changes.yoink_last_batch_report.newValue;
-            setRecentBatchCount(report ? report.count : null);
-            setRecentBatchFailures(report?.failures || []);
+            const report = changes.yoink_last_batch_report.newValue as Partial<BatchReport> | undefined;
+            setRecentBatchReport(
+              report
+                ? {
+                    count: report.count ?? 0,
+                    captured: report.captured || [],
+                    skipped: report.skipped || [],
+                    failures: report.failures || [],
+                  }
+                : null
+            );
           }
           if (changes.yoink_last_capture_error) {
             setLastCaptureError(changes.yoink_last_capture_error.newValue?.error || null);
@@ -245,7 +264,12 @@ export default function App() {
             chrome.storage.local.remove(['pending_view']);
           }
           if (changes.last_batch_count && changes.last_batch_count.newValue) {
-            setRecentBatchCount(changes.last_batch_count.newValue);
+            setRecentBatchReport({
+              count: changes.last_batch_count.newValue,
+              captured: [],
+              skipped: [],
+              failures: [],
+            });
             chrome.storage.local.remove(['last_batch_count']);
           }
           if (changes[FOLDER_STATUS_KEY]?.newValue?.state) {
@@ -411,8 +435,12 @@ export default function App() {
         return;
       }
       setIsCapturing(true);
-      setStatusMessage('Capturing all tabs in window...');
+      setStatusMessage(
+        settings.captureAllWindows ? 'Capturing tabs across all windows...' : 'Capturing all tabs in window...'
+      );
       let outcomeFailures: BatchFailure[] = [];
+      let outcomeSkipped: BatchIssue[] = [];
+      let outcomeCaptured: BatchIssue[] = [];
       const results = await captureAllTabs(
         settings,
         (curr, total, title) => {
@@ -420,18 +448,26 @@ export default function App() {
         },
         (outcome) => {
           outcomeFailures = outcome.failures.map((f) => ({ target: f.target, error: f.reason }));
+          outcomeSkipped = outcome.skipped || [];
+          outcomeCaptured = outcome.captured || [];
         }
       );
       const updated = await getStoredHistory();
       setHistory(updated);
       setStatusMessage(
-        outcomeFailures.length
-          ? `Captured ${results.length}; ${outcomeFailures.length} items need attention.`
+        outcomeFailures.length || outcomeSkipped.length
+          ? `Captured ${results.length}${outcomeSkipped.length ? `, skipped ${outcomeSkipped.length}` : ''}${outcomeFailures.length ? `, failed ${outcomeFailures.length}` : ''}.`
           : `All ${results.length} tabs captured!`
       );
-      if (results.length > 0 || outcomeFailures.length > 0) {
-        setRecentBatchCount(results.length);
-        setRecentBatchFailures(outcomeFailures);
+      if (results.length > 0 || outcomeFailures.length > 0 || outcomeSkipped.length > 0) {
+        setRecentBatchReport({
+          count: results.length,
+          captured: outcomeCaptured.length
+            ? outcomeCaptured
+            : results.map((item) => ({ target: item.title || item.url || 'Tab', reason: item.url || 'Captured' })),
+          skipped: outcomeSkipped,
+          failures: outcomeFailures,
+        });
         setView('history');
       }
     } catch (err: any) {
@@ -490,8 +526,7 @@ export default function App() {
   }, []);
 
   const dismissBatchReport = useCallback(() => {
-    setRecentBatchCount(null);
-    setRecentBatchFailures([]);
+    setRecentBatchReport(null);
     if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       chrome.storage.local.remove('yoink_last_batch_report').catch(() => {});
     }
@@ -1708,11 +1743,10 @@ export default function App() {
                   history={history}
                   onImportFiles={handleImportFiles}
                   onBack={() => {
-                    setRecentBatchCount(null);
+                    setRecentBatchReport(null);
                     setView('menu');
                   }}
-                  recentBatchBanner={recentBatchCount}
-                  recentBatchFailures={recentBatchFailures}
+                  recentBatchReport={recentBatchReport}
                   onDismissBatchBanner={dismissBatchReport}
                   onSelectPreview={(item) => {
                     setIsAnnotatingDirectly(false);
@@ -1908,11 +1942,10 @@ export default function App() {
           <HistoryDrawer
             history={history}
             onBack={() => {
-              setRecentBatchCount(null);
+              setRecentBatchReport(null);
               setView('menu');
             }}
-            recentBatchBanner={recentBatchCount}
-            recentBatchFailures={recentBatchFailures}
+            recentBatchReport={recentBatchReport}
             onDismissBatchBanner={dismissBatchReport}
             onSelectPreview={(item) => {
               setIsAnnotatingDirectly(false);

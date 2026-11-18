@@ -41,6 +41,12 @@ export interface MediaFilterOptions {
   searchQuery?: string;
 }
 
+export interface MediaExtractionDiagnostics {
+  crossOriginFrames: number;
+  taintedCanvases: number;
+  protectedVideos: number;
+}
+
 export interface CaptureSettings {
   format: CaptureFormat;
   quality: number; // 0.1 to 1.0 (for jpeg/webp)
@@ -60,11 +66,20 @@ export interface CaptureSettings {
   proofVisualStamp?: boolean; // Optional "Receipt Mode" provenance footer bar rendered on screenshot
   saveLocationMode?: SaveLocationMode; // 'downloads' (default), 'folder' (custom local/external drive), or 'ask'
   customSaveFolderName?: string; // Display name of selected custom folder or external drive
+  captureAllWindows?: boolean; // Capture All Tabs across all open Chrome windows
+}
+
+export interface YoinkProofParentRef {
+  kid: string; // Original capture signer key fingerprint
+  sig: string; // Original capture ECDSA signature
+  ph: string; // Original capture masked pixel hash
+  ts: number; // Original capture timestamp
+  u?: string; // Original capture declared URL origin
 }
 
 export interface YoinkProofManifest {
   v: number;
-  src: string; // IPTC digitalSourceType URI (screenCapture)
+  src: string; // IPTC digitalSourceType URI (screenCapture) or '' for derivatives/imports
   alg: 'ES256';
   kid: string; // 12-char key fingerprint (e.g. 8F3A-9C21-B40E)
   pub: string; // base64url of 65-byte raw P-256 public key
@@ -76,6 +91,8 @@ export interface YoinkProofManifest {
   u: string; // source URL
   t: string; // page title
   a: string; // author / creator handle
+  kind?: 'original' | 'derivative' | 'imported'; // Distinguishes original capture, edited derivative, and imported asset
+  parent?: YoinkProofParentRef; // Original capture signature lineage when producing a derivative
   sig: string; // base64url of 64-byte ECDSA P-256 signature
 }
 
@@ -89,6 +106,8 @@ export interface ProofVerificationResult {
   signatureValid: boolean;
   pixelsIntact: boolean;
   isOwnCapture: boolean;
+  isDerivative?: boolean;
+  captureKind?: 'original' | 'derivative' | 'imported' | 'unsigned';
   localKeyFingerprint?: string;
   manifest?: YoinkProofManifest;
 }
@@ -160,7 +179,8 @@ export type AnnotationTool =
   | 'pen'
   | 'highlighter'
   | 'text'
-  | 'blur';
+  | 'blur'
+  | 'blackout';
 
 export interface AnnotationItem {
   id: string;
@@ -178,4 +198,5 @@ export interface AnnotationItem {
 }
 
 export interface BatchIssue { target: string; reason: string; tabId?: number }
-export interface BatchOutcome { failures: BatchIssue[]; skipped: BatchIssue[] }
+export interface BatchOutcome { failures: BatchIssue[]; skipped: BatchIssue[]; captured?: BatchIssue[] }
+export interface BatchReport { count: number; captured: BatchIssue[]; skipped: BatchIssue[]; failures: BatchFailure[] }

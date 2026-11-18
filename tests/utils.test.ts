@@ -163,6 +163,45 @@ describe('Storage Utilities', () => {
     assert.equal(retrieved.autoDownload, false);
   });
 
+  test('enforces local-only settings storage and never reads or writes chrome.storage.sync', async () => {
+    const origChrome = (globalThis as any).chrome;
+    const localStore: Record<string, any> = {};
+    let syncReadCalls = 0;
+    let syncWriteCalls = 0;
+
+    (globalThis as any).chrome = {
+      storage: {
+        local: {
+          get: async (keys: string[]) => {
+            const out: Record<string, any> = {};
+            for (const k of keys) out[k] = localStore[k];
+            return out;
+          },
+          set: async (obj: Record<string, any>) => Object.assign(localStore, obj),
+        },
+        sync: {
+          get: async () => {
+            syncReadCalls++;
+            return { omnicapture_settings: { format: 'jpeg' } };
+          },
+          set: async () => {
+            syncWriteCalls++;
+          },
+        },
+      },
+    };
+
+    try {
+      await saveStoredSettings({ ...DEFAULT_SETTINGS, format: 'webp' });
+      const loaded = await getStoredSettings();
+      assert.equal(loaded.format, 'webp');
+      assert.equal(syncWriteCalls, 0, 'saveStoredSettings must not write to chrome.storage.sync');
+      assert.equal(syncReadCalls, 0, 'getStoredSettings must not read from chrome.storage.sync');
+    } finally {
+      (globalThis as any).chrome = origChrome;
+    }
+  });
+
   test('applyOptimalQualityPreset configures lossless PNG, 2x Retina scale, and anti-squish slicing', () => {
     const baseline: CaptureSettings = {
       ...DEFAULT_SETTINGS,

@@ -776,14 +776,18 @@ export async function captureAllTabs(
       chrome.runtime.sendMessage(
         {
           action: 'CAPTURE_ALL_TABS',
-          payload: { settings, tabIds },
+          payload: { settings, tabIds, allWindows: !!settings.captureAllWindows },
         },
         (response) => {
           chrome.runtime.onMessage.removeListener(progressListener);
           if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
           if (response?.error) return reject(new Error(response.error));
           if (!response) return reject(new Error('Capture did not return a result.'));
-          onOutcome?.({ failures: response.failures || [], skipped: response.skipped || [] });
+          onOutcome?.({
+            failures: response.failures || [],
+            skipped: response.skipped || [],
+            captured: response.captured || [],
+          });
           resolve(response.results || []);
         }
       );

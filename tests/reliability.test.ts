@@ -460,4 +460,223 @@ describe('High-Impact Reliability Improvements (Streaming Stitch, Dynamic Canvas
     // After capture finishes, original visibility must be restored
     assert.equal(stickyHeader.style.getPropertyValue('visibility'), 'visible', 'Original visibility must be restored after capture');
   });
+
+  it('automatically segments oversized full-page captures instead of truncating and preserves all parts', async () => {
+    let onMessageListener: any = null;
+    const finalizedCaptures: any[] = [];
+    const downloadFilenames: string[] = [];
+    let jobSeq = 0;
+
+    class MockCanvas {
+      width: number;
+      height: number;
+      constructor(w: number, h: number) {
+        this.width = w;
+        this.height = h;
+      }
+      getContext() {
+        return {
+          imageSmoothingEnabled: true,
+          imageSmoothingQuality: 'high',
+          drawImage() {},
+        };
+      }
+      async convertToBlob() {
+        return { arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
+      }
+    }
+
+    const offscreenCtx = vm.createContext({
+      chrome: {
+        runtime: {
+          id: 'test-ext-id',
+          getURL: (p: string) => `chrome-extension://test-ext-id/${p}`,
+          onMessage: { addListener: (fn: any) => { onMessageListener = fn; } },
+        },
+      },
+      OffscreenCanvas: MockCanvas,
+      FileReader: class {
+        result = 'data:image/png;base64,SEGMENT_IMG';
+        onload: any = null;
+        readAsDataURL() { if (this.onload) this.onload(); }
+      },
+      fetch: async () => ({ blob: async () => ({ type: 'image/png' }) }),
+      createImageBitmap: async () => ({ width: 1200, height: 5000, close() {} }),
+      console, Date, Promise, Map, Object, Number, String, Math,
+    });
+    vm.runInContext(
+      `${OFFSCREEN_CODE}\n;encodeCanvas = async (c) => ({ dataUrl: 'data:image/png;base64,SEG_' + c.height, thumbnailUrl: 'thumb', width: c.width, height: c.height });`,
+      offscreenCtx
+    );
+
+    const callOffscreenReal = (type: string, payload: any) =>
+      new Promise<any>((resolve) => {
+        onMessageListener({ target: 'offscreen', type, payload }, { id: 'test-ext-id', url: 'chrome-extension://test-ext-id/background.js' }, resolve);
+      });
+
+    let bgOnMessage: any = null;
+    const storageData: Record<string, any> = {};
+    const bgCtx = vm.createContext({
+      chrome: {
+        runtime: {
+          id: 'test-ext-id',
+          getURL: (p: string) => `chrome-extension://test-ext-id/${p}`,
+          onInstalled: { addListener: () => {} },
+          onMessage: { addListener: (fn: any) => { bgOnMessage = fn; } },
+          getContexts: async () => [{ contextType: 'OFFSCREEN_DOCUMENT' }],
+          sendMessage: async (msg: any) => {
+            if (msg?.target === 'offscreen') return callOffscreenReal(msg.type, msg.payload);
+            if (msg?.action === 'CAPTURE_FINISHED') finalizedCaptures.push(msg.payload.item);
+            return { ok: true };
+          },
+        },
+        commands: { onCommand: { addListener: () => {} } },
+        alarms: { create: () => {}, onAlarm: { addListener: () => {} } },
+        tabs: {
+          onRemoved: { addListener: () => {} },
+          captureVisibleTab: async () => 'data:image/png;base64,CHUNK',
+          setZoom: async () => {},
+        },
+        storage: {
+          local: {
+            get: async (k: string) => ({ [k]: storageData[k] }),
+            set: async (v: any) => Object.assign(storageData, v),
+            remove: async () => {},
+          },
+        },
+        downloads: {
+          download: async (opts: any) => {
+            downloadFilenames.push(opts.filename);
+            return ++jobSeq;
+          },
+          onChanged: { addListener: () => {}, removeListener: () => {} },
+          search: async () => [{ state: 'complete' }],
+        },
+      },
+      crypto: { randomUUID: () => `uuid-${++jobSeq}-12345678` },
+      setTimeout: (fn: any) => { fn(); return 1; },
+      clearTimeout: () => {},
+      URL, Date, Promise, Map, Set, Object, Array, Number, String, Math, console, structuredClone,
+      OffscreenCanvas: MockCanvas,
+      createImageBitmap: async () => ({ width: 1200, height: 5000, close() {} }),
+      fetch: async () => ({ blob: async () => ({}) }),
+      btoa: () => 'AAAA',
+      Uint8Array,
+    });
+    vm.runInContext(BG_CODE, bgCtx);
+
+    const sender = {
+      id: 'test-ext-id',
+      url: 'https://example.com/huge',
+      frameId: 0,
+      tab: { id: 77, windowId: 1, active: true, title: 'Huge Page', url: 'https://example.com/huge' },
+    };
+    const send = (action: string, payload: any) =>
+      new Promise<any>((resolve) => bgOnMessage({ action, payload }, sender, resolve));
+
+    // 4 chunks of 5000px = 20,000px tall (> 16,000px single-canvas MAX_DIMENSION)
+    for (let i = 0; i < 4; i++) {
+      const r = await send('CAPTURE_VISIBLE_TAB', {
+        index: i,
+        yOffset: i * 5000,
+        kind: 'full',
+        totalWidth: 1200,
+        totalHeight: 20000,
+        dpr: 1,
+      });
+      assert.equal(r.ok, true);
+    }
+
+    await send('FINALIZE_STITCHING', {
+      chunks: [{ index: 0, yOffset: 0 }, { index: 1, yOffset: 5000 }, { index: 2, yOffset: 10000 }, { index: 3, yOffset: 15000 }],
+      totalWidth: 1200,
+      totalHeight: 20000,
+      dpr: 1,
+      title: 'Huge Page',
+    });
+
+    // Wait for async pipeline (both segments saved & downloaded)
+    for (let t = 0; t < 20 && finalizedCaptures.length === 0; t++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const savedHistory = storageData.omnicapture_history || [];
+    assert.equal(savedHistory.length, 2, '20,000px page should automatically split into 2 seamless segments');
+    assert.equal(downloadFilenames.length, 2, 'Both segments should be auto-downloaded');
+    assert.ok(savedHistory.some((item: any) => /Part 1 of 2/.test(item.title)));
+    assert.ok(savedHistory.some((item: any) => /Part 2 of 2/.test(item.title)));
+    assert.match(savedHistory[0].warning || '', /split into 2/i);
+    assert.ok(downloadFilenames.some((fn) => fn.includes('_part1_of_2')));
+    assert.ok(downloadFilenames.some((fn) => fn.includes('_part2_of_2')));
+  });
+
+  it('content.js exits cleanly when page refuses to scroll from y=0 and warns when a section cannot be captured', async () => {
+    let contentMessageListener: any = null;
+    let finalizePayload: any = null;
+    let chunkCalls = 0;
+
+    let finalizeSent: Promise<void>;
+    let resolveFinalize!: () => void;
+    finalizeSent = new Promise<void>((r) => {
+      resolveFinalize = r;
+    });
+
+    const windowMock: any = {
+      __YOINK_CONTENT_INITIALIZED__: false,
+      scrollX: 0,
+      scrollY: 0,
+      innerWidth: 1200,
+      innerHeight: 800,
+      devicePixelRatio: 1,
+      location: { href: 'https://example.com/stuck' },
+      scrollTo() {
+        // Simulates a container/CSS lock that prevents scrolling past y=0
+      },
+      getComputedStyle: () => ({ position: 'static' }),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+
+    const documentMock: any = {
+      title: 'Stuck Page',
+      body: { style: { overflow: '' }, scrollHeight: 3000, offsetHeight: 3000, children: [] },
+      documentElement: { scrollHeight: 3000, offsetHeight: 3000, scrollTop: 0, appendChild: () => {} },
+      querySelectorAll: () => [],
+      getElementById: () => null,
+    };
+
+    const chromeMock = {
+      runtime: {
+        onMessage: { addListener: (fn: any) => { contentMessageListener = fn; } },
+        sendMessage: async (msg: any) => {
+          if (msg.action === 'CAPTURE_VISIBLE_TAB') {
+            chunkCalls++;
+            return { ok: true, index: msg.payload.index };
+          }
+          if (msg.action === 'FINALIZE_STITCHING') {
+            finalizePayload = msg.payload;
+            resolveFinalize();
+            return { success: true };
+          }
+          return { ok: true };
+        },
+      },
+    };
+
+    const ctx = vm.createContext({
+      window: windowMock,
+      document: documentMock,
+      chrome: chromeMock,
+      setTimeout: (fn: any) => { fn(); return 1; },
+      clearTimeout: () => {},
+      Promise, Set, Array, Object, Math, Number, String,
+    });
+    vm.runInContext(CONTENT_CODE, ctx);
+
+    contentMessageListener({ action: 'START_SCROLL_CAPTURE', payload: { scrollDelay: 10, hideSticky: false } }, {}, () => {});
+    await finalizeSent;
+
+    assert.equal(chunkCalls, 1, 'Should stop immediately instead of looping 240 times when scroll stays stuck at y=0');
+    assert.equal(finalizePayload.scrollStalled, true);
+  });
 });

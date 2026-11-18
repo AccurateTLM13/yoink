@@ -21,6 +21,7 @@ import {
 import {
   CaptureSettings,
   HistoryItem,
+  MediaExtractionDiagnostics,
   YoinkedMediaItem,
   YoinkMediaCategory,
 } from '../types';
@@ -84,6 +85,7 @@ export const MediaYoinkerModal: React.FC<Props> = ({
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [batchDownloading, setBatchDownloading] = useState(false);
   const [statusNote, setStatusNote] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<MediaExtractionDiagnostics | null>(null);
 
   const runScan = useCallback(async (targetTabId?: number) => {
     setLoading(true);
@@ -91,6 +93,7 @@ export const MediaYoinkerModal: React.FC<Props> = ({
     try {
       const res = await yoinkMediaFromTab(targetTabId);
       setItems(res.items);
+      setDiagnostics(res.diagnostics || null);
       setScannedTabTitle(res.tabTitle);
       setScannedTabUrl(res.tabUrl);
       if (res.tabId) setSelectedTabId(res.tabId);
@@ -477,6 +480,29 @@ export const MediaYoinkerModal: React.FC<Props> = ({
             </button>
           </div>
         )}
+
+        {diagnostics &&
+          (diagnostics.crossOriginFrames > 0 ||
+            diagnostics.taintedCanvases > 0 ||
+            diagnostics.protectedVideos > 0) && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200/80 text-[10.5px] text-amber-900 leading-snug">
+              <b>Some protected assets were skipped by browser security:</b>{' '}
+              {[
+                diagnostics.crossOriginFrames > 0
+                  ? `${diagnostics.crossOriginFrames} cross-origin frame(s)`
+                  : '',
+                diagnostics.taintedCanvases > 0
+                  ? `${diagnostics.taintedCanvases} CORS-tainted canvas(es)`
+                  : '',
+                diagnostics.protectedVideos > 0
+                  ? `${diagnostics.protectedVideos} DRM/cross-origin video(s)`
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(', ')}
+              . Use <b>Capture Selection</b> or <b>Visible</b> screenshot to grab protected regions.
+            </div>
+          )}
       </div>
 
       {/* Main Media Grid */}

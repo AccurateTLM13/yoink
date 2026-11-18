@@ -7,6 +7,7 @@ import {
   drawPen,
   drawHighlighter,
   drawPixelateRedaction,
+  drawBlackoutRedaction,
   drawTextBadge,
   renderAnnotations,
 } from '../src/utils/annotation';
@@ -162,5 +163,75 @@ describe('Blur & Redaction Tool (P0-3)', () => {
       renderAnnotations(ctx, annotations, baseCanvas);
     }
     assert.equal(annotations[0].tool, 'blur');
+  });
+
+  test('drawBlackoutRedaction draws opaque solid #000000 rectangle with normalized bounds', () => {
+    const ctx = new MockCanvasRenderingContext2D() as any;
+    ctx.globalAlpha = 0.35;
+
+    drawBlackoutRedaction(ctx, 120, 90, -40, -30);
+
+    const fillOp = ctx.fills.find((f: any) => f.type === 'fillRect');
+    assert.ok(fillOp, 'Expected fillRect call for blackout redaction');
+    assert.equal(fillOp.x, 80);
+    assert.equal(fillOp.y, 60);
+    assert.equal(fillOp.w, 40);
+    assert.equal(fillOp.h, 30);
+    assert.equal(fillOp.style, '#000000');
+  });
+
+  test('renderAnnotations dispatches blackout tool and overwrites underlying pixel buffer completely', () => {
+    const width = 20;
+    const height = 20;
+    const pixels = new Uint8ClampedArray(width * height * 4);
+    for (let i = 0; i < pixels.length; i += 4) {
+      pixels[i] = 200;
+      pixels[i + 1] = 150;
+      pixels[i + 2] = 100;
+      pixels[i + 3] = 255;
+    }
+
+    const rasterCtx: any = {
+      fillStyle: '#ffffff',
+      globalAlpha: 1,
+      globalCompositeOperation: 'source-over',
+      save() {},
+      restore() {},
+      fillRect(x: number, y: number, w: number, h: number) {
+        if (this.fillStyle !== '#000000' || this.globalAlpha !== 1) return;
+        for (let py = y; py < y + h; py++) {
+          for (let px = x; px < x + w; px++) {
+            if (px >= 0 && px < width && py >= 0 && py < height) {
+              const idx = (py * width + px) * 4;
+              pixels[idx] = 0;
+              pixels[idx + 1] = 0;
+              pixels[idx + 2] = 0;
+              pixels[idx + 3] = 255;
+            }
+          }
+        }
+      },
+    };
+
+    const blackoutItem: AnnotationItem = {
+      id: 'blk_1',
+      tool: 'blackout',
+      color: '#ef4444', // Even if palette color is red, blackout must flatten as opaque solid black
+      strokeWidth: 4,
+      startX: 4,
+      startY: 5,
+      endX: 12,
+      endY: 13,
+    };
+
+    renderAnnotations(rasterCtx, [blackoutItem], {} as any);
+
+    // Covered pixel must be pure opaque black with zero original RGB retained
+    const coveredIdx = (8 * width + 8) * 4;
+    assert.deepEqual(Array.from(pixels.slice(coveredIdx, coveredIdx + 4)), [0, 0, 0, 255]);
+
+    // Uncovered pixel remains untouched
+    const outsideIdx = (1 * width + 1) * 4;
+    assert.deepEqual(Array.from(pixels.slice(outsideIdx, outsideIdx + 4)), [200, 150, 100, 255]);
   });
 });

@@ -1,6 +1,7 @@
 import {
   CaptureSettings,
   HistoryItem,
+  MediaExtractionDiagnostics,
   MediaFilterOptions,
   YoinkedMediaItem,
   YoinkMediaCategory,
@@ -262,6 +263,7 @@ export async function sendMediaItemToStudio(
     title: item.name,
     url: item.pageUrl || item.url,
     source: '', // An imported asset is not itself a screen capture.
+    kind: 'imported',
   });
 
   const historyItem: HistoryItem = {
@@ -338,6 +340,7 @@ export async function getInjectableOpenTabs(): Promise<OpenWebsiteTab[]> {
  */
 export async function yoinkMediaFromTab(tabId?: number): Promise<{
   items: YoinkedMediaItem[];
+  diagnostics?: MediaExtractionDiagnostics;
   tabTitle: string;
   tabUrl: string;
   tabId?: number;
@@ -355,6 +358,7 @@ export async function yoinkMediaFromTab(tabId?: number): Promise<{
           }
           resolve({
             items: response?.items || [],
+            diagnostics: response?.diagnostics,
             tabTitle: response?.tabTitle || 'Webpage',
             tabUrl: response?.tabUrl || '',
             tabId: response?.tabId,

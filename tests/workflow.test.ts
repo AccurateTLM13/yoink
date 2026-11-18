@@ -25,15 +25,15 @@ function backgroundHarness(initial: Record<string, any> = {}) {
   const chrome = {
     runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onInstalled: event(), onMessage: event(), sendMessage: async () => ({}) },
     commands: { onCommand: event() },
-    alarms: { onAlarm: event(), create() {} },
-    tabs: { onRemoved: event(), onUpdated: event(), setZoom: async () => {}, query: async () => [], get: async () => ({ status: 'complete' }) },
+    alarms: { onAlarm: event(), create() { } },
+    tabs: { onRemoved: event(), onUpdated: event(), setZoom: async () => { }, query: async () => [], get: async () => ({ status: 'complete' }) },
     permissions: { contains: async () => true },
     windows: {
       create: async ({ url }: { url: string }) => {
         if (url.includes('/bad')) throw new Error('Page could not be opened');
         return { id: 1, tabs: [{ id: 1 }] };
       },
-      remove: async () => {},
+      remove: async () => { },
     },
     downloads: {
       onChanged: changed,
@@ -57,7 +57,7 @@ function backgroundHarness(initial: Record<string, any> = {}) {
     },
   };
   const context = createContext({ chrome, crypto: webcrypto, console, setTimeout, clearTimeout, URL, structuredClone });
-  runInContext(`${backgroundSource}\n;globalThis.__api = { saveHistoryItem, mutateHistory, migrateStorage, downloadSafe, finishCapture, recordCaptureFailure, handleCaptureUrlList };`, context);
+  runInContext(`${backgroundSource}\n;globalThis.__api = { saveHistoryItem, mutateHistory, migrateStorage, downloadSafe, finishCapture, recordCaptureFailure, handleCaptureUrlList, handleCaptureAllTabs };`, context);
   return {
     context, data, api: (context as any).__api,
     setDownloadState: (value: string) => { downloadState = value; },
@@ -159,8 +159,8 @@ test('batch capture reports individual failures alongside successful results', a
 
 test('oversized stitch is explicitly marked partial while a complete stitch is not', async () => {
   class Canvas {
-    constructor(public width: number, public height: number) {}
-    getContext() { return { drawImage() {} }; }
+    constructor(public width: number, public height: number) { }
+    getContext() { return { drawImage() { } }; }
   }
   const chrome = { runtime: { getURL: () => 'chrome-extension://test/', onMessage: event() } };
   const context = createContext({ chrome, OffscreenCanvas: Canvas, console, URL, setTimeout, clearTimeout });
@@ -174,4 +174,50 @@ test('oversized stitch is explicitly marked partial while a complete stitch is n
     if (id === 'partial') assert.match(result.warning, /Partial capture/);
     else assert.equal(result.warning, undefined);
   }
+});
+
+test('capture-all-tabs supports multi-window capture, restores per-window active tabs, and returns captured/skipped/failed report', async () => {
+  const { context, api } = backgroundHarness();
+  const activatedTabs: number[] = [];
+  let queriedOpts: any = null;
+
+  context.chrome.tabs.query = async (opts: any) => {
+    queriedOpts = opts;
+    return [
+      { id: 10, windowId: 1, active: true, title: 'App One', url: 'https://one.example' },
+      { id: 11, windowId: 1, active: false, title: 'Extensions', url: 'chrome://extensions' },
+      { id: 20, windowId: 2, active: true, title: 'Window Two Orig', url: 'https://two-orig.example' },
+      { id: 21, windowId: 2, active: false, title: 'App Two Fail', url: 'https://two-fail.example' },
+    ];
+  };
+  context.chrome.tabs.update = async (id: number, props: any) => {
+    if (props?.active) activatedTabs.push(id);
+    return { id, active: true };
+  };
+  runInContext(`
+    sleep = async () => {};
+    waitForTabComplete = async () => {};
+    captureAndEncode = async (_w, _s, meta) => {
+      if (meta.url.includes('two-fail')) throw new Error('Tab crashed');
+      return { dataUrl: 'data:image/png;base64,AA==', width: 100, height: 100 };
+    };
+    finishCapture = async (o) => ({ id: o.url, title: o.title, url: o.url, dataUrl: o.dataUrl });
+  `, context);
+
+  const report = await api.handleCaptureAllTabs({
+    settings: { captureAllWindows: true },
+    allWindows: true,
+  });
+
+  assert.equal(queriedOpts?.windowType, 'normal', 'allWindows mode should query all normal windows');
+  assert.equal('lastFocusedWindow' in (queriedOpts || {}), false, 'allWindows mode should not restrict to lastFocusedWindow');
+  assert.equal(report.results.length, 2);
+  assert.equal(report.captured.length, 2);
+  assert.equal(report.skipped.length, 1);
+  assert.match(report.skipped[0].target, /Extensions/);
+  assert.equal(report.failures.length, 1);
+  assert.match(report.failures[0].target, /App Two Fail/);
+  // Must restore both window 1 active tab (10) and window 2 active tab (20)
+  assert.ok(activatedTabs.includes(10));
+  assert.ok(activatedTabs.includes(20));
 });

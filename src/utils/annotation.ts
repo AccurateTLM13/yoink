@@ -1,5 +1,5 @@
-import { AnnotationItem } from '../types';
-import { applyProofToCanvasAndEncode } from './proof';
+import { AnnotationItem, YoinkProofParentRef } from '../types';
+import { applyProofToCanvasAndEncode, extractProofManifestFromDataUrl } from './proof';
 
 /**
  * Draws an arrow from (startX, startY) to (endX, endY) with an arrowhead.
@@ -213,6 +213,15 @@ export function drawTextBadge(
   ctx.restore();
 }
 
+function normalizeRect(x: number, y: number, w: number, h: number) {
+  return {
+    x: Math.round(w < 0 ? x + w : x),
+    y: Math.round(h < 0 ? y + h : y),
+    w: Math.round(Math.abs(w)),
+    h: Math.round(Math.abs(h)),
+  };
+}
+
 /**
  * Redacts an image region using pixelation (P0-3).
  * Samples source pixels from sourceCanvas, downsamples, and draws without smoothing.
@@ -226,10 +235,7 @@ export function drawPixelateRedaction(
   h: number,
   blockSize = 12
 ): void {
-  const rectX = Math.round(w < 0 ? x + w : x);
-  const rectY = Math.round(h < 0 ? y + h : y);
-  const rectW = Math.round(Math.abs(w));
-  const rectH = Math.round(Math.abs(h));
+  const { x: rectX, y: rectY, w: rectW, h: rectH } = normalizeRect(x, y, w, h);
 
   if (rectW <= 0 || rectH <= 0) return;
 
@@ -272,6 +278,29 @@ export function drawPixelateRedaction(
   ctx.lineWidth = 1;
   ctx.strokeRect(rectX, rectY, rectW, rectH);
 
+  ctx.restore();
+}
+
+/**
+ * Redacts an image region using solid opaque blackout (#000000).
+ * Flattens into exported raster images so original pixels are not retained.
+ */
+export function drawBlackoutRedaction(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number
+): void {
+  const { x: rectX, y: rectY, w: rectW, h: rectH } = normalizeRect(x, y, w, h);
+
+  if (rectW <= 0 || rectH <= 0) return;
+
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(rectX, rectY, rectW, rectH);
   ctx.restore();
 }
 
@@ -370,21 +399,18 @@ export function renderAnnotations(
         break;
 
       case 'blur':
+      case 'blackout':
         if (
           item.startX !== undefined &&
           item.startY !== undefined &&
           item.endX !== undefined &&
           item.endY !== undefined
         ) {
-          drawPixelateRedaction(
-            ctx,
-            baseCanvas,
-            item.startX,
-            item.startY,
-            item.endX - item.startX,
-            item.endY - item.startY,
-            12
-          );
+          if (item.tool === 'blackout') {
+            drawBlackoutRedaction(ctx, item.startX, item.startY, item.endX - item.startX, item.endY - item.startY);
+          } else {
+            drawPixelateRedaction(ctx, baseCanvas, item.startX, item.startY, item.endX - item.startX, item.endY - item.startY, 12);
+          }
         }
         break;
 
@@ -396,15 +422,28 @@ export function renderAnnotations(
 }
 
 /**
- * Creates a composite data URL merging the base image and annotations.
- * Never mutates original source image data.
+ * Creates a flattened composite data URL merging the base image and annotations.
+ * Never mutates original source image data, marks the result as a Proof derivative,
+ * and records the original capture signature when present.
  */
 export async function createAnnotatedComposite(
   baseImageSrc: string,
   annotations: AnnotationItem[],
   format: 'png' | 'jpeg' | 'webp' = 'png',
-  quality = 0.92
-): Promise<{ dataUrl: string; width: number; height: number }> {
+  quality = 0.92,
+  proofMeta?: { url?: string; title?: string; enableProof?: boolean; proofAuthor?: string }
+): Promise<{ dataUrl: string; width: number; height: number; proofKeyId?: string; proofSigned?: boolean }> {
+  const sourceManifest = await extractProofManifestFromDataUrl(baseImageSrc).catch(() => null);
+  const parentRef: YoinkProofParentRef | undefined = sourceManifest
+    ? sourceManifest.parent || {
+        kid: sourceManifest.kid,
+        sig: sourceManifest.sig,
+        ph: sourceManifest.ph,
+        ts: sourceManifest.ts,
+        u: sourceManifest.u,
+      }
+    : undefined;
+
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -424,16 +463,29 @@ export async function createAnnotatedComposite(
       // Draw base screenshot
       ctx.drawImage(img, 0, 0);
 
-      // Render annotations
+      // Render annotations (including flattened solid blackouts / pixelation)
       renderAnnotations(ctx, annotations, canvas);
 
       applyProofToCanvasAndEncode(canvas, {
         format,
         quality,
-        title: 'Annotated Screenshot',
-        url: 'yoink://annotated',
+        enableProof: proofMeta?.enableProof,
+        proofAuthor: proofMeta?.proofAuthor,
+        title: proofMeta?.title || 'Annotated Screenshot',
+        url: proofMeta?.url || sourceManifest?.u || 'yoink://annotated',
+        source: '',
+        kind: 'derivative',
+        parent: parentRef,
       })
-        .then((res) => resolve({ dataUrl: res.dataUrl, width: res.width, height: res.height }))
+        .then((res) =>
+          resolve({
+            dataUrl: res.dataUrl,
+            width: res.width,
+            height: res.height,
+            proofKeyId: res.proofKeyId,
+            proofSigned: res.proofSigned,
+          })
+        )
         .catch(() => {
           const mime =
             format === 'jpeg'

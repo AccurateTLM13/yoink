@@ -1,16 +1,9 @@
 import Tesseract from 'tesseract.js';
 
-export interface AiConfig {
-  provider: 'ondevice' | 'gemini' | 'openai';
-  apiKey?: string;
-  customEndpoint?: string;
-  modelName?: string;
-}
-
 export interface OcrResult {
   text: string;
   confidence: number;
-  engine: 'shape-detection' | 'tesseract' | 'window-ai' | 'byok' | 'fallback';
+  engine: 'shape-detection' | 'tesseract' | 'window-ai' | 'fallback';
   status?: 'success' | 'empty' | 'unavailable';
   message?: string;
 }
@@ -104,71 +97,10 @@ export async function generateSmartTitle(
 }
 
 /**
- * Dispatch BYOK Vision OCR directly from client with zero proxy
+ * Extract text from capture image strictly on-device via Native Shape Detection API
+ * or bundled offline Tesseract WASM (100% local, zero external network calls).
  */
-async function dispatchByokVisionOcr(dataUrl: string, config: AiConfig): Promise<string> {
-  if (config.provider === 'gemini') {
-    const base64Data = dataUrl.split(',')[1] || '';
-    const mime = dataUrl.split(';')[0]?.replace('data:', '') || 'image/png';
-    const model = encodeURIComponent(config.modelName || 'gemini-2.5-flash');
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': config.apiKey || '',
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              { text: 'Extract all readable text from this image exactly as written. Output only the extracted text with no commentary.' },
-              { inline_data: { mime_type: mime, data: base64Data } },
-            ],
-          },
-        ],
-      }),
-    });
-    if (!res.ok) throw new Error(`Gemini OCR failed: HTTP ${res.status}`);
-    const json = await res.json();
-    return json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  }
-
-  if (config.provider === 'openai') {
-    const endpoint = config.customEndpoint || 'https://api.openai.com/v1/chat/completions';
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: config.modelName || 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: 'Extract all readable text from this image. Output only the raw text.' },
-              { type: 'image_url', image_url: { url: dataUrl } },
-            ],
-          },
-        ],
-      }),
-    });
-    if (!res.ok) throw new Error(`OCR failed: HTTP ${res.status}`);
-    const json = await res.json();
-    return json?.choices?.[0]?.message?.content || '';
-  }
-
-  return '';
-}
-
-/**
- * Extract text from capture image via Native Shape Detection API, offline Tesseract WASM, or BYOK vision API (P2-9)
- */
-export async function extractOcrText(
-  dataUrl: string,
-  config?: AiConfig
-): Promise<OcrResult> {
+export async function extractOcrText(dataUrl: string): Promise<OcrResult> {
   let detectorCompleted = false;
 
   // 1. Try Native Chrome TextDetector (Shape Detection API - 100% offline & free)
@@ -276,23 +208,6 @@ export async function extractOcrText(
       }
     } catch (err) {
       console.warn('Tesseract OCR failed, falling back:', err);
-    }
-  }
-
-  // 3. If user configured BYOK (OpenAI / Gemini / Custom Ollama), dispatch directly
-  if (config && config.apiKey && config.provider !== 'ondevice') {
-    try {
-      const byokText = await dispatchByokVisionOcr(dataUrl, config);
-      if (byokText) {
-        return {
-          text: byokText,
-          confidence: 0.98,
-          engine: 'byok',
-          status: 'success',
-        };
-      }
-    } catch (err) {
-      console.warn('BYOK vision extraction failed:', err);
     }
   }
 

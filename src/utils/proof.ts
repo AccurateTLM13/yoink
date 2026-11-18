@@ -1,4 +1,4 @@
-import { ProofVerificationResult, YoinkProofManifest } from '../types';
+import { ProofVerificationResult, YoinkProofManifest, YoinkProofParentRef } from '../types';
 
 export const IPTC_SCREEN_CAPTURE_URI =
   'http://cv.iptc.org/newscodes/digitalsourcetype/screenCapture';
@@ -388,6 +388,13 @@ export async function computeVisualBitstreamHash(bytes: Uint8Array): Promise<str
   return bytesToBase64Url(new Uint8Array(digest));
 }
 
+function isDerivativeManifest(
+  kind?: YoinkProofManifest['kind'],
+  parent?: YoinkProofManifest['parent']
+): boolean {
+  return kind === 'derivative' || !!parent;
+}
+
 function canonicalManifestString(m: Omit<YoinkProofManifest, 'sig'>): string {
   const parts = [
     `YNKP${m.v}`,
@@ -404,6 +411,12 @@ function canonicalManifestString(m: Omit<YoinkProofManifest, 'sig'>): string {
   ];
   if (m.bh) {
     parts.push(m.bh);
+  }
+  if (isDerivativeManifest(m.kind, m.parent) || m.kind === 'imported') {
+    parts.push(m.kind || 'derivative');
+    if (m.parent) {
+      parts.push(m.parent.kid, m.parent.sig, m.parent.ph, String(m.parent.ts), m.parent.u || '');
+    }
   }
   return parts.join('|');
 }
@@ -430,15 +443,18 @@ export async function createSignedProofManifest(params: {
   identity?: ProofIdentity;
   bitstreamHash?: string;
   precomputedPixelHash?: string;
+  kind?: 'original' | 'derivative' | 'imported';
+  parent?: YoinkProofParentRef;
 }): Promise<YoinkProofManifest> {
   const identity = params.identity || (await getOrCreateProofIdentity());
   const ph =
     params.precomputedPixelHash ||
     (await computeMaskedPixelHash(params.rgba, params.width, params.height));
+  const isDerivative = isDerivativeManifest(params.kind, params.parent);
 
   const unsigned: Omit<YoinkProofManifest, 'sig'> = {
     v: PROOF_VERSION,
-    src: params.source ?? IPTC_SCREEN_CAPTURE_URI,
+    src: params.source ?? (isDerivative || params.kind === 'imported' ? '' : IPTC_SCREEN_CAPTURE_URI),
     alg: 'ES256',
     kid: identity.keyFingerprint,
     pub: identity.pubRawB64Url,
@@ -450,6 +466,8 @@ export async function createSignedProofManifest(params: {
     u: proofSiteOrigin(params.url).slice(0, 180),
     t: (params.title || 'Screenshot').slice(0, 100),
     a: (params.author || '').trim().slice(0, 60),
+    ...(params.kind ? { kind: params.kind } : isDerivative ? { kind: 'derivative' } : {}),
+    ...(params.parent ? { parent: params.parent } : {}),
   };
 
   const privateKey = await crypto.subtle.importKey(
@@ -913,6 +931,8 @@ export async function verifyImageBufferAndPixels(params: {
       signatureValid: false,
       pixelsIntact: false,
       isOwnCapture: false,
+      isDerivative: false,
+      captureKind: 'unsigned',
       localKeyFingerprint: localIdentity.keyFingerprint,
     };
   }
@@ -949,6 +969,12 @@ export async function verifyImageBufferAndPixels(params: {
   const isOwnCapture =
     activeManifest.pub === localIdentity.pubRawB64Url &&
     activeManifest.kid === localIdentity.keyFingerprint;
+  const isDerivative = isDerivativeManifest(activeManifest.kind, activeManifest.parent);
+  const captureKind: 'original' | 'derivative' | 'imported' = isDerivative
+    ? 'derivative'
+    : activeManifest.kind === 'imported' || !hasIptcScreenCapture
+    ? 'imported'
+    : 'original';
 
   if (!signatureValid) {
     return {
@@ -961,6 +987,8 @@ export async function verifyImageBufferAndPixels(params: {
       signatureValid: false,
       pixelsIntact,
       isOwnCapture: false,
+      isDerivative,
+      captureKind,
       localKeyFingerprint: localIdentity.keyFingerprint,
       manifest: activeManifest,
     };
@@ -971,13 +999,15 @@ export async function verifyImageBufferAndPixels(params: {
       verified: false,
       status: 'tampered',
       summary:
-        'Valid Yoink capture signature found, but the image pixels or dimensions were modified or re-compressed after capture.',
+        'Valid Yoink signature found, but the image pixels or dimensions were modified or re-compressed after signing.',
       hasMetadataProof,
       hasPixelWatermark: !!pixelManifest,
       hasIptcScreenCapture,
       signatureValid: true,
       pixelsIntact: false,
       isOwnCapture,
+      isDerivative,
+      captureKind,
       localKeyFingerprint: localIdentity.keyFingerprint,
       manifest: activeManifest,
     };
@@ -986,15 +1016,21 @@ export async function verifyImageBufferAndPixels(params: {
   return {
     verified: true,
     status: 'authentic',
-    summary: isOwnCapture
-      ? 'Signature and image integrity verified with this browser’s key. The declared source and author are not independently verified.'
-      : `Signature and image integrity verified with key #${activeManifest.kid}. The signer, source, and author are not independently verified.`,
+    summary: isDerivative
+      ? isOwnCapture
+        ? 'Edited or re-signed derivative verified with this browser’s key. Image has not been altered since re-signing; not an unedited original capture, and declared source/author are not independently verified.'
+        : `Edited or re-signed derivative verified with key #${activeManifest.kid}. Image has not been altered since re-signing; not an unedited original capture, and signer, source, and author are not independently verified.`
+      : isOwnCapture
+      ? 'Signature and image integrity verified with this browser’s key (unchanged since signing). Declared source and author are not independently verified.'
+      : `Signature and image integrity verified with key #${activeManifest.kid} (unchanged since signing). Signer, declared source, and author are not independently verified.`,
     hasMetadataProof,
     hasPixelWatermark,
     hasIptcScreenCapture,
     signatureValid: true,
     pixelsIntact: true,
     isOwnCapture,
+    isDerivative,
+    captureKind,
     localKeyFingerprint: localIdentity.keyFingerprint,
     manifest: activeManifest,
   };
@@ -1130,6 +1166,34 @@ export async function verifyImageDataUrl(dataUrl: string): Promise<ProofVerifica
 }
 
 /**
+ * Extracts and cryptographically verifies a YoinkProofManifest from a data URL
+ * (container chunks first, then LSB watermark) before returning it for derivative lineage.
+ */
+export async function extractProofManifestFromDataUrl(
+  dataUrl: string
+): Promise<YoinkProofManifest | null> {
+  try {
+    const { bytes } = dataUrlToBytes(dataUrl);
+    const container = extractContainerMetadata(bytes);
+    if (container.manifest && (await verifyProofManifestSignature(container.manifest))) {
+      return container.manifest;
+    }
+  } catch {
+    // ignore container parse issues
+  }
+
+  try {
+    const res = await verifyImageDataUrl(dataUrl);
+    if (res.signatureValid && res.manifest) {
+      return res.manifest;
+    }
+  } catch {
+    // ignore decode issues
+  }
+  return null;
+}
+
+/**
  * Browser / UI helper: apply visual receipt stamp (if enabled), sign pixels, embed LSB watermark,
  * encode canvas, and inject XMP/IPTC screenCapture + yoink-proof metadata chunks.
  */
@@ -1144,6 +1208,8 @@ export async function applyProofToCanvasAndEncode(
     url?: string;
     title?: string;
     source?: string;
+    kind?: 'original' | 'derivative' | 'imported';
+    parent?: YoinkProofParentRef;
   }
 ): Promise<{
   dataUrl: string;
@@ -1193,6 +1259,8 @@ export async function applyProofToCanvasAndEncode(
         timestamp,
         identity,
         precomputedPixelHash: precomputedPh,
+        kind: options.kind,
+        parent: options.parent,
       });
       pixelWatermarkEmbedded = embedLsbWatermark(imageData.data, pixelManifest);
       if (pixelWatermarkEmbedded) ctx.putImageData(imageData, 0, 0);
@@ -1217,6 +1285,8 @@ export async function applyProofToCanvasAndEncode(
         identity,
         precomputedPixelHash: precomputedPh || pixelManifest.ph,
         bitstreamHash: bh,
+        kind: options.kind,
+        parent: options.parent,
       });
       const tagged = injectContainerMetadata(cleanBytes, mime, containerManifest);
       return {

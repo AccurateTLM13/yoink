@@ -302,20 +302,50 @@ export const VerifyModal: React.FC<Props> = ({
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-bold text-xs sm:text-sm">
                       {result.status === 'authentic'
-                        ? 'Signature and image integrity verified'
+                        ? result.isDerivative
+                          ? 'Derivative integrity verified since re-signing'
+                          : 'Signature and image integrity verified'
                         : result.status === 'tampered'
                         ? 'Signed image changed after signing'
                         : result.status === 'invalid_signature'
                         ? 'Invalid Cryptographic Signature'
                         : 'No Yoink Proof Signature Found'}
                     </span>
-                    {result.isOwnCapture && (
-                      <span className="px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase bg-emerald-600 text-white">
-                        ✓ THIS BROWSER’S KEY
+                    {result.signatureValid && (
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase ${
+                          result.isDerivative
+                            ? 'bg-indigo-600 text-white'
+                            : result.captureKind === 'imported'
+                            ? 'bg-sky-700 text-white'
+                            : 'bg-zinc-900 text-white'
+                        }`}
+                      >
+                        {result.isDerivative
+                          ? 'EDITED / RE-SIGNED DERIVATIVE'
+                          : result.captureKind === 'imported'
+                          ? 'SIGNED IMPORTED ASSET'
+                          : 'ORIGINAL CAPTURE'}
+                      </span>
+                    )}
+                    {result.signatureValid && (
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase ${
+                          result.isOwnCapture
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-amber-600 text-white'
+                        }`}
+                      >
+                        {result.isOwnCapture ? '✓ THIS BROWSER’S KEY' : 'DIFFERENT BROWSER KEY'}
                       </span>
                     )}
                   </div>
                   <p className="text-[11px] opacity-90 mt-0.5 leading-snug">{result.summary}</p>
+                  {result.signatureValid && (
+                    <p className="text-[10.5px] mt-1.5 pt-1.5 border-t border-black/10 opacity-85 leading-snug">
+                      <b>Integrity vs. Authenticity:</b> Proof verifies that pixels and metadata match this signature since signing. It does <b>not</b> independently verify that the website content, URL, or author handle is genuine.
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -470,6 +500,34 @@ export const VerifyModal: React.FC<Props> = ({
                       {result.manifest.sig}
                     </div>
                   </div>
+
+                  {result.manifest.parent && (
+                    <div className="px-3 py-2.5 bg-indigo-50/70 border-t border-indigo-200/70 space-y-1 text-[10.5px]">
+                      <div className="font-mono font-bold uppercase tracking-wider text-indigo-900 text-[10px]">
+                        Original Capture Lineage (Parent Signature Recorded)
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-indigo-950 font-mono text-[10px]">
+                        <div>
+                          <span className="text-indigo-700">Original Key:</span> #{result.manifest.parent.kid}
+                        </div>
+                        <div>
+                          <span className="text-indigo-700">Original Time:</span>{' '}
+                          {new Date(result.manifest.parent.ts).toLocaleString()}
+                        </div>
+                        {result.manifest.parent.u && (
+                          <div className="sm:col-span-2 truncate">
+                            <span className="text-indigo-700">Original Origin:</span> {result.manifest.parent.u}
+                          </div>
+                        )}
+                        <div className="sm:col-span-2 truncate">
+                          <span className="text-indigo-700">Original Pixel Seal:</span> {result.manifest.parent.ph}
+                        </div>
+                        <div className="sm:col-span-2 truncate">
+                          <span className="text-indigo-700">Original Signature:</span> {result.manifest.parent.sig}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

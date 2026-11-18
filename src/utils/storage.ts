@@ -20,6 +20,7 @@ export const DEFAULT_SETTINGS: CaptureSettings = {
   proofVisualStamp: false,
   saveLocationMode: 'downloads',
   customSaveFolderName: '',
+  captureAllWindows: false,
 };
 
 /**
@@ -174,12 +175,11 @@ export async function getFullResolutionImage(id: string): Promise<string | null>
 }
 
 /**
- * Load user settings with fallback to defaults.
- * Checks chrome.storage.local, chrome.storage.sync, and localStorage so changes are never lost.
+ * Load user settings locally with fallback to defaults.
+ * Checks chrome.storage.local and localStorage (100% local, never synced externally).
  */
 export async function getStoredSettings(): Promise<CaptureSettings> {
   let localStored: Partial<CaptureSettings> | null = null;
-  let syncStored: Partial<CaptureSettings> | null = null;
   let domStored: Partial<CaptureSettings> | null = null;
 
   try {
@@ -192,17 +192,6 @@ export async function getStoredSettings(): Promise<CaptureSettings> {
   } catch {}
 
   try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
-      const result = await chrome.storage.sync.get([SETTINGS_KEY]);
-      if (result && result[SETTINGS_KEY] && typeof result[SETTINGS_KEY] === 'object') {
-        syncStored = result[SETTINGS_KEY] as Partial<CaptureSettings>;
-      }
-    }
-  } catch (e) {
-    console.warn('Chrome sync storage not accessible, trying local storage', e);
-  }
-
-  try {
     if (typeof localStorage !== 'undefined') {
       const raw = localStorage.getItem(SETTINGS_KEY);
       if (raw) {
@@ -213,20 +202,19 @@ export async function getStoredSettings(): Promise<CaptureSettings> {
     console.warn('localStorage not accessible', e);
   }
 
-  if (!localStored && !syncStored && !domStored) {
+  if (!localStored && !domStored) {
     return { ...DEFAULT_SETTINGS };
   }
 
   return {
     ...DEFAULT_SETTINGS,
-    ...(syncStored || {}),
     ...(domStored || {}),
     ...(localStored || {}),
   };
 }
 
 /**
- * Save user settings synchronously to localStorage and asynchronously to chrome.storage.local + sync.
+ * Save user settings locally to localStorage and chrome.storage.local (never synced externally).
  */
 export async function saveStoredSettings(settings: CaptureSettings): Promise<void> {
   try {
@@ -243,14 +231,6 @@ export async function saveStoredSettings(settings: CaptureSettings): Promise<voi
     }
   } catch (e) {
     console.warn('Chrome local storage settings save failed', e);
-  }
-
-  try {
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
-      await chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
-    }
-  } catch (e) {
-    console.warn('Chrome sync storage save failed', e);
   }
 }
 

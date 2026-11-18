@@ -22,13 +22,14 @@ import {
   Sparkles,
   FileText,
   ScanText,
+  SquareSlash,
 } from 'lucide-react';
 import { AnnotationItem, AnnotationTool, HistoryItem } from '../types';
 import {
   renderAnnotations,
   createAnnotatedComposite,
 } from '../utils/annotation';
-import { addHistoryItem, copyImageToClipboard, downloadDataUrl, updateStoredHistoryItem } from '../utils/storage';
+import { addHistoryItem, copyImageToClipboard, downloadDataUrl, getStoredSettings, updateStoredHistoryItem } from '../utils/storage';
 import { exportPdf } from '../utils/pdf';
 import { OcrDrawer } from './OcrDrawer';
 
@@ -360,8 +361,18 @@ export const AnnotationEditor: React.FC<Props> = ({
   }, [handleUndo, handleRedo, textInputState, showOcr, confirmDiscard, requestClose]);
 
   // Export & Action Handlers
+  const getProofMeta = async () => {
+    const settings = await getStoredSettings().catch(() => null);
+    return {
+      url: item.url,
+      title: item.title,
+      enableProof: settings ? settings.enableProof !== false : true,
+      proofAuthor: settings?.proofAuthor || '',
+    };
+  };
+
   const handleCopyComposite = async () => {
-    const composite = await createAnnotatedComposite(imageSrc, annotations, 'png');
+    const composite = await createAnnotatedComposite(imageSrc, annotations, 'png', 0.95, await getProofMeta());
     const success = await copyImageToClipboard(composite.dataUrl);
     if (success) {
       setCopied(true);
@@ -376,7 +387,8 @@ export const AnnotationEditor: React.FC<Props> = ({
         imageSrc,
         annotations,
         format,
-        0.95
+        0.95,
+        await getProofMeta()
       );
       const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
       const filename = `${cleanTitle}_annotated_${Date.now()}.${format}`;
@@ -389,7 +401,7 @@ export const AnnotationEditor: React.FC<Props> = ({
 
   const handleExportPdf = async () => {
     try {
-      const composite = await createAnnotatedComposite(imageSrc, annotations, 'png');
+      const composite = await createAnnotatedComposite(imageSrc, annotations, 'png', 0.95, await getProofMeta());
       await exportPdf([composite.dataUrl], `${item.title || 'capture'}_annotated`);
       setActionError('');
     } catch (error) {
@@ -403,7 +415,8 @@ export const AnnotationEditor: React.FC<Props> = ({
         imageSrc,
         annotations,
         item.format || 'png',
-        0.95
+        0.95,
+        await getProofMeta()
       );
       const newItem: HistoryItem = {
         id: `annotated_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -415,6 +428,8 @@ export const AnnotationEditor: React.FC<Props> = ({
         height: composite.height,
         mode: 'annotated',
         format: item.format || 'png',
+        proofKeyId: composite.proofKeyId,
+        proofSigned: composite.proofSigned,
       };
 
       await addHistoryItem(newItem);
@@ -704,9 +719,20 @@ export const AnnotationEditor: React.FC<Props> = ({
                 ? 'bg-rose-600 text-white'
                 : 'text-rose-400 hover:text-rose-300'
             }`}
-            title="Pixelate / Redact Sensitive Data"
+            title="Pixelate Redaction"
           >
             <EyeOff size={15} />
+          </button>
+          <button
+            onClick={() => setActiveTool('blackout')}
+            className={`p-1.5 rounded-lg transition cursor-pointer ${
+              activeTool === 'blackout'
+                ? 'bg-zinc-950 text-white ring-1 ring-white'
+                : 'text-zinc-300 hover:text-white'
+            }`}
+            title="Blackout Redaction (Solid Black)"
+          >
+            <SquareSlash size={15} />
           </button>
         </div>
 

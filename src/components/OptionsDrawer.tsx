@@ -60,6 +60,7 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
   const autoSliceId = useId();
   const losslessWebpId = useId();
   const optimalQualityId = useId();
+  const allWindowsId = useId();
 
   useEffect(() => {
     setForm((prev) => ({ ...prev, ...settings }));
@@ -591,6 +592,24 @@ export const OptionsDrawer: React.FC<Props> = React.memo(({ settings, onBack, on
                     </span>
                     <span className="text-[11px] text-zinc-600 block mt-0.5 leading-snug">
                       Places new viewport captures directly onto system clipboard ready to paste.
+                    </span>
+                  </div>
+                </label>
+
+                <label htmlFor={allWindowsId} className="flex items-start gap-3 p-3 hover:bg-zinc-50/70 transition cursor-pointer">
+                  <input
+                    id={allWindowsId}
+                    type="checkbox"
+                    checked={!!form.captureAllWindows}
+                    onChange={(e) => updateForm({ captureAllWindows: e.target.checked })}
+                    className="mt-0.5 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <span className="font-semibold text-zinc-900 block leading-tight">
+                      Capture Tabs Across All Open Windows
+                    </span>
+                    <span className="text-[11px] text-zinc-600 block mt-0.5 leading-snug">
+                      When running &ldquo;Capture All Tabs&rdquo;, sweep eligible tabs across every normal Chrome window instead of only the active window.
                     </span>
                   </div>
                 </label>

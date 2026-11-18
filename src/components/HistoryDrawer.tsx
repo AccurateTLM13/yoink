@@ -18,7 +18,7 @@ import {
   ScanText,
   ShieldCheck,
 } from 'lucide-react';
-import { BatchFailure, HistoryItem, CaptureMode } from '../types';
+import { BatchReport, HistoryItem, CaptureMode } from '../types';
 import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage } from '../utils/storage';
 import { exportPdf } from '../utils/pdf';
 
@@ -32,8 +32,7 @@ interface Props {
   onDeleteItem: (id: string) => void | Promise<void>;
   onClearAll: () => void | Promise<void>;
   onOpenStudio?: () => void;
-  recentBatchBanner?: number | null;
-  recentBatchFailures?: BatchFailure[];
+  recentBatchReport?: BatchReport | null;
   onDismissBatchBanner?: () => void;
   isFullTab?: boolean;
   onImportFiles?: (files: File[]) => void;
@@ -134,8 +133,7 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
   onDeleteItem,
   onClearAll,
   onOpenStudio,
-  recentBatchBanner,
-  recentBatchFailures = [],
+  recentBatchReport,
   onDismissBatchBanner,
   isFullTab,
   onImportFiles,
@@ -390,8 +388,8 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
         </div>
       )}
 
-      {/* Recent Batch Success Banner */}
-      {(recentBatchBanner != null || recentBatchFailures.length > 0) && (
+      {/* Recent Batch Success & Completion Report Banner */}
+      {recentBatchReport && (
         <div className="m-3 p-3 bg-blue-50/90 border border-blue-200/90 rounded-xl flex flex-wrap items-center justify-between gap-2 shadow-xs">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center text-white shrink-0 shadow-xs">
@@ -399,10 +397,14 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
             </div>
             <div className="min-w-0">
               <h4 className="text-xs font-bold text-blue-950 truncate">
-                {recentBatchBanner || 0} captures processed{recentBatchFailures.length ? ` · ${recentBatchFailures.length} need attention` : ''}
+                {recentBatchReport.count || 0} captured
+                {recentBatchReport.skipped.length ? ` · ${recentBatchReport.skipped.length} skipped` : ''}
+                {recentBatchReport.failures.length ? ` · ${recentBatchReport.failures.length} failed` : ''}
               </h4>
               <p className="text-[11px] text-blue-700 truncate">
-                {recentBatchFailures.length ? 'Review the items below before retrying.' : 'Ready to inspect in your gallery.'}
+                {recentBatchReport.failures.length || recentBatchReport.skipped.length
+                  ? 'Expand completion report to inspect captured, skipped, or failed tabs.'
+                  : 'Ready to inspect in your gallery.'}
               </p>
             </div>
           </div>
@@ -427,13 +429,26 @@ export const HistoryDrawer: React.FC<Props> = React.memo(({
               </button>
             )}
           </div>
-          {recentBatchFailures.length > 0 && (
+          {(recentBatchReport.captured.length > 0 ||
+            recentBatchReport.skipped.length > 0 ||
+            recentBatchReport.failures.length > 0) && (
             <details className="w-full text-xs text-blue-950">
-              <summary className="cursor-pointer font-semibold">Show details</summary>
-              <ul className="mt-2 space-y-1 break-words">
-                {recentBatchFailures.map((failure, index) => (
-                  <li key={`${index}-${failure.target}`}>
-                    {failure.target}: {failure.error}
+              <summary className="cursor-pointer font-semibold">Show completion report</summary>
+              <ul className="mt-2 space-y-1 break-words max-h-40 overflow-y-auto">
+                {recentBatchReport.captured.map((item, index) => (
+                  <li key={`cap-${index}-${item.target}`} className="text-emerald-800">
+                    <span className="font-semibold">[Captured]</span> {item.target}
+                    {item.reason ? ` (${item.reason})` : ''}
+                  </li>
+                ))}
+                {recentBatchReport.skipped.map((item, index) => (
+                  <li key={`skip-${index}-${item.target}`} className="text-zinc-700">
+                    <span className="font-semibold">[Skipped]</span> {item.target}: {item.reason}
+                  </li>
+                ))}
+                {recentBatchReport.failures.map((failure, index) => (
+                  <li key={`fail-${index}-${failure.target}`} className="text-rose-800">
+                    <span className="font-semibold">[Failed]</span> {failure.target}: {failure.error}
                   </li>
                 ))}
               </ul>

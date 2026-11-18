@@ -17,6 +17,8 @@ const PROOF_IDENTITY_KEY = 'yoink_proof_identity';
 const FOLDER_STATUS_KEY = 'yoink_folder_status';
 const FULL_PREFIX = 'yoink_full_';
 const MAX_CHUNKS = 80;
+const MAX_TOTAL_CHUNKS = 240;
+const MAX_SEGMENTS = 10;
 // Chrome limit: MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND = 2.
 const MIN_CAPTURE_INTERVAL_MS = 550;
 
@@ -39,6 +41,7 @@ const DEFAULT_SETTINGS = Object.freeze({
   proofVisualStamp: false,
   saveLocationMode: 'downloads',
   customSaveFolderName: '',
+  captureAllWindows: false,
 });
 
 // ---------------------------------------------------------------------------
@@ -408,10 +411,22 @@ async function handleCaptureFullPage({ tabId, returnToTabId, settings }) {
 // ---------------------------------------------------------------------------
 // 3. Content-script pipeline (chunks stream directly to offscreen canvas)
 // ---------------------------------------------------------------------------
+async function startStitchSegmentSession(stitchMeta, segmentOriginCssY, autoSegment) {
+  const jobId = crypto.randomUUID();
+  await callOffscreen('STITCH_BEGIN', {
+    jobId,
+    ...stitchMeta,
+    segmentOriginCssY: segmentOriginCssY || 0,
+    autoSegment: autoSegment === true,
+  });
+  return jobId;
+}
+
 async function handleChunkCapture(payload, sender) {
   const tabId = sender.tab.id;
   const index = Math.max(0, Math.floor(Number(payload.index) || 0));
   const kind = payload.kind === 'element' ? 'element' : 'full';
+  const yOffset = num(payload.yOffset, 0);
 
   if (index === 0) {
     const existing = scrollSessions.get(tabId);
@@ -419,12 +434,10 @@ async function handleChunkCapture(payload, sender) {
       callOffscreen('STITCH_ABORT', { jobId: existing.jobId }).catch(() => {});
     }
     const s = existing?.settings || (await getSettings());
-    const jobId = crypto.randomUUID();
     const capTitle = str(payload.title, 200) || (kind === 'element' ? 'Scrolling Element Capture' : 'Full Page Capture');
     const capUrl = sender.url || sender.tab.url || '';
     const proofContext = await buildProofContext(s, capUrl, capTitle);
-    await callOffscreen('STITCH_BEGIN', {
-      jobId,
+    const stitchMeta = {
       kind,
       totalWidth: num(payload.totalWidth, 0),
       totalHeight: num(payload.totalHeight, 0),
@@ -432,14 +445,21 @@ async function handleChunkCapture(payload, sender) {
       cropRect: kind === 'element' ? sanitizeRect(payload.cropRect) : null,
       settings: s,
       proofContext,
-    });
+    };
+
+    const jobId = await startStitchSegmentSession(stitchMeta, 0, kind === 'full');
     scrollSessions.set(tabId, {
       jobId,
       kind,
       settings: s,
+      stitchMeta,
       chunkCount: 0,
+      segmentChunkCount: 0,
       streamedCount: 0,
       dataUrls: [],
+      completedSegments: [],
+      capTitle,
+      capUrl,
       originalZoom: existing?.originalZoom ?? null,
       returnToTabId: existing?.returnToTabId ?? null,
     });
@@ -447,26 +467,67 @@ async function handleChunkCapture(payload, sender) {
 
   const session = scrollSessions.get(tabId);
   if (!session) throw new Error('No active scroll session');
-  if (session.chunkCount >= MAX_CHUNKS) throw new Error('Chunk limit reached');
+  if (kind === 'element' && session.chunkCount >= MAX_CHUNKS) throw new Error('Chunk limit reached');
+  if (session.chunkCount >= MAX_TOTAL_CHUNKS || session.completedSegments.length >= MAX_SEGMENTS) {
+    return { ok: true, index: session.chunkCount, limitReached: true };
+  }
+  if (kind === 'full' && session.segmentChunkCount >= MAX_CHUNKS && session.completedSegments.length + 1 >= MAX_SEGMENTS) {
+    return { ok: true, index: session.chunkCount, limitReached: true };
+  }
   if (!sender.tab.active) throw new Error('Tab is not visible');
 
   const dataUrl = await captureVisible(sender.tab.windowId, { format: 'png' });
   const capturedIndex = session.chunkCount++;
 
   if (session.jobId) {
-    await withJob(() =>
-      callOffscreen('STITCH_ADD', {
-        jobId: session.jobId,
-        dataUrl,
-        yOffset: num(payload.yOffset, 0),
-      })
-    );
+    const addToCurrentJob = () =>
+      withJob(() =>
+        callOffscreen('STITCH_ADD', {
+          jobId: session.jobId,
+          dataUrl,
+          yOffset,
+        })
+      );
+
+    const rotateSegment = async (nextOriginY) => {
+      const segResult = await withJob(() =>
+        callOffscreen('STITCH_END', { jobId: session.jobId, segmented: true })
+      );
+      session.completedSegments.push(segResult);
+      if (session.completedSegments.length >= MAX_SEGMENTS) {
+        session.jobId = null;
+        return false;
+      }
+      session.jobId = await startStitchSegmentSession(session.stitchMeta, nextOriginY, kind === 'full');
+      session.segmentChunkCount = 0;
+      return true;
+    };
+
+    if (kind === 'full' && session.segmentChunkCount >= MAX_CHUNKS) {
+      await rotateSegment(yOffset);
+    }
+
+    let addRes = await addToCurrentJob();
+    if (addRes?.segmentFull && kind === 'full') {
+      const nextOrigin = num(addRes.nextSegmentOriginCssY, yOffset);
+      const continued = await rotateSegment(nextOrigin);
+      if (!continued) {
+        return { ok: true, index: capturedIndex, limitReached: true };
+      }
+      addRes = await addToCurrentJob();
+    }
+
+    session.segmentChunkCount = (session.segmentChunkCount || 0) + 1;
     session.streamedCount++;
   } else {
     session.dataUrls.push(dataUrl);
   }
 
-  return { ok: true, index: capturedIndex };
+  return {
+    ok: true,
+    index: capturedIndex,
+    limitReached: session.chunkCount >= MAX_TOTAL_CHUNKS,
+  };
 }
 
 function handleFinalizeStitching(payload, sender, kind) {
@@ -482,49 +543,90 @@ function handleFinalizeStitching(payload, sender, kind) {
   }
 
   runPipeline(kind, async () => {
-    if (!session || (session.streamedCount === 0 && session.dataUrls.length === 0)) {
+    if (!session || (session.streamedCount === 0 && session.dataUrls.length === 0 && !(session.completedSegments?.length))) {
       throw new Error('No image chunks received for stitching');
     }
     const s = await getSettings(session.settings);
 
     const fallbackTitle = kind === 'element' ? 'Scrolling Element Capture' : 'Full Page Capture';
-    const capTitle = str(payload.title, 200) || fallbackTitle;
-    const capUrl = sender.url || sender.tab.url || '';
-    const proofContext = await buildProofContext(s, capUrl, capTitle);
+    const capTitle = str(payload.title, 200) || session.capTitle || fallbackTitle;
+    const capUrl = sender.url || sender.tab.url || session.capUrl || '';
+    const proofContext = session.stitchMeta?.proofContext || (await buildProofContext(s, capUrl, capTitle));
+    const completedSegments = Array.isArray(session.completedSegments) ? [...session.completedSegments] : [];
 
-    const result = await withJob(async () => {
-      if (session.jobId && session.streamedCount > 0) {
-        return callOffscreen('STITCH_END', { jobId: session.jobId });
-      }
+    if (session.jobId && session.streamedCount > 0) {
+      const tail = await withJob(() =>
+        callOffscreen('STITCH_END', { jobId: session.jobId, segmented: completedSegments.length > 0 })
+      );
+      completedSegments.push(tail);
+    } else if (completedSegments.length === 0) {
       const meta = Array.isArray(payload.chunks) ? payload.chunks : [];
       const jobId = crypto.randomUUID();
-      await callOffscreen('STITCH_BEGIN', {
-        jobId,
-        kind,
-        totalWidth: num(payload.totalWidth, 0),
-        totalHeight: num(payload.totalHeight, 0),
-        dpr: num(payload.dpr, 1),
-        cropRect: kind === 'element' ? sanitizeRect(payload.cropRect) : null,
-        settings: s,
-        proofContext,
+      await withJob(async () => {
+        await callOffscreen('STITCH_BEGIN', {
+          jobId,
+          kind,
+          totalWidth: num(payload.totalWidth, 0),
+          totalHeight: num(payload.totalHeight, 0),
+          dpr: num(payload.dpr, 1),
+          cropRect: kind === 'element' ? sanitizeRect(payload.cropRect) : null,
+          settings: s,
+          proofContext,
+        });
+        for (const m of meta) {
+          const i = Math.floor(Number(m?.index));
+          const dataUrl = session.dataUrls[i];
+          if (!dataUrl) continue;
+          await callOffscreen('STITCH_ADD', { jobId, dataUrl, yOffset: num(m.yOffset, 0) });
+          session.dataUrls[i] = null;
+        }
+        const res = await callOffscreen('STITCH_END', { jobId });
+        completedSegments.push(res);
       });
-      for (const m of meta) {
-        const i = Math.floor(Number(m?.index));
-        const dataUrl = session.dataUrls[i];
-        if (!dataUrl) continue;
-        await callOffscreen('STITCH_ADD', { jobId, dataUrl, yOffset: num(m.yOffset, 0) });
-        session.dataUrls[i] = null;
-      }
-      return callOffscreen('STITCH_END', { jobId });
-    });
+    }
 
-    await finishCapture({
-      ...result,
-      mode: kind,
-      title: capTitle,
-      url: capUrl,
-      settings: s,
-    });
+    const totalParts = completedSegments.length;
+    const notes = [];
+    if (payload.limitReached) notes.push('Capture stopped at the maximum page-length safety limit.');
+    if (payload.scrollStalled) notes.push('Page prevented further scrolling before reaching the bottom.');
+    if (Number(payload.missedSections) > 0) {
+      notes.push(`${Number(payload.missedSections)} section(s) could not be captured.`);
+    }
+    const extraNotice = notes.join(' ');
+
+    if (totalParts === 1) {
+      const single = completedSegments[0];
+      const combinedWarning = [single.warning, extraNotice].filter(Boolean).join(' ') || undefined;
+      await finishCapture({
+        ...single,
+        warning: combinedWarning,
+        mode: kind,
+        title: capTitle,
+        url: capUrl,
+        settings: s,
+      });
+      return;
+    }
+
+    for (let idx = 0; idx < totalParts; idx++) {
+      const seg = completedSegments[idx];
+      const partNum = idx + 1;
+      const splitNotice = `Oversized page was automatically split into ${totalParts} parts (Part ${partNum} of ${totalParts}) to capture without truncation.`;
+      const combinedWarning = [splitNotice, extraNotice, seg.warning].filter(Boolean).join(' ');
+      await finishCapture({
+        ...seg,
+        mode: kind,
+        title: `${capTitle} (Part ${partNum} of ${totalParts})`,
+        filenameTitle: capTitle,
+        downloadSuffix: `_part${partNum}_of_${totalParts}`,
+        skipAutoSlice: true,
+        url: capUrl,
+        settings: s,
+        warning: combinedWarning,
+        silent: idx < totalParts - 1,
+        skipClipboard: idx < totalParts - 1,
+      });
+    }
   });
 
   return { success: true };
@@ -632,10 +734,11 @@ async function finishCapture(o) {
       width,
       height
     );
-    if (item.warning) filename = filename.replace(/(\.[a-z0-9]+)$/i, '_partial$1');
+    if (o.downloadSuffix) filename = filename.replace(/(\.[a-z0-9]+)$/i, `${o.downloadSuffix}$1`);
+    if (item.warning && !o.downloadSuffix) filename = filename.replace(/(\.[a-z0-9]+)$/i, '_partial$1');
 
     try {
-      if (s.autoSliceLongPages && o.mode === 'full' && height > (s.maxSliceHeight || 4000)) {
+      if (s.autoSliceLongPages && !o.skipAutoSlice && o.mode === 'full' && height > (s.maxSliceHeight || 4000)) {
         try {
           const sliceProofContext = await buildProofContext(s, item.url, item.title);
           const sliceRes = await callOffscreen('SLICE_IMAGE', {
@@ -818,13 +921,26 @@ function waitForTabComplete(tabId, timeoutMs) {
   });
 }
 
-async function handleCaptureAllTabs({ settings, tabIds }) {
+async function handleCaptureAllTabs({ settings, tabIds, allWindows }) {
   await requireAllUrls('Capture all tabs');
   const s = await getSettings(settings);
-  const allTabs = await chrome.tabs.query({ lastFocusedWindow: true, windowType: 'normal' });
+  const includeAllWindows = allWindows === true || s.captureAllWindows === true;
+  const allTabs = await chrome.tabs.query(
+    includeAllWindows ? { windowType: 'normal' } : { lastFocusedWindow: true, windowType: 'normal' }
+  );
   const tabs = Array.isArray(tabIds) ? allTabs.filter((tab) => tabIds.includes(tab.id)) : allTabs;
-  const original = allTabs.find((t) => t.active);
+
+  // Record active tab per window so multi-window sweeps restore every window cleanly
+  const originalActiveByWindow = new Map();
+  for (const t of allTabs) {
+    if (t.active && t.id && t.windowId != null && !originalActiveByWindow.has(t.windowId)) {
+      originalActiveByWindow.set(t.windowId, t.id);
+    }
+  }
+  const originalFallback = allTabs.find((t) => t.active);
+
   const results = [];
+  const captured = [];
   const failures = [];
   const skipped = [];
 
@@ -832,7 +948,11 @@ async function handleCaptureAllTabs({ settings, tabIds }) {
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
       if (!tab.id || !isInjectableUrl(tab.url)) {
-        skipped.push({ target: tab.title || tab.url || 'Unknown tab', reason: 'This browser page cannot be captured.' });
+        skipped.push({
+          target: tab.title || tab.url || 'Unknown tab',
+          reason: 'Restricted browser page cannot be captured.',
+          tabId: tab.id,
+        });
         continue;
       }
 
@@ -861,16 +981,23 @@ async function handleCaptureAllTabs({ settings, tabIds }) {
           skipClipboard: true,
         });
         results.push(slimItem(item));
+        captured.push({ target: item.title || tab.url || 'Tab', reason: tab.url || 'Captured', tabId: tab.id });
       } catch (e) {
         const msg = e?.message || 'Capture failed';
         failures.push({ target: tab.title || tab.url || String(tab.id), reason: msg, error: msg, tabId: tab.id });
       }
     }
   } finally {
-    if (original?.id) await chrome.tabs.update(original.id, { active: true }).catch(() => {});
+    if (originalActiveByWindow.size > 0) {
+      for (const origTabId of originalActiveByWindow.values()) {
+        await chrome.tabs.update(origTabId, { active: true }).catch(() => {});
+      }
+    } else if (originalFallback?.id) {
+      await chrome.tabs.update(originalFallback.id, { active: true }).catch(() => {});
+    }
   }
 
-  return { success: true, results, failures, skipped };
+  return { success: true, results, captured, failures, skipped };
 }
 
 async function handleCaptureUrlList({ urls, settings, delayMs }) {
@@ -1073,10 +1200,17 @@ async function handleYoinkPageMedia({ tabId }) {
     func: extractAllPageMediaInTab,
   });
 
-  const items = execRes?.[0]?.result || [];
+  const rawResult = execRes?.[0]?.result;
+  const items = Array.isArray(rawResult) ? rawResult : Array.isArray(rawResult?.items) ? rawResult.items : [];
+  const diagnostics =
+    rawResult && !Array.isArray(rawResult) && rawResult.diagnostics
+      ? rawResult.diagnostics
+      : { crossOriginFrames: 0, taintedCanvases: 0, protectedVideos: 0 };
+
   return {
     success: true,
     items,
+    diagnostics,
     tabId: targetTab.id,
     tabTitle: targetTab.title || 'Webpage',
     tabUrl: targetTab.url || '',
@@ -1086,22 +1220,27 @@ async function handleYoinkPageMedia({ tabId }) {
 function extractAllPageMediaInTab() {
   const seen = new Set();
   const items = [];
+  const diagnostics = {
+    crossOriginFrames: 0,
+    taintedCanvases: 0,
+    protectedVideos: 0,
+  };
   const pageUrl = window.location.href;
   const pageTitle = document.title || 'Webpage';
   let counter = 0;
 
-  const resolveUrl = (raw) => {
+  const resolveUrlWithBase = (raw, baseUrl) => {
     const trimmed = String(raw || '').trim();
     if (!trimmed || trimmed === 'none' || trimmed === 'about:blank') return null;
     if (trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return trimmed;
     try {
-      return new URL(trimmed, pageUrl).href;
+      return new URL(trimmed, baseUrl || pageUrl).href;
     } catch {
       return null;
     }
   };
 
-  const pickBestSrcset = (srcset) => {
+  const pickBestSrcsetWithBase = (srcset, baseUrl) => {
     if (!srcset || typeof srcset !== 'string') return null;
     const parts = srcset.split(/,\s+(?=\S)/).map((s) => s.trim()).filter(Boolean);
     let bestUrl = null;
@@ -1121,13 +1260,13 @@ function extractAllPageMediaInTab() {
           if (Number.isFinite(x) && x > 0) score = x * 1000;
         }
       }
-      const resolved = resolveUrl(u);
+      const resolved = resolveUrlWithBase(u, baseUrl);
       if (resolved && score >= bestScore) {
         bestScore = score;
         bestUrl = resolved;
       }
     }
-    return bestUrl;
+    return { url: bestUrl, score: bestScore };
   };
 
   const inferFmt = (url, category) => {
@@ -1192,189 +1331,371 @@ function extractAllPageMediaInTab() {
     });
   };
 
-  // 1. Clean <video> Frame Snaps (No player UI!) + Video Posters
-  const videos = Array.from(document.querySelectorAll('video'));
-  videos.forEach((v, idx) => {
-    const vw = v.videoWidth || v.clientWidth || 0;
-    const vh = v.videoHeight || v.clientHeight || 0;
-    if (v.readyState >= 2 && vw > 16 && vh > 16) {
-      try {
-        const c = document.createElement('canvas');
-        c.width = vw;
-        c.height = vh;
-        const ctx = c.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(v, 0, 0, vw, vh);
-          const dataUrl = c.toDataURL('image/png');
-          addItem({
-            url: dataUrl,
-            nameHint: v.getAttribute('title') || v.getAttribute('aria-label') || `Clean_Video_Frame_${idx + 1}`,
-            category: 'video',
-            width: vw,
-            height: vh,
-            sourceTag: '<video> Clean Frame',
-          });
-        }
-      } catch {}
-    }
-    if (v.poster) {
-      const posterUrl = resolveUrl(v.poster);
-      if (posterUrl) {
-        addItem({
-          url: posterUrl,
-          nameHint: `Video_Poster_${idx + 1}`,
-          category: 'video',
-          width: vw,
-          height: vh,
-          sourceTag: '<video poster>',
-        });
-      }
-    }
-  });
+  // Recursively gather documents, open shadow roots, and accessible same-origin iframes
+  const roots = [];
+  const visitedRoots = new Set();
+  const rootQueue = [{ root: document, ownerDoc: document, baseUrl: pageUrl, isDocument: true }];
 
-  // 2. OpenGraph, Twitter Cards & High-Res Icons
-  const metaSelectors = [
-    { sel: 'meta[property="og:image"], meta[property="og:image:secure_url"]', tag: 'meta og:image', hint: 'OpenGraph_Social_Banner' },
-    { sel: 'meta[name="twitter:image"], meta[property="twitter:image"]', tag: 'meta twitter:image', hint: 'Twitter_Card_Banner' },
-    { sel: 'link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]', tag: 'apple-touch-icon', hint: 'Apple_Touch_Icon' },
-    { sel: 'link[rel="icon"], link[rel="shortcut icon"]', tag: 'link favicon', hint: 'Site_Favicon' },
-  ];
-  metaSelectors.forEach(({ sel, tag, hint }) => {
-    document.querySelectorAll(sel).forEach((el) => {
-      const raw = el.getAttribute('content') || el.getAttribute('href');
-      const resolved = resolveUrl(raw);
-      if (resolved) {
-        addItem({
-          url: resolved,
-          nameHint: hint,
-          category: 'og',
-          width: tag.includes('og:') || tag.includes('twitter:') ? 1200 : 180,
-          height: tag.includes('og:') || tag.includes('twitter:') ? 630 : 180,
-          sourceTag: tag,
-        });
-      }
-    });
-  });
+  while (rootQueue.length > 0) {
+    const entry = rootQueue.shift();
+    if (!entry?.root || visitedRoots.has(entry.root)) continue;
+    visitedRoots.add(entry.root);
+    roots.push(entry);
 
-  // 3. <img> and <picture> elements (preferring highest-res srcset)
-  document.querySelectorAll('img').forEach((img) => {
-    let bestUrl =
-      pickBestSrcset(img.getAttribute('srcset') || img.getAttribute('data-srcset') || '') ||
-      resolveUrl(img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src'));
-
-    const parentPic = img.closest('picture');
-    if (parentPic) {
-      const sources = Array.from(parentPic.querySelectorAll('source'));
-      for (const s of sources) {
-        const candidate = pickBestSrcset(s.getAttribute('srcset') || '');
-        if (candidate) {
-          bestUrl = candidate;
-          break;
-        }
-      }
-    }
-
-    if (bestUrl) {
-      const w = img.naturalWidth || img.width || img.clientWidth || 0;
-      const h = img.naturalHeight || img.height || img.clientHeight || 0;
-      addItem({
-        url: bestUrl,
-        nameHint: img.alt || img.title || '',
-        category: 'img',
-        width: w,
-        height: h,
-        sourceTag: img.srcset ? '<img srcset>' : '<img>',
-      });
-    }
-  });
-
-  // 4. Inline <svg> vectors
-  const svgs = Array.from(document.querySelectorAll('svg'));
-  const seenSvgHashes = new Set();
-  svgs.slice(0, 80).forEach((svg, idx) => {
-    const rect = svg.getBoundingClientRect();
-    const w = Math.round(rect.width || parseFloat(svg.getAttribute('width') || '0') || 64);
-    const h = Math.round(rect.height || parseFloat(svg.getAttribute('height') || '0') || 64);
-    if (w < 12 || h < 12) return;
-
+    let allInRoot = [];
     try {
-      const clone = svg.cloneNode(true);
-      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-      if (!clone.getAttribute('viewBox') && w > 0 && h > 0) {
-        clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
-      }
-      if (!clone.getAttribute('width')) clone.setAttribute('width', String(w));
-      if (!clone.getAttribute('height')) clone.setAttribute('height', String(h));
-
-      const rawMarkup = new XMLSerializer().serializeToString(clone);
-      if (rawMarkup.length > 350000 || seenSvgHashes.has(rawMarkup)) return;
-      seenSvgHashes.add(rawMarkup);
-
-      const dataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(rawMarkup)}`;
-      const label =
-        svg.getAttribute('aria-label') ||
-        svg.querySelector('title')?.textContent ||
-        svg.id ||
-        `Vector_SVG_${idx + 1}`;
-
-      addItem({
-        url: dataUrl,
-        nameHint: label,
-        category: 'svg',
-        width: w,
-        height: h,
-        sourceTag: 'Inline <svg>',
-        svgCode: rawMarkup,
-      });
+      allInRoot = Array.from(entry.root.querySelectorAll('*'));
     } catch {}
-  });
 
-  // 5. CSS background-image across DOM elements
-  const allElements = Array.from(document.querySelectorAll('*')).slice(0, 1200);
-  const urlRegex = /url\(\s*(?:(['"])(.*?)\1|([^)'"]+))\s*\)/gi;
-  for (const el of allElements) {
-    const styles = [window.getComputedStyle(el), window.getComputedStyle(el, '::before'), window.getComputedStyle(el, '::after')];
-    for (const st of styles) {
-      const bg = st?.backgroundImage;
-      if (!bg || bg === 'none' || !bg.includes('url(')) continue;
-      urlRegex.lastIndex = 0;
-      let match;
-      while ((match = urlRegex.exec(bg)) !== null) {
-        const raw = (match[2] ?? match[3] ?? '').trim();
-        const resolved = resolveUrl(raw);
-        if (resolved) {
-          const rect = el.getBoundingClientRect();
-          addItem({
-            url: resolved,
-            nameHint: el.getAttribute('aria-label') || el.id || '',
-            category: 'bg',
-            width: Math.round(rect.width || 0),
-            height: Math.round(rect.height || 0),
-            sourceTag: 'CSS background-image',
-          });
+    for (const el of allInRoot) {
+      if (el.shadowRoot && !visitedRoots.has(el.shadowRoot)) {
+        rootQueue.push({
+          root: el.shadowRoot,
+          ownerDoc: entry.ownerDoc,
+          baseUrl: entry.baseUrl,
+          isDocument: false,
+        });
+      }
+      if (String(el.tagName || '').toUpperCase() === 'IFRAME') {
+        try {
+          const frameDoc = el.contentDocument;
+          if (frameDoc && !visitedRoots.has(frameDoc)) {
+            const frameUrl = frameDoc.location?.href || entry.baseUrl;
+            rootQueue.push({
+              root: frameDoc,
+              ownerDoc: frameDoc,
+              baseUrl: frameUrl,
+              isDocument: true,
+            });
+          } else if (!frameDoc) {
+            diagnostics.crossOriginFrames++;
+          }
+        } catch {
+          diagnostics.crossOriginFrames++;
         }
       }
     }
   }
 
-  // 6. <canvas> graphics
-  document.querySelectorAll('canvas').forEach((c, idx) => {
-    if (c.width >= 32 && c.height >= 32) {
+  const LAZY_ATTRS = [
+    'data-hi-res-src',
+    'data-full-src',
+    'data-zoom-image',
+    'data-original',
+    'data-src',
+    'data-lazy-src',
+    'data-lazy',
+    'data-url',
+    'data-image',
+  ];
+  const LAZY_SRCSET_ATTRS = ['srcset', 'data-srcset', 'data-lazy-srcset'];
+
+  const getComputed = (el, pseudo) => {
+    try {
+      const view = el?.ownerDocument?.defaultView || window;
+      return view.getComputedStyle(el, pseudo);
+    } catch {
+      return window.getComputedStyle(el, pseudo);
+    }
+  };
+
+  const pickBestFromLazySrcset = (el, baseUrl, bestUrl, bestScore) => {
+    let nextUrl = bestUrl;
+    let nextScore = bestScore;
+    let foundSrcset = false;
+    for (const attr of LAZY_SRCSET_ATTRS) {
+      const rawSrcset = el.getAttribute(attr);
+      if (rawSrcset) {
+        foundSrcset = true;
+        const picked = pickBestSrcsetWithBase(rawSrcset, baseUrl);
+        if (picked?.url && picked.score >= nextScore) {
+          nextUrl = picked.url;
+          nextScore = picked.score;
+        }
+      }
+    }
+    return { bestUrl: nextUrl, bestScore: nextScore, foundSrcset };
+  };
+
+  const resolveSvgInheritedStyles = (origEl, cloneEl) => {
+    try {
+      const cs = getComputed(origEl);
+      if (!cs) return;
+      const currentColor = cs.color && cs.color !== 'inherit' ? cs.color : '';
+      const stylePairs = [];
+      const props = ['fill', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin', 'opacity', 'fill-rule', 'clip-rule'];
+      for (const prop of props) {
+        let val = cs[prop] || (typeof cs.getPropertyValue === 'function' ? cs.getPropertyValue(prop) : '');
+        if (!val || (val === 'none' && prop === 'stroke')) continue;
+        if (val === 'currentColor' && currentColor) val = currentColor;
+        if (val) stylePairs.push(`${prop}:${val}`);
+      }
+      if (origEl.getAttribute('fill') === 'currentColor' && currentColor) {
+        cloneEl.setAttribute('fill', currentColor);
+      }
+      if (origEl.getAttribute('stroke') === 'currentColor' && currentColor) {
+        cloneEl.setAttribute('stroke', currentColor);
+      }
+      if (currentColor) {
+        stylePairs.unshift(`color:${currentColor}`);
+      }
+      if (stylePairs.length > 0 && cloneEl.setAttribute) {
+        const existingStyle = cloneEl.getAttribute('style') || '';
+        cloneEl.setAttribute('style', existingStyle ? `${existingStyle};${stylePairs.join(';')}` : stylePairs.join(';'));
+      }
+    } catch {}
+  };
+
+  const inlineExternalSvgSymbols = (origSvg, cloneSvg, ownerDoc, root) => {
+    try {
+      const uses = Array.from(origSvg.querySelectorAll('use'));
+      if (uses.length === 0) return;
+      const defs = ownerDoc.createElementNS ? ownerDoc.createElementNS('http://www.w3.org/2000/svg', 'defs') : null;
+      if (!defs) return;
+      let added = 0;
+      const addedIds = new Set();
+      for (const u of uses) {
+        const href = u.getAttribute('href') || u.getAttribute('xlink:href') || '';
+        if (!href.startsWith('#')) continue;
+        const targetId = href.slice(1);
+        if (!targetId || addedIds.has(targetId)) continue;
+        const refNode =
+          (root.getElementById ? root.getElementById(targetId) : null) ||
+          (root.querySelector ? root.querySelector(`[id="${targetId}"]`) : null) ||
+          (ownerDoc.getElementById ? ownerDoc.getElementById(targetId) : null);
+        if (refNode && !origSvg.querySelector?.(`#${targetId}`)) {
+          defs.appendChild(refNode.cloneNode(true));
+          addedIds.add(targetId);
+          added++;
+        }
+      }
+      if (added > 0 && cloneSvg.insertBefore) {
+        cloneSvg.insertBefore(defs, cloneSvg.firstChild || null);
+      }
+    } catch {}
+  };
+
+  const seenSvgHashes = new Set();
+  const urlRegex = /url\(\s*(?:(['"])(.*?)\1|([^)'"]+))\s*\)/gi;
+
+  for (const { root, ownerDoc, baseUrl, isDocument } of roots) {
+    // 1. <video> Clean Frame Snaps + Posters
+    let videos = [];
+    try { videos = Array.from(root.querySelectorAll('video')); } catch {}
+    videos.forEach((v, idx) => {
+      const vw = v.videoWidth || v.clientWidth || 0;
+      const vh = v.videoHeight || v.clientHeight || 0;
+      if (v.readyState >= 2 && vw > 16 && vh > 16) {
+        try {
+          const c = ownerDoc.createElement('canvas');
+          c.width = vw;
+          c.height = vh;
+          const ctx = c.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(v, 0, 0, vw, vh);
+            const dataUrl = c.toDataURL('image/png');
+            addItem({
+              url: dataUrl,
+              nameHint: v.getAttribute('title') || v.getAttribute('aria-label') || `Clean_Video_Frame_${idx + 1}`,
+              category: 'video',
+              width: vw,
+              height: vh,
+              sourceTag: '<video> Clean Frame',
+            });
+          }
+        } catch {
+          diagnostics.protectedVideos++;
+        }
+      }
+      if (v.poster) {
+        const posterUrl = resolveUrlWithBase(v.poster, baseUrl);
+        if (posterUrl) {
+          addItem({
+            url: posterUrl,
+            nameHint: `Video_Poster_${idx + 1}`,
+            category: 'video',
+            width: vw,
+            height: vh,
+            sourceTag: '<video poster>',
+          });
+        }
+      }
+    });
+
+    // 2. OpenGraph, Twitter Cards & High-Res Icons (documents only)
+    if (isDocument) {
+      const metaSelectors = [
+        { sel: 'meta[property="og:image"], meta[property="og:image:secure_url"]', tag: 'meta og:image', hint: 'OpenGraph_Social_Banner' },
+        { sel: 'meta[name="twitter:image"], meta[property="twitter:image"]', tag: 'meta twitter:image', hint: 'Twitter_Card_Banner' },
+        { sel: 'link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]', tag: 'apple-touch-icon', hint: 'Apple_Touch_Icon' },
+        { sel: 'link[rel="icon"], link[rel="shortcut icon"]', tag: 'link favicon', hint: 'Site_Favicon' },
+      ];
+      metaSelectors.forEach(({ sel, tag, hint }) => {
+        try {
+          root.querySelectorAll(sel).forEach((el) => {
+            const raw = el.getAttribute('content') || el.getAttribute('href');
+            const resolved = resolveUrlWithBase(raw, baseUrl);
+            if (resolved) {
+              addItem({
+                url: resolved,
+                nameHint: hint,
+                category: 'og',
+                width: tag.includes('og:') || tag.includes('twitter:') ? 1200 : 180,
+                height: tag.includes('og:') || tag.includes('twitter:') ? 630 : 180,
+                sourceTag: tag,
+              });
+            }
+          });
+        } catch {}
+      });
+    }
+
+    // 3. <img> and <picture> elements (highest-res srcset + lazy-load attributes)
+    let imgs = [];
+    try { imgs = Array.from(root.querySelectorAll('img')); } catch {}
+    imgs.forEach((img) => {
+      let { bestUrl, bestScore, foundSrcset } = pickBestFromLazySrcset(img, baseUrl, null, -1);
+
+      const parentPic = typeof img.closest === 'function' ? img.closest('picture') : null;
+      if (parentPic) {
+        const sources = Array.from(parentPic.querySelectorAll('source'));
+        for (const s of sources) {
+          const picked = pickBestFromLazySrcset(s, baseUrl, bestUrl, bestScore);
+          bestUrl = picked.bestUrl;
+          bestScore = picked.bestScore;
+          foundSrcset = foundSrcset || picked.foundSrcset;
+        }
+      }
+
+      if (!bestUrl) {
+        const directCandidates = [img.currentSrc, img.src, ...LAZY_ATTRS.map((a) => img.getAttribute(a))];
+        for (const cand of directCandidates) {
+          const resolved = resolveUrlWithBase(cand, baseUrl);
+          if (resolved && !resolved.startsWith('data:image/gif;base64,R0lGOD')) {
+            bestUrl = resolved;
+            break;
+          }
+        }
+      }
+
+      if (bestUrl) {
+        const w = img.naturalWidth || img.width || img.clientWidth || 0;
+        const h = img.naturalHeight || img.height || img.clientHeight || 0;
+        addItem({
+          url: bestUrl,
+          nameHint: img.alt || img.title || '',
+          category: 'img',
+          width: w,
+          height: h,
+          sourceTag: foundSrcset ? '<img srcset>' : '<img>',
+        });
+      }
+    });
+
+    // 4. Inline <svg> vectors (no 80-SVG cap, inherited CSS styles & external <use> symbols resolved)
+    let svgs = [];
+    try { svgs = Array.from(root.querySelectorAll('svg')); } catch {}
+    svgs.forEach((svg, idx) => {
+      const rect = svg.getBoundingClientRect();
+      const w = Math.round(rect.width || parseFloat(svg.getAttribute('width') || '0') || 64);
+      const h = Math.round(rect.height || parseFloat(svg.getAttribute('height') || '0') || 64);
+      if (w < 12 || h < 12) return;
+
       try {
-        const dataUrl = c.toDataURL('image/png');
+        const clone = svg.cloneNode(true);
+        clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        if (!clone.getAttribute('viewBox') && w > 0 && h > 0) {
+          clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+        }
+        if (!clone.getAttribute('width')) clone.setAttribute('width', String(w));
+        if (!clone.getAttribute('height')) clone.setAttribute('height', String(h));
+
+        resolveSvgInheritedStyles(svg, clone);
+        const origShapes = Array.from(svg.querySelectorAll('path, circle, rect, polygon, polyline, line, ellipse, text, g, use'));
+        const cloneShapes = Array.from(clone.querySelectorAll('path, circle, rect, polygon, polyline, line, ellipse, text, g, use'));
+        for (let sIdx = 0; sIdx < Math.min(origShapes.length, cloneShapes.length); sIdx++) {
+          resolveSvgInheritedStyles(origShapes[sIdx], cloneShapes[sIdx]);
+        }
+        inlineExternalSvgSymbols(svg, clone, ownerDoc, root);
+
+        const rawMarkup = new XMLSerializer().serializeToString(clone);
+        if (rawMarkup.length > 350000 || seenSvgHashes.has(rawMarkup)) return;
+        seenSvgHashes.add(rawMarkup);
+
+        const dataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(rawMarkup)}`;
+        const label =
+          svg.getAttribute('aria-label') ||
+          svg.querySelector('title')?.textContent ||
+          svg.id ||
+          `Vector_SVG_${idx + 1}`;
+
         addItem({
           url: dataUrl,
-          nameHint: c.getAttribute('aria-label') || c.id || `Canvas_Graphic_${idx + 1}`,
-          category: 'canvas',
-          width: c.width,
-          height: c.height,
-          sourceTag: '<canvas>',
+          nameHint: label,
+          category: 'svg',
+          width: w,
+          height: h,
+          sourceTag: 'Inline <svg>',
+          svgCode: rawMarkup,
         });
       } catch {}
-    }
-  });
+    });
 
-  return items;
+    // 5. CSS background-image across ALL elements in root (no 1200-element cap)
+    let allElements = [];
+    try { allElements = Array.from(root.querySelectorAll('*')); } catch {}
+    for (const el of allElements) {
+      const styles = [
+        getComputed(el),
+        getComputed(el, '::before'),
+        getComputed(el, '::after'),
+      ];
+      for (const st of styles) {
+        const bg = st?.backgroundImage;
+        if (!bg || bg === 'none' || !bg.includes('url(')) continue;
+        urlRegex.lastIndex = 0;
+        let match;
+        while ((match = urlRegex.exec(bg)) !== null) {
+          const raw = (match[2] ?? match[3] ?? '').trim();
+          const resolved = resolveUrlWithBase(raw, baseUrl);
+          if (resolved) {
+            const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { width: 0, height: 0 };
+            addItem({
+              url: resolved,
+              nameHint: el.getAttribute('aria-label') || el.id || '',
+              category: 'bg',
+              width: Math.round(rect.width || 0),
+              height: Math.round(rect.height || 0),
+              sourceTag: 'CSS background-image',
+            });
+          }
+        }
+      }
+    }
+
+    // 6. <canvas> graphics
+    let canvases = [];
+    try { canvases = Array.from(root.querySelectorAll('canvas')); } catch {}
+    canvases.forEach((c, idx) => {
+      if (c.width >= 32 && c.height >= 32) {
+        try {
+          const dataUrl = c.toDataURL('image/png');
+          addItem({
+            url: dataUrl,
+            nameHint: c.getAttribute('aria-label') || c.id || `Canvas_Graphic_${idx + 1}`,
+            category: 'canvas',
+            width: c.width,
+            height: c.height,
+            sourceTag: '<canvas>',
+          });
+        } catch {
+          diagnostics.taintedCanvases++;
+        }
+      }
+    });
+  }
+
+  return { items, diagnostics };
 }
 
 // ---------------------------------------------------------------------------
@@ -1406,14 +1727,6 @@ async function getSettings(override) {
       stored = localRes[SETTINGS_KEY];
     }
   } catch {}
-  if (!stored) {
-    try {
-      const syncRes = await chrome.storage.sync.get(SETTINGS_KEY);
-      if (syncRes?.[SETTINGS_KEY] && typeof syncRes[SETTINGS_KEY] === 'object') {
-        stored = syncRes[SETTINGS_KEY];
-      }
-    } catch {}
-  }
   const merged = {
     ...(stored || {}),
     ...(override && typeof override === 'object' ? override : {}),
@@ -1448,6 +1761,7 @@ function sanitizeSettings(raw) {
     proofVisualStamp: s.proofVisualStamp === true,
     saveLocationMode: ['downloads', 'folder', 'ask'].includes(s.saveLocationMode) ? s.saveLocationMode : 'downloads',
     customSaveFolderName: typeof s.customSaveFolderName === 'string' ? s.customSaveFolderName.trim().slice(0, 120) : '',
+    captureAllWindows: s.captureAllWindows === true,
   };
 }
 

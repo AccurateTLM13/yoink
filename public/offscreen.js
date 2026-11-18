@@ -56,7 +56,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ---------------------------------------------------------------------------
 // Incremental stitching (1 chunk per message keeps each message small)
 // ---------------------------------------------------------------------------
-function stitchBegin({ jobId, kind, totalWidth, totalHeight, dpr, cropRect, settings, proofContext }) {
+function stitchBegin({ jobId, kind, totalWidth, totalHeight, dpr, cropRect, settings, proofContext, segmentOriginCssY, autoSegment }) {
   const now = Date.now();
   for (const [id, job] of jobs) {
     if (now - job.createdAt > JOB_TTL_MS) {
@@ -71,6 +71,9 @@ function stitchBegin({ jobId, kind, totalWidth, totalHeight, dpr, cropRect, sett
     totalWidth: Number(totalWidth) || 0,
     totalHeight: Number(totalHeight) || 0,
     dpr: Number(dpr) || 1,
+    segmentOriginCssY: Number(segmentOriginCssY) || 0,
+    autoSegment: autoSegment === true,
+    segmentedClose: false,
     cropRect,
     settings,
     proofContext,
@@ -99,7 +102,8 @@ function initJobCanvas(job, img) {
 
   if (job.kind === 'full') {
     width = img.width;
-    height = Math.round(job.totalHeight * job.scale) || img.height;
+    const remainingCssH = Math.max(0, job.totalHeight - (job.segmentOriginCssY || 0));
+    height = Math.round(remainingCssH * job.scale) || img.height;
   } else {
     const r = job.cropRect;
     if (!r) throw new Error('Missing crop rectangle for element capture');
@@ -113,14 +117,15 @@ function initJobCanvas(job, img) {
   }
 
   job.requestedHeight = height;
-  height = Math.max(1, Math.min(height, MAX_DIMENSION, Math.floor(MAX_AREA / width)));
+  job.maxAllowedHeight = Math.max(1, Math.min(MAX_DIMENSION, Math.floor(MAX_AREA / width)));
+  height = Math.max(1, Math.min(height, job.maxAllowedHeight));
   job.canvas = new OffscreenCanvas(width, height);
   job.ctx = job.canvas.getContext('2d', { willReadFrequently: true });
 }
 
 function ensureCanvasCapacity(job, requiredBottom) {
   if (!job.canvas || requiredBottom <= job.canvas.height) return;
-  const maxAllowed = Math.max(1, Math.min(MAX_DIMENSION, Math.floor(MAX_AREA / job.canvas.width)));
+  const maxAllowed = job.maxAllowedHeight || Math.max(1, Math.min(MAX_DIMENSION, Math.floor(MAX_AREA / job.canvas.width)));
   if (job.canvas.height >= maxAllowed) return;
 
   const nextHeight = Math.min(maxAllowed, requiredBottom);
@@ -141,8 +146,15 @@ async function stitchAdd({ jobId, dataUrl, yOffset }) {
   const img = await loadBitmap(dataUrl);
   try {
     if (!job.canvas) initJobCanvas(job, img);
-    const destY = Math.round((Number(yOffset) || 0) * job.scale);
+    const relativeCssY = Math.max(0, (Number(yOffset) || 0) - (job.segmentOriginCssY || 0));
+    const destY = Math.round(relativeCssY * job.scale);
     const chunkH = job.kind === 'full' ? img.height : job.src.h;
+    const maxAllowed = job.maxAllowedHeight || Math.max(1, Math.min(MAX_DIMENSION, Math.floor(MAX_AREA / job.canvas.width)));
+
+    if (job.autoSegment && job.kind === 'full' && job.bottom > 0 && destY + chunkH > maxAllowed) {
+      job.segmentedClose = true;
+      return { ok: false, segmentFull: true, nextSegmentOriginCssY: Number(yOffset) || 0 };
+    }
 
     // Dynamically expand canvas if lazy-loaded content grew the page past initial totalHeight.
     ensureCanvasCapacity(job, destY + chunkH);
@@ -163,7 +175,7 @@ async function stitchAdd({ jobId, dataUrl, yOffset }) {
   return { ok: true };
 }
 
-async function stitchEnd({ jobId }) {
+async function stitchEnd({ jobId, segmented }) {
   const job = jobs.get(jobId);
   jobs.delete(jobId);
   if (!job?.canvas) throw new Error('No image chunks received for stitching');
@@ -179,7 +191,8 @@ async function stitchEnd({ jobId }) {
 
   try {
     const result = await encodeCanvas(canvas, job.settings, job.proofContext);
-    const incomplete = job.bottom + Math.max(2, job.scale) < job.requestedHeight;
+    const isSegmentedPart = segmented === true || job.segmentedClose === true || (job.segmentOriginCssY || 0) > 0;
+    const incomplete = !isSegmentedPart && job.bottom + Math.max(2, job.scale) < job.requestedHeight;
     return {
       ...result,
       warning: incomplete

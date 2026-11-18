@@ -73,7 +73,7 @@ describe('OCR Text Extraction (P2-9) & Local AI', () => {
         naturalHeight = 100;
         width = 100;
         height = 100;
-        async decode() {}
+        async decode() { }
       }
 
       class MockTextDetector {
@@ -86,7 +86,7 @@ describe('OCR Text Extraction (P2-9) & Local AI', () => {
       }
 
       (globalThis as any).Image = MockImage;
-      (globalThis as any).createImageBitmap = async () => ({ close() {} });
+      (globalThis as any).createImageBitmap = async () => ({ close() { } });
       (globalThis as any).window = {
         TextDetector: MockTextDetector,
       };
@@ -125,7 +125,7 @@ describe('OCR Text Extraction (P2-9) & Local AI', () => {
         naturalHeight = 8500;
         width = 1280;
         height = 8500;
-        async decode() {}
+        async decode() { }
       }
 
       class MockTextDetector {
@@ -174,5 +174,23 @@ describe('OCR Text Extraction (P2-9) & Local AI', () => {
     const retrieved = updatedList.find((i) => i.id === item.id);
     assert.ok(retrieved);
     assert.strictEqual(retrieved.ocrText, 'INVOICE #1024 TOTAL: $250.00 DUE: 2026-10-15');
+  });
+
+  it('enforces 100% local OCR processing without calling external network endpoints', async () => {
+    const fakeDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    let networkCalls = 0;
+    const origFetch = (globalThis as any).fetch;
+    (globalThis as any).fetch = async () => {
+      networkCalls++;
+      throw new Error('Network calls are disallowed in 100% local OCR mode');
+    };
+
+    try {
+      const res = await extractOcrText(fakeDataUrl);
+      assert.strictEqual(networkCalls, 0);
+      assert.strictEqual(res.engine, 'fallback');
+    } finally {
+      (globalThis as any).fetch = origFetch;
+    }
   });
 });
