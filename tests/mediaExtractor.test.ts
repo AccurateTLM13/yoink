@@ -104,7 +104,7 @@ describe('Page Media Yoinker — Srcset, CSS Background, Format & Filter Utiliti
     assert.deepEqual(searchWebp.map((i) => i.id), ['2']);
   });
 
-  test('extractAllPageMediaInTab removes 80-SVG/1200-element caps, scans shadow/same-origin frames, resolves SVG styles, and reports protected diagnostics', () => {
+  test('extractAllPageMediaInTab removes 80-SVG/1200-element caps, scans shadow/same-origin frames, resolves SVG styles, and reports protected diagnostics', async () => {
     function makeEl(tagName: string, attrs: Record<string, string> = {}, extra: Record<string, any> = {}) {
       const children: any[] = extra.children || [];
       const el: any = {
@@ -300,7 +300,7 @@ describe('Page Media Yoinker — Srcset, CSS Background, Format & Filter Utiliti
     });
 
     vm.runInContext(BG_CODE, ctx);
-    const extracted = vm.runInContext('extractAllPageMediaInTab()', ctx);
+    const extracted = await vm.runInContext('extractAllPageMediaInTab()', ctx);
 
     assert.ok(Array.isArray(extracted.items), 'Expected { items, diagnostics } result');
     const svgItems = extracted.items.filter((i: any) => i.category === 'svg');
@@ -330,6 +330,81 @@ describe('Page Media Yoinker — Srcset, CSS Background, Format & Filter Utiliti
     assert.equal(extracted.diagnostics.crossOriginFrames, 1);
     assert.equal(extracted.diagnostics.taintedCanvases, 1);
     assert.equal(extracted.diagnostics.protectedVideos, 1);
+  });
+
+  test('extractAllPageMediaInTab handles large DOMs with chunked scanning, time budget reporting, and cancellation', async () => {
+    const elements = Array.from({ length: 1200 }, (_, i) => ({
+      tagName: i % 3 === 0 ? 'SPAN' : 'DIV',
+      id: `node_${i}`,
+      shadowRoot: null,
+      getAttribute: () => null,
+      getBoundingClientRect: () => ({ width: 10, height: 10 }),
+    }));
+    let nowMs = 0;
+    const ctx = vm.createContext({
+      chrome: {
+        runtime: { id: 'test', getURL: (p: string) => `chrome-extension://test/${p}`, onInstalled: { addListener: () => {} }, onMessage: { addListener: () => {} } },
+        commands: { onCommand: { addListener: () => {} } },
+        alarms: { onAlarm: { addListener: () => {} }, create: () => {} },
+        tabs: { onRemoved: { addListener: () => {} } },
+      },
+      window: {
+        location: { href: 'https://example.com/huge-dom' },
+        getComputedStyle: () => {
+          // Simulate slow layout/style computation to trigger the time budget after chunk 1
+          nowMs += 15;
+          return { backgroundImage: 'none', content: 'none' };
+        },
+      },
+      performance: { now: () => nowMs },
+      document: {
+        title: 'Huge DOM',
+        location: { href: 'https://example.com/huge-dom' },
+        querySelectorAll: (sel: string) => (sel === '*' ? elements : []),
+      },
+      XMLSerializer: class { serializeToString() { return ''; } },
+      setTimeout,
+      clearTimeout,
+      URL, Set, Map, Array, Object, Number, String, Math, Date, Promise, console,
+    });
+
+    vm.runInContext(BG_CODE, ctx);
+    const budgetResult = await vm.runInContext('extractAllPageMediaInTab()', ctx);
+    assert.equal(budgetResult.diagnostics.scanTruncated, true, 'Time-budgeted scan should report scanTruncated');
+    assert.ok(budgetResult.diagnostics.scannedElements > 0 && budgetResult.diagnostics.scannedElements < 1200);
+
+    // Cancellation: advancing __yoinkMediaScanSeq cancels an in-progress scan cleanly
+    nowMs = 0;
+    const cancelCtx = vm.createContext({
+      chrome: {
+        runtime: { id: 'test', getURL: (p: string) => `chrome-extension://test/${p}`, onInstalled: { addListener: () => {} }, onMessage: { addListener: () => {} } },
+        commands: { onCommand: { addListener: () => {} } },
+        alarms: { onAlarm: { addListener: () => {} }, create: () => {} },
+        tabs: { onRemoved: { addListener: () => {} } },
+      },
+      window: {
+        location: { href: 'https://example.com/cancel-dom' },
+        getComputedStyle: () => ({ backgroundImage: 'none', content: 'none' }),
+      },
+      performance: { now: () => 0 },
+      document: {
+        title: 'Cancel DOM',
+        location: { href: 'https://example.com/cancel-dom' },
+        querySelectorAll: (sel: string) => (sel === '*' ? elements : []),
+      },
+      XMLSerializer: class { serializeToString() { return ''; } },
+      setTimeout: (fn: any) => {
+        // Simulate a newer scan starting while the previous chunk yielded
+        (cancelCtx as any).window.__yoinkMediaScanSeq = 999;
+        return setTimeoutOrig(fn, 0);
+      },
+      clearTimeout,
+      URL, Set, Map, Array, Object, Number, String, Math, Date, Promise, console,
+    });
+    const setTimeoutOrig = setTimeout;
+    vm.runInContext(BG_CODE, cancelCtx);
+    const cancelledResult = await vm.runInContext('extractAllPageMediaInTab()', cancelCtx);
+    assert.equal(cancelledResult.diagnostics.cancelled, true, 'Advancing scan sequence should cancel stale scan');
   });
 });
 

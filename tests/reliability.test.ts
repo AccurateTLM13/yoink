@@ -587,12 +587,24 @@ describe('High-Impact Reliability Improvements (Streaming Stitch, Dynamic Canvas
       assert.equal(r.ok, true);
     }
 
+    // Verify completed segment dataUrls are NOT held in scrollSessions RAM after segment rotation
+    const bufferedSegmentUrls = vm.runInContext(
+      'Array.from(scrollSessions.values()).flatMap(s => (s.completedSegments || []).filter(seg => seg && seg.dataUrl))',
+      bgCtx
+    );
+    assert.equal(
+      bufferedSegmentUrls.length,
+      0,
+      'Completed segment dataUrls must not remain buffered in scrollSessions RAM before finalization'
+    );
+
     await send('FINALIZE_STITCHING', {
       chunks: [{ index: 0, yOffset: 0 }, { index: 1, yOffset: 5000 }, { index: 2, yOffset: 10000 }, { index: 3, yOffset: 15000 }],
       totalWidth: 1200,
       totalHeight: 20000,
       dpr: 1,
       title: 'Huge Page',
+      limitReached: true,
     });
 
     // Wait for async pipeline (both segments saved & downloaded)
@@ -605,7 +617,11 @@ describe('High-Impact Reliability Improvements (Streaming Stitch, Dynamic Canvas
     assert.equal(downloadFilenames.length, 2, 'Both segments should be auto-downloaded');
     assert.ok(savedHistory.some((item: any) => /Part 1 of 2/.test(item.title)));
     assert.ok(savedHistory.some((item: any) => /Part 2 of 2/.test(item.title)));
-    assert.match(savedHistory[0].warning || '', /split into 2/i);
+    assert.match(savedHistory[0].warning || '', /Partial segmented capture/i);
+    assert.ok(
+      !/without truncation/i.test(savedHistory[0].warning || ''),
+      'Incomplete segmented capture must NOT claim "without truncation"'
+    );
     assert.ok(downloadFilenames.some((fn) => fn.includes('_part1_of_2')));
     assert.ok(downloadFilenames.some((fn) => fn.includes('_part2_of_2')));
   });

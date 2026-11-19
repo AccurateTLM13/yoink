@@ -65,6 +65,13 @@ async function abortScrollSession(tabId) {
   if (session.jobId) {
     await callOffscreen('STITCH_ABORT', { jobId: session.jobId }).catch(() => {});
   }
+  if (Array.isArray(session.completedSegments)) {
+    for (const seg of session.completedSegments) {
+      if (seg?.id) {
+        await mutateHistory('delete', { id: seg.id }).catch(() => {});
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +103,7 @@ const ROUTES = {
   CAPTURE_URL_LIST: { from: 'page', run: (p) => handleCaptureUrlList(p) },
   CAPTURE_MULTI_SIZE: { from: 'page', run: (p) => handleCaptureMultiSize(p) },
   YOINK_PAGE_MEDIA: { from: 'page', run: (p) => handleYoinkPageMedia(p) },
+  CANCEL_MEDIA_SCAN: { from: 'page', run: (p) => handleCancelMediaScan(p) },
   HISTORY_ADD: { from: 'page', run: async (p) => ({ history: await saveHistoryItem(p.item) }) },
   HISTORY_UPDATE: { from: 'page', run: (p) => mutateHistory('update', p) },
   HISTORY_DELETE: { from: 'page', run: (p) => mutateHistory('delete', p) },
@@ -493,7 +501,32 @@ async function handleChunkCapture(payload, sender) {
       const segResult = await withJob(() =>
         callOffscreen('STITCH_END', { jobId: session.jobId, segmented: true })
       );
-      session.completedSegments.push(segResult);
+      const segId = `${kind}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
+      await saveHistoryItem({
+        id: segId,
+        title: session.capTitle || (kind === 'element' ? 'Scrolling Element Capture' : 'Full Page Capture'),
+        url: session.capUrl || '',
+        dataUrl: segResult.dataUrl,
+        thumbnailUrl: segResult.thumbnailUrl || '',
+        timestamp: Date.now(),
+        width: segResult.width || 0,
+        height: segResult.height || 0,
+        mode: kind,
+        format: session.settings.format,
+        proofKeyId: segResult.proofKeyId || undefined,
+        proofSigned: segResult.proofSigned === true,
+        warning: segResult.warning || undefined,
+      });
+      // Release encoded dataUrl from scrollSessions RAM immediately; finalization streams from storage.
+      session.completedSegments.push({
+        id: segId,
+        width: segResult.width || 0,
+        height: segResult.height || 0,
+        thumbnailUrl: segResult.thumbnailUrl || '',
+        proofKeyId: segResult.proofKeyId || undefined,
+        proofSigned: segResult.proofSigned === true,
+        warning: segResult.warning || undefined,
+      });
       if (session.completedSegments.length >= MAX_SEGMENTS) {
         session.jobId = null;
         return false;
@@ -586,19 +619,37 @@ function handleFinalizeStitching(payload, sender, kind) {
     }
 
     const totalParts = completedSegments.length;
+    const missedCount = Number(payload.missedSections) || 0;
+    const hasSegmentWarning = completedSegments.some((seg) => Boolean(seg?.warning));
+    const isIncomplete = Boolean(
+      payload.limitReached || payload.scrollStalled || missedCount > 0 || hasSegmentWarning
+    );
+
     const notes = [];
     if (payload.limitReached) notes.push('Capture stopped at the maximum page-length safety limit.');
     if (payload.scrollStalled) notes.push('Page prevented further scrolling before reaching the bottom.');
-    if (Number(payload.missedSections) > 0) {
-      notes.push(`${Number(payload.missedSections)} section(s) could not be captured.`);
+    if (missedCount > 0) {
+      notes.push(`${missedCount} section(s) could not be captured.`);
     }
     const extraNotice = notes.join(' ');
 
+    const loadSegmentDataUrl = async (seg) => {
+      if (seg?.dataUrl) return seg.dataUrl;
+      if (seg?.id) {
+        const key = FULL_PREFIX + seg.id;
+        const stored = await chrome.storage.local.get(key);
+        return stored?.[key] || '';
+      }
+      return '';
+    };
+
     if (totalParts === 1) {
       const single = completedSegments[0];
+      const singleDataUrl = await loadSegmentDataUrl(single);
       const combinedWarning = [single.warning, extraNotice].filter(Boolean).join(' ') || undefined;
       await finishCapture({
         ...single,
+        dataUrl: singleDataUrl,
         warning: combinedWarning,
         mode: kind,
         title: capTitle,
@@ -610,11 +661,15 @@ function handleFinalizeStitching(payload, sender, kind) {
 
     for (let idx = 0; idx < totalParts; idx++) {
       const seg = completedSegments[idx];
+      const segDataUrl = await loadSegmentDataUrl(seg);
       const partNum = idx + 1;
-      const splitNotice = `Oversized page was automatically split into ${totalParts} parts (Part ${partNum} of ${totalParts}) to capture without truncation.`;
+      const splitNotice = isIncomplete
+        ? `Partial segmented capture (Part ${partNum} of ${totalParts}): capture stopped before completing the entire page.`
+        : `Oversized page was automatically split into ${totalParts} parts (Part ${partNum} of ${totalParts}) to capture the full page.`;
       const combinedWarning = [splitNotice, extraNotice, seg.warning].filter(Boolean).join(' ');
       await finishCapture({
         ...seg,
+        dataUrl: segDataUrl,
         mode: kind,
         title: `${capTitle} (Part ${partNum} of ${totalParts})`,
         filenameTitle: capTitle,
@@ -699,7 +754,7 @@ async function finishCapture(o) {
   }
 
   const item = {
-    id: `${o.idPrefix || o.mode}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
+    id: o.id || `${o.idPrefix || o.mode}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`,
     title: o.title || 'Screenshot Capture',
     url: o.url || '',
     dataUrl: o.dataUrl,
@@ -1170,6 +1225,21 @@ async function handleCaptureMultiSize({ url, resolutions, settings }) {
 // ---------------------------------------------------------------------------
 // 8. Yoink Page Media (Images, SVGs, CSS Backgrounds, OpenGraph, Clean <video> Frames)
 // ---------------------------------------------------------------------------
+async function handleCancelMediaScan({ tabId }) {
+  if (!tabId) return { ok: false };
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      func: () => {
+        window.__yoinkMediaScanSeq = (Number(window.__yoinkMediaScanSeq) || 0) + 1;
+      },
+    });
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
 async function handleYoinkPageMedia({ tabId }) {
   let targetTab = null;
 
@@ -1205,7 +1275,7 @@ async function handleYoinkPageMedia({ tabId }) {
   const diagnostics =
     rawResult && !Array.isArray(rawResult) && rawResult.diagnostics
       ? rawResult.diagnostics
-      : { crossOriginFrames: 0, taintedCanvases: 0, protectedVideos: 0 };
+      : { crossOriginFrames: 0, taintedCanvases: 0, protectedVideos: 0, scanTruncated: false, cancelled: false, scannedElements: 0 };
 
   return {
     success: true,
@@ -1217,13 +1287,30 @@ async function handleYoinkPageMedia({ tabId }) {
   };
 }
 
-function extractAllPageMediaInTab() {
+async function extractAllPageMediaInTab() {
+  const CHUNK_SIZE = 200;
+  const MAX_SCAN_MS = 4500;
+  const MAX_ROOTS = 64;
+  const scanSeq = (Number(window.__yoinkMediaScanSeq) || 0) + 1;
+  window.__yoinkMediaScanSeq = scanSeq;
+
+  const getNow = () =>
+    typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now();
+  const scanStart = getNow();
+  const isCancelled = () => Number(window.__yoinkMediaScanSeq) !== scanSeq;
+  const isOverBudget = () => getNow() - scanStart >= MAX_SCAN_MS;
+  const yieldToMain = () =>
+    typeof setTimeout === 'function' ? new Promise((resolve) => setTimeout(resolve, 0)) : Promise.resolve();
+
   const seen = new Set();
   const items = [];
   const diagnostics = {
     crossOriginFrames: 0,
     taintedCanvases: 0,
     protectedVideos: 0,
+    scanTruncated: false,
+    cancelled: false,
+    scannedElements: 0,
   };
   const pageUrl = window.location.href;
   const pageTitle = document.title || 'Webpage';
@@ -1337,6 +1424,10 @@ function extractAllPageMediaInTab() {
   const rootQueue = [{ root: document, ownerDoc: document, baseUrl: pageUrl, isDocument: true }];
 
   while (rootQueue.length > 0) {
+    if (roots.length >= MAX_ROOTS || isOverBudget()) {
+      diagnostics.scanTruncated = true;
+      break;
+    }
     const entry = rootQueue.shift();
     if (!entry?.root || visitedRoots.has(entry.root)) continue;
     visitedRoots.add(entry.root);
@@ -1347,7 +1438,8 @@ function extractAllPageMediaInTab() {
       allInRoot = Array.from(entry.root.querySelectorAll('*'));
     } catch {}
 
-    for (const el of allInRoot) {
+    for (let rIdx = 0; rIdx < allInRoot.length; rIdx++) {
+      const el = allInRoot[rIdx];
       if (el.shadowRoot && !visitedRoots.has(el.shadowRoot)) {
         rootQueue.push({
           root: el.shadowRoot,
@@ -1374,7 +1466,19 @@ function extractAllPageMediaInTab() {
           diagnostics.crossOriginFrames++;
         }
       }
+      if ((rIdx + 1) % (CHUNK_SIZE * 4) === 0) {
+        if (isOverBudget()) {
+          diagnostics.scanTruncated = true;
+          break;
+        }
+        await yieldToMain();
+        if (isCancelled()) {
+          diagnostics.cancelled = true;
+          return { items, diagnostics };
+        }
+      }
     }
+    if (diagnostics.scanTruncated) break;
   }
 
   const LAZY_ATTRS = [
@@ -1477,8 +1581,25 @@ function extractAllPageMediaInTab() {
 
   const seenSvgHashes = new Set();
   const urlRegex = /url\(\s*(?:(['"])(.*?)\1|([^)'"]+))\s*\)/gi;
+  const SKIP_BG_TAGS = new Set([
+    'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'META', 'LINK', 'HEAD', 'TITLE', 'BASE',
+    'BR', 'WBR', 'PATH', 'CIRCLE', 'RECT', 'POLYGON', 'POLYLINE', 'LINE', 'ELLIPSE',
+    'G', 'DEFS', 'SYMBOL', 'USE', 'CLIPPATH', 'MASK', 'LINEARGRADIENT', 'RADIALGRADIENT', 'STOP', 'PATTERN',
+  ]);
+  const REPLACED_TAGS = new Set([
+    'IMG', 'VIDEO', 'CANVAS', 'IFRAME', 'SVG', 'INPUT', 'TEXTAREA', 'SELECT',
+    'AUDIO', 'SOURCE', 'TRACK', 'EMBED', 'OBJECT', 'PICTURE',
+  ]);
 
   for (const { root, ownerDoc, baseUrl, isDocument } of roots) {
+    if (isCancelled()) {
+      diagnostics.cancelled = true;
+      return { items, diagnostics };
+    }
+    if (isOverBudget()) {
+      diagnostics.scanTruncated = true;
+      break;
+    }
     // 1. <video> Clean Frame Snaps + Posters
     let videos = [];
     try { videos = Array.from(root.querySelectorAll('video')); } catch {}
@@ -1641,37 +1762,61 @@ function extractAllPageMediaInTab() {
       } catch {}
     });
 
-    // 5. CSS background-image across ALL elements in root (no 1200-element cap)
+    // 5. CSS background-image across ALL elements in root (chunked & budgeted; no 1200-element cap)
     let allElements = [];
     try { allElements = Array.from(root.querySelectorAll('*')); } catch {}
-    for (const el of allElements) {
-      const styles = [
-        getComputed(el),
-        getComputed(el, '::before'),
-        getComputed(el, '::after'),
-      ];
-      for (const st of styles) {
-        const bg = st?.backgroundImage;
-        if (!bg || bg === 'none' || !bg.includes('url(')) continue;
-        urlRegex.lastIndex = 0;
-        let match;
-        while ((match = urlRegex.exec(bg)) !== null) {
-          const raw = (match[2] ?? match[3] ?? '').trim();
-          const resolved = resolveUrlWithBase(raw, baseUrl);
-          if (resolved) {
-            const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { width: 0, height: 0 };
-            addItem({
-              url: resolved,
-              nameHint: el.getAttribute('aria-label') || el.id || '',
-              category: 'bg',
-              width: Math.round(rect.width || 0),
-              height: Math.round(rect.height || 0),
-              sourceTag: 'CSS background-image',
-            });
+    for (let elIdx = 0; elIdx < allElements.length; elIdx++) {
+      const el = allElements[elIdx];
+      if (!el) continue;
+      diagnostics.scannedElements++;
+      const tag = String(el.tagName || '').toUpperCase();
+      if (!SKIP_BG_TAGS.has(tag)) {
+        const styles = [getComputed(el)];
+        if (!REPLACED_TAGS.has(tag)) {
+          const beforeSt = getComputed(el, '::before');
+          if (beforeSt && beforeSt.content && beforeSt.content !== 'none' && beforeSt.content !== 'normal') {
+            styles.push(beforeSt);
+          }
+          const afterSt = getComputed(el, '::after');
+          if (afterSt && afterSt.content && afterSt.content !== 'none' && afterSt.content !== 'normal') {
+            styles.push(afterSt);
+          }
+        }
+        for (const st of styles) {
+          const bg = st?.backgroundImage;
+          if (!bg || bg === 'none' || !bg.includes('url(')) continue;
+          urlRegex.lastIndex = 0;
+          let match;
+          while ((match = urlRegex.exec(bg)) !== null) {
+            const raw = (match[2] ?? match[3] ?? '').trim();
+            const resolved = resolveUrlWithBase(raw, baseUrl);
+            if (resolved) {
+              const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { width: 0, height: 0 };
+              addItem({
+                url: resolved,
+                nameHint: el.getAttribute('aria-label') || el.id || '',
+                category: 'bg',
+                width: Math.round(rect.width || 0),
+                height: Math.round(rect.height || 0),
+                sourceTag: 'CSS background-image',
+              });
+            }
           }
         }
       }
+      if ((elIdx + 1) % CHUNK_SIZE === 0) {
+        if (isOverBudget()) {
+          diagnostics.scanTruncated = true;
+          break;
+        }
+        await yieldToMain();
+        if (isCancelled()) {
+          diagnostics.cancelled = true;
+          return { items, diagnostics };
+        }
+      }
     }
+    if (diagnostics.scanTruncated) break;
 
     // 6. <canvas> graphics
     let canvases = [];

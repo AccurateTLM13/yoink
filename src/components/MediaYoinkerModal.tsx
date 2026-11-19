@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   ChevronLeft,
   Download,
@@ -26,6 +26,7 @@ import {
   YoinkMediaCategory,
 } from '../types';
 import {
+  cancelMediaScan,
   filterAndSortMedia,
   getInjectableOpenTabs,
   OpenWebsiteTab,
@@ -86,12 +87,25 @@ export const MediaYoinkerModal: React.FC<Props> = ({
   const [batchDownloading, setBatchDownloading] = useState(false);
   const [statusNote, setStatusNote] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<MediaExtractionDiagnostics | null>(null);
+  const scanRequestSeqRef = useRef(0);
+  const activeTabRef = useRef<number | undefined>(undefined);
 
   const runScan = useCallback(async (targetTabId?: number) => {
+    const prevTabId = activeTabRef.current;
+    if (prevTabId && prevTabId !== targetTabId) {
+      void cancelMediaScan(prevTabId);
+    } else if (targetTabId) {
+      void cancelMediaScan(targetTabId);
+    }
+    const reqId = ++scanRequestSeqRef.current;
+    activeTabRef.current = targetTabId;
     setLoading(true);
     setError(null);
     try {
       const res = await yoinkMediaFromTab(targetTabId);
+      if (scanRequestSeqRef.current !== reqId) return;
+      if (res.diagnostics?.cancelled) return;
+      if (res.tabId) activeTabRef.current = res.tabId;
       setItems(res.items);
       setDiagnostics(res.diagnostics || null);
       setScannedTabTitle(res.tabTitle);
@@ -99,9 +113,12 @@ export const MediaYoinkerModal: React.FC<Props> = ({
       if (res.tabId) setSelectedTabId(res.tabId);
       setSelectedIds(new Set());
     } catch (err: any) {
+      if (scanRequestSeqRef.current !== reqId) return;
       setError(err.message || 'Could not extract media from tab.');
     } finally {
-      setLoading(false);
+      if (scanRequestSeqRef.current === reqId) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -110,6 +127,12 @@ export const MediaYoinkerModal: React.FC<Props> = ({
       setOpenTabs(tabs);
     });
     runScan();
+    return () => {
+      scanRequestSeqRef.current++;
+      if (activeTabRef.current) {
+        void cancelMediaScan(activeTabRef.current);
+      }
+    };
   }, [runScan]);
 
   const filteredItems = useMemo(
@@ -484,23 +507,39 @@ export const MediaYoinkerModal: React.FC<Props> = ({
         {diagnostics &&
           (diagnostics.crossOriginFrames > 0 ||
             diagnostics.taintedCanvases > 0 ||
-            diagnostics.protectedVideos > 0) && (
-            <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200/80 text-[10.5px] text-amber-900 leading-snug">
-              <b>Some protected assets were skipped by browser security:</b>{' '}
-              {[
-                diagnostics.crossOriginFrames > 0
-                  ? `${diagnostics.crossOriginFrames} cross-origin frame(s)`
-                  : '',
-                diagnostics.taintedCanvases > 0
-                  ? `${diagnostics.taintedCanvases} CORS-tainted canvas(es)`
-                  : '',
-                diagnostics.protectedVideos > 0
-                  ? `${diagnostics.protectedVideos} DRM/cross-origin video(s)`
-                  : '',
-              ]
-                .filter(Boolean)
-                .join(', ')}
-              . Use <b>Capture Selection</b> or <b>Visible</b> screenshot to grab protected regions.
+            diagnostics.protectedVideos > 0 ||
+            diagnostics.scanTruncated) && (
+            <div className="px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200/80 text-[10.5px] text-amber-900 leading-snug space-y-0.5">
+              {(diagnostics.crossOriginFrames > 0 ||
+                diagnostics.taintedCanvases > 0 ||
+                diagnostics.protectedVideos > 0) && (
+                <div>
+                  <b>Some protected assets were skipped by browser security:</b>{' '}
+                  {[
+                    diagnostics.crossOriginFrames > 0
+                      ? `${diagnostics.crossOriginFrames} cross-origin frame(s)`
+                      : '',
+                    diagnostics.taintedCanvases > 0
+                      ? `${diagnostics.taintedCanvases} CORS-tainted canvas(es)`
+                      : '',
+                    diagnostics.protectedVideos > 0
+                      ? `${diagnostics.protectedVideos} DRM/cross-origin video(s)`
+                      : '',
+                  ]
+                    .filter(Boolean)
+                    .join(', ')}
+                  . Use <b>Capture Selection</b> or <b>Visible</b> screenshot to grab protected regions.
+                </div>
+              )}
+              {diagnostics.scanTruncated && (
+                <div>
+                  <b>Large-page budget reached:</b> Scanned{' '}
+                  {diagnostics.scannedElements
+                    ? `${diagnostics.scannedElements.toLocaleString()} DOM elements`
+                    : 'available roots'}{' '}
+                  before pausing background CSS scans so the page stays responsive. Images, videos, and SVGs already discovered remain listed below.
+                </div>
+              )}
             </div>
           )}
       </div>

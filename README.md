@@ -2,20 +2,20 @@
 
 **Professional Full Page, Visible Viewport, Selection, and Multi-Tab Screenshot Extension for Google Chrome (Manifest V3).**
 
-Yoink is a fast, offline-first screen capture tool designed for designers, developers, researchers, and everyday power users. It performs heavy-duty image stitching and processing entirely in the browser using Chrome's Offscreen Document API—no external servers, no tracking, and zero latency.
+Yoink is a fast, local-first screen capture tool designed for designers, developers, researchers, and everyday power users. It performs image stitching and processing in the browser using Chrome's Offscreen Document API—no external servers and no tracking.
 
 ---
 
 ## ✨ Features
 
-- **📜 Full Page Scrolling Capture:** Automatically scrolls through complex, dynamic, or infinite-scrolling pages, hides floating/sticky headers to prevent overlap artifacts, and stitches everything into a seamless high-resolution screenshot.
+- **📜 Full Page Scrolling Capture:** Automatically scrolls through complex or tall web pages, hides floating/sticky headers after the first viewport, and automatically segments oversized captures into multi-part outputs up to browser safety limits.
 - **👁️ Visible Viewport Capture:** Instant one-click capture of what is currently on screen.
 - **✂️ Interactive Region Selection:** Drag-and-drop crop box with real-time pixel dimension counters, 8-point resize handles, and quick keyboard triggers.
-- **📑 Multi-Tab Window Capture:** Captures every tab open in your current browser window in sequence and compiles them directly into your gallery.
+- **📑 Multi-Tab Window Capture:** Captures eligible open website tabs in your current browser window or across all open windows in sequence, with a per-tab completion report.
 - **📱 Responsive Multi-Resolution Capture:** Automatically captures target pages across mobile, tablet, and desktop viewports (e.g. iPhone, iPad, Desktop).
 - **🔗 Batch URL Capture:** Input a list of URLs to capture automated full-page or viewport snapshots in batch.
-- **🖼️ Built-in Gallery Hub:** Full-tab gallery to review, zoom, copy directly to clipboard as PNG, or batch-download your captures.
-- **🔒 100% Private & Local:** All stitching, cropping, and encoding occurs on your device. No screenshots or URLs ever leave your computer.
+- **🖼️ Built-in Gallery Hub:** Full-tab gallery to review, zoom, redact (pixelate or solid blackout), verify cryptographic Proof integrity, copy directly to clipboard as PNG, or batch-download your captures.
+- **🔒 100% Private & Local:** All stitching, cropping, annotations, encoding, OCR, and settings stay locally on your device. No screenshots or URLs leave your computer.
 
 ---
 
@@ -37,7 +37,7 @@ You can load Yoink directly into Google Chrome or any Chromium-based browser (Br
 
 1. Clone or download this repository:
    ```bash
-   git clone https://github.com/<your-username>/yoink.git
+   git clone https://github.com/AccurateTLM13/yoink.git
    cd yoink
    ```
 2. Install dependencies and build the extension:
@@ -68,6 +68,7 @@ You can load Yoink directly into Google Chrome or any Chromium-based browser (Br
 - **`npm run dev`** - Starts Vite development server with Hot Module Replacement (HMR) for testing UI components.
 - **`npm run build`** - Builds the production extension into the `dist/` directory.
 - **`npm run lint`** - Runs TypeScript compiler check (`tsc --noEmit`).
+- **`npm test`** - Runs unit and reliability test suites.
 - **`npm run pack`** - Builds the extension and packages the `dist/` folder into an upload-ready `yoink.zip` archive.
 
 ---
@@ -93,4 +94,4 @@ Yoink does **not** collect, store, or transmit any personal data, browsing histo
 
 ## 📄 License
 
-MIT License. Feel free to use, modify, and distribute.
+No license file is currently included in this repository.

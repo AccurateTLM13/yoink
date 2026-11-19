@@ -372,6 +372,23 @@ export async function yoinkMediaFromTab(tabId?: number): Promise<{
   return buildDemoYoinkedMedia();
 }
 
+export async function cancelMediaScan(tabId?: number): Promise<void> {
+  if (!isChromeExtension() || !tabId) return;
+  try {
+    await new Promise<void>((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          action: 'CANCEL_MEDIA_SCAN',
+          payload: { tabId },
+        },
+        () => resolve()
+      );
+    });
+  } catch {
+    // ignore cleanup failures
+  }
+}
+
 function buildDemoYoinkedMedia(): {
   items: YoinkedMediaItem[];
   tabTitle: string;

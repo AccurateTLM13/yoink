@@ -49,7 +49,7 @@ export const VerifyModal: React.FC<Props> = ({
   useEffect(() => {
     getOrCreateProofIdentity()
       .then(setIdentity)
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   const runVerification = useCallback(async (dataUrl: string, label?: string) => {
@@ -272,22 +272,20 @@ export const VerifyModal: React.FC<Props> = ({
             <div className="space-y-3 animate-in fade-in duration-150">
               {/* Primary Verdict Banner */}
               <div
-                className={`p-3.5 rounded-xl border flex items-start gap-3 ${
-                  result.status === 'authentic'
+                className={`p-3.5 rounded-xl border flex items-start gap-3 ${result.status === 'authentic'
                     ? 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
                     : result.status === 'tampered'
-                    ? 'bg-amber-50/90 border-amber-300 text-amber-950'
-                    : 'bg-zinc-100 border-zinc-300 text-zinc-900'
-                }`}
+                      ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+                      : 'bg-zinc-100 border-zinc-300 text-zinc-900'
+                  }`}
               >
                 <div
-                  className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
-                    result.status === 'authentic'
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${result.status === 'authentic'
                       ? 'bg-emerald-600 text-white'
                       : result.status === 'tampered'
-                      ? 'bg-amber-500 text-white'
-                      : 'bg-zinc-600 text-white'
-                  }`}
+                        ? 'bg-amber-500 text-white'
+                        : 'bg-zinc-600 text-white'
+                    }`}
                 >
                   {result.status === 'authentic' ? (
                     <ShieldCheck size={18} />
@@ -306,35 +304,41 @@ export const VerifyModal: React.FC<Props> = ({
                           ? 'Derivative integrity verified since re-signing'
                           : 'Signature and image integrity verified'
                         : result.status === 'tampered'
-                        ? 'Signed image changed after signing'
-                        : result.status === 'invalid_signature'
-                        ? 'Invalid Cryptographic Signature'
-                        : 'No Yoink Proof Signature Found'}
+                          ? 'Signed image changed after signing'
+                          : result.status === 'invalid_signature'
+                            ? 'Invalid Cryptographic Signature'
+                            : 'No Yoink Proof Signature Found'}
                     </span>
                     {result.signatureValid && (
                       <span
-                        className={`px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase ${
-                          result.isDerivative
-                            ? 'bg-indigo-600 text-white'
-                            : result.captureKind === 'imported'
-                            ? 'bg-sky-700 text-white'
-                            : 'bg-zinc-900 text-white'
-                        }`}
+                        className={`px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase ${!result.verified || !result.pixelsIntact
+                            ? 'bg-amber-700 text-white'
+                            : result.isDerivative
+                              ? 'bg-indigo-600 text-white'
+                              : result.captureKind === 'imported'
+                                ? 'bg-sky-700 text-white'
+                                : 'bg-zinc-900 text-white'
+                          }`}
                       >
-                        {result.isDerivative
-                          ? 'EDITED / RE-SIGNED DERIVATIVE'
-                          : result.captureKind === 'imported'
-                          ? 'SIGNED IMPORTED ASSET'
-                          : 'ORIGINAL CAPTURE'}
+                        {!result.verified || !result.pixelsIntact
+                          ? result.isDerivative
+                            ? 'DERIVATIVE SIGNATURE — IMAGE ALTERED'
+                            : result.captureKind === 'imported'
+                              ? 'IMPORTED SIGNATURE — IMAGE ALTERED'
+                              : 'ORIGINAL-TYPE SIGNATURE — IMAGE ALTERED'
+                          : result.isDerivative
+                            ? 'EDITED / RE-SIGNED DERIVATIVE'
+                            : result.captureKind === 'imported'
+                              ? 'SIGNED IMPORTED ASSET'
+                              : 'ORIGINAL CAPTURE'}
                       </span>
                     )}
                     {result.signatureValid && (
                       <span
-                        className={`px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase ${
-                          result.isOwnCapture
+                        className={`px-2 py-0.5 rounded-full text-[9.5px] font-mono font-bold uppercase ${result.isOwnCapture
                             ? 'bg-emerald-600 text-white'
                             : 'bg-amber-600 text-white'
-                        }`}
+                          }`}
                       >
                         {result.isOwnCapture ? '✓ THIS BROWSER’S KEY' : 'DIFFERENT BROWSER KEY'}
                       </span>
@@ -360,9 +364,8 @@ export const VerifyModal: React.FC<Props> = ({
                     />
                   </div>
                   <div
-                    className={`font-bold text-[11px] ${
-                      result.hasIptcScreenCapture ? 'text-emerald-700' : 'text-zinc-500'
-                    }`}
+                    className={`font-bold text-[11px] ${result.hasIptcScreenCapture ? 'text-emerald-700' : 'text-zinc-500'
+                      }`}
                   >
                     {result.hasIptcScreenCapture ? '✓ screenCapture' : 'Not Declared'}
                   </div>
@@ -377,9 +380,8 @@ export const VerifyModal: React.FC<Props> = ({
                     />
                   </div>
                   <div
-                    className={`font-bold text-[11px] ${
-                      result.hasPixelWatermark ? 'text-emerald-700' : 'text-zinc-500'
-                    }`}
+                    className={`font-bold text-[11px] ${result.hasPixelWatermark ? 'text-emerald-700' : 'text-zinc-500'
+                      }`}
                   >
                     {result.hasPixelWatermark ? '✓ Embedded' : 'None / Lossy'}
                   </div>
@@ -394,9 +396,8 @@ export const VerifyModal: React.FC<Props> = ({
                     />
                   </div>
                   <div
-                    className={`font-bold text-[11px] ${
-                      result.signatureValid ? 'text-emerald-700' : 'text-zinc-500'
-                    }`}
+                    className={`font-bold text-[11px] ${result.signatureValid ? 'text-emerald-700' : 'text-zinc-500'
+                      }`}
                   >
                     {result.signatureValid ? '✓ Valid ES256' : 'Unsigned'}
                   </div>
@@ -411,19 +412,18 @@ export const VerifyModal: React.FC<Props> = ({
                     />
                   </div>
                   <div
-                    className={`font-bold text-[11px] ${
-                      result.pixelsIntact
+                    className={`font-bold text-[11px] ${result.pixelsIntact
                         ? 'text-emerald-700'
                         : result.manifest
-                        ? 'text-amber-700'
-                        : 'text-zinc-500'
-                    }`}
+                          ? 'text-amber-700'
+                          : 'text-zinc-500'
+                      }`}
                   >
                     {result.pixelsIntact
                       ? '✓ Integrity verified'
                       : result.manifest
-                      ? 'Altered / Re-saved'
-                      : 'Unverified'}
+                        ? 'Altered / Re-saved'
+                        : 'Unverified'}
                   </div>
                 </div>
               </div>

@@ -45,6 +45,9 @@ export interface MediaExtractionDiagnostics {
   crossOriginFrames: number;
   taintedCanvases: number;
   protectedVideos: number;
+  scanTruncated?: boolean;
+  cancelled?: boolean;
+  scannedElements?: number;
 }
 
 export interface CaptureSettings {

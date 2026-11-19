@@ -1166,25 +1166,16 @@ export async function verifyImageDataUrl(dataUrl: string): Promise<ProofVerifica
 }
 
 /**
- * Extracts and cryptographically verifies a YoinkProofManifest from a data URL
- * (container chunks first, then LSB watermark) before returning it for derivative lineage.
+ * Extracts and cryptographically verifies a YoinkProofManifest from a data URL,
+ * requiring both a valid cryptographic signature and intact image pixels before
+ * returning it for derivative lineage.
  */
 export async function extractProofManifestFromDataUrl(
   dataUrl: string
 ): Promise<YoinkProofManifest | null> {
   try {
-    const { bytes } = dataUrlToBytes(dataUrl);
-    const container = extractContainerMetadata(bytes);
-    if (container.manifest && (await verifyProofManifestSignature(container.manifest))) {
-      return container.manifest;
-    }
-  } catch {
-    // ignore container parse issues
-  }
-
-  try {
     const res = await verifyImageDataUrl(dataUrl);
-    if (res.signatureValid && res.manifest) {
+    if (res.verified === true && res.pixelsIntact === true && res.manifest) {
       return res.manifest;
     }
   } catch {

@@ -378,6 +378,44 @@ describe('Yoink Proof™ — Cryptographic Provenance & Steganography Engine', (
     );
   });
 
+  async function withMockImageDecoder<T>(
+    width: number,
+    height: number,
+    rgba: Uint8ClampedArray,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const origCreateImageBitmap = (globalThis as any).createImageBitmap;
+    const origDocument = (globalThis as any).document;
+    const origBlob = (globalThis as any).Blob;
+
+    (globalThis as any).Blob = class MockBlob {
+      constructor(public parts: any[], public opts: any) {}
+    };
+    (globalThis as any).createImageBitmap = async () => ({
+      width,
+      height,
+      close() {},
+    });
+    (globalThis as any).document = {
+      createElement: () => ({
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          drawImage() {},
+          getImageData: () => ({ data: rgba }),
+        }),
+      }),
+    };
+
+    try {
+      return await fn();
+    } finally {
+      (globalThis as any).createImageBitmap = origCreateImageBitmap;
+      (globalThis as any).document = origDocument;
+      (globalThis as any).Blob = origBlob;
+    }
+  }
+
   test('extractProofManifestFromDataUrl rejects forged manifests and identifies imported assets accurately', async () => {
     const id = await generateProofIdentity();
     const rgba = createSyntheticRgba(80, 80);
@@ -393,7 +431,9 @@ describe('Yoink Proof™ — Cryptographic Provenance & Steganography Engine', (
       kind: 'imported',
     });
     const taggedValid = injectContainerMetadata(raw, 'image/png', validImported);
-    const extractedValid = await extractProofManifestFromDataUrl(bytesToDataUrl(taggedValid, 'image/png'));
+    const extractedValid = await withMockImageDecoder(80, 80, rgba, () =>
+      extractProofManifestFromDataUrl(bytesToDataUrl(taggedValid, 'image/png'))
+    );
     assert.ok(extractedValid);
 
     const verifyImported = await verifyImageBufferAndPixels({
@@ -410,7 +450,56 @@ describe('Yoink Proof™ — Cryptographic Provenance & Steganography Engine', (
     // Forged signature in container metadata must be rejected by extractProofManifestFromDataUrl
     const forgedManifest = { ...validImported, a: '@forged_author' };
     const taggedForged = injectContainerMetadata(raw, 'image/png', forgedManifest);
-    const extractedForged = await extractProofManifestFromDataUrl(bytesToDataUrl(taggedForged, 'image/png'));
+    const extractedForged = await withMockImageDecoder(80, 80, rgba, () =>
+      extractProofManifestFromDataUrl(bytesToDataUrl(taggedForged, 'image/png'))
+    );
     assert.equal(extractedForged, null, 'Forged parent manifest must not be accepted for derivative lineage');
+  });
+
+  test('extractProofManifestFromDataUrl rejects a signed image whose pixels were altered', async () => {
+    const id = await generateProofIdentity();
+    const width = 80;
+    const height = 80;
+    const rgba = createSyntheticRgba(width, height);
+    const raw = createMinimalPngBytes();
+    const bh = await computeVisualBitstreamHash(raw);
+    const manifest = await createSignedProofManifest({
+      rgba,
+      width,
+      height,
+      identity: id,
+      bitstreamHash: bh,
+    });
+
+    // Simulate an altered image file (modified PNG IHDR/pixel payload) onto which the original
+    // cryptographically signed metadata was copied intact.
+    const alteredRaw = new Uint8Array(raw);
+    alteredRaw[alteredRaw.length - 1] ^= 0xff;
+    const taggedAlteredFile = injectContainerMetadata(alteredRaw, 'image/png', manifest);
+    const tamperedRgba = new Uint8ClampedArray(rgba);
+    tamperedRgba[80 * 40 + 0] ^= 0xff;
+    tamperedRgba[80 * 40 + 1] ^= 0xff;
+
+    const parentCandidate = await withMockImageDecoder(width, height, tamperedRgba, () =>
+      extractProofManifestFromDataUrl(bytesToDataUrl(taggedAlteredFile, 'image/png'))
+    );
+    assert.equal(
+      parentCandidate,
+      null,
+      'Signed image with altered pixels must NOT be accepted as verified parent lineage'
+    );
+
+    // Also verify stripped container + altered LSB-watermarked pixels are rejected
+    const lsbTampered = new Uint8ClampedArray(rgba);
+    embedLsbWatermark(lsbTampered, manifest);
+    lsbTampered[(width * height - 1) * 4] ^= 0x40;
+    const lsbCandidate = await withMockImageDecoder(width, height, lsbTampered, () =>
+      extractProofManifestFromDataUrl(bytesToDataUrl(raw, 'image/png'))
+    );
+    assert.equal(
+      lsbCandidate,
+      null,
+      'Signed LSB-watermarked image with altered pixels must NOT be accepted as verified parent lineage'
+    );
   });
 });
