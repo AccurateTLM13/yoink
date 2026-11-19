@@ -7,7 +7,7 @@ import {
   YoinkMediaCategory,
   YoinkMediaFormat,
 } from '../types';
-import { isChromeExtension } from './capture';
+import { isChromeExtension, sendRuntimeMessage } from './capture';
 import { applyProofToCanvasAndEncode } from './proof';
 import { addHistoryItem } from './storage';
 
@@ -298,6 +298,7 @@ export async function getInjectableOpenTabs(): Promise<OpenWebsiteTab[]> {
   if (isChromeExtension() && chrome.tabs?.query) {
     return new Promise((resolve) => {
       chrome.tabs.query({}, (tabs) => {
+        if (chrome.runtime.lastError) return resolve([]);
         const valid = (tabs || [])
           .filter((t) => {
             if (!t.id || !t.url) return false;
@@ -346,26 +347,14 @@ export async function yoinkMediaFromTab(tabId?: number): Promise<{
   tabId?: number;
 }> {
   if (isChromeExtension()) {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        {
-          action: 'YOINK_PAGE_MEDIA',
-          payload: { tabId },
-        },
-        (response) => {
-          if (response?.error) {
-            return reject(new Error(response.error));
-          }
-          resolve({
-            items: response?.items || [],
-            diagnostics: response?.diagnostics,
-            tabTitle: response?.tabTitle || 'Webpage',
-            tabUrl: response?.tabUrl || '',
-            tabId: response?.tabId,
-          });
-        }
-      );
-    });
+    const response = await sendRuntimeMessage('YOINK_PAGE_MEDIA', { tabId });
+    return {
+      items: response?.items || [],
+      diagnostics: response?.diagnostics,
+      tabTitle: response?.tabTitle || 'Webpage',
+      tabUrl: response?.tabUrl || '',
+      tabId: response?.tabId,
+    };
   }
 
   // Rich standalone demo fallback for local preview / non-extension testing
@@ -375,17 +364,9 @@ export async function yoinkMediaFromTab(tabId?: number): Promise<{
 export async function cancelMediaScan(tabId?: number): Promise<void> {
   if (!isChromeExtension() || !tabId) return;
   try {
-    await new Promise<void>((resolve) => {
-      chrome.runtime.sendMessage(
-        {
-          action: 'CANCEL_MEDIA_SCAN',
-          payload: { tabId },
-        },
-        () => resolve()
-      );
-    });
+    await sendRuntimeMessage('CANCEL_MEDIA_SCAN', { tabId });
   } catch {
-    // ignore cleanup failures
+    // ignore cleanup / port close errors on cancel
   }
 }
 

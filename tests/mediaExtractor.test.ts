@@ -8,6 +8,8 @@ import {
   inferImageFormat,
   deriveMediaName,
   filterAndSortMedia,
+  yoinkMediaFromTab,
+  cancelMediaScan,
 } from '../src/utils/mediaExtractor';
 import { YoinkedMediaItem } from '../src/types';
 
@@ -405,6 +407,44 @@ describe('Page Media Yoinker — Srcset, CSS Background, Format & Filter Utiliti
     vm.runInContext(BG_CODE, cancelCtx);
     const cancelledResult = await vm.runInContext('extractAllPageMediaInTab()', cancelCtx);
     assert.equal(cancelledResult.diagnostics.cancelled, true, 'Advancing scan sequence should cancel stale scan');
+  });
+
+  test('yoinkMediaFromTab and cancelMediaScan check chrome.runtime.lastError when message port closes', async () => {
+    const origChrome = (globalThis as any).chrome;
+    try {
+      let yoinkChecked = false;
+      (globalThis as any).chrome = {
+        tabs: {},
+        runtime: {
+          get lastError() {
+            yoinkChecked = true;
+            return { message: 'The message port closed before a response was received.' };
+          },
+          sendMessage: (_msg: any, cb: (res?: any) => void) => {
+            queueMicrotask(() => cb(undefined));
+          },
+        },
+      };
+
+      await assert.rejects(() => yoinkMediaFromTab(42), /The message port closed before a response was received/);
+      assert.equal(yoinkChecked, true, 'yoinkMediaFromTab must read chrome.runtime.lastError in sendMessage callback');
+
+      let cancelChecked = false;
+      (globalThis as any).chrome.runtime = {
+        get lastError() {
+          cancelChecked = true;
+          return { message: 'The message port closed before a response was received.' };
+        },
+        sendMessage: (_msg: any, cb: (res?: any) => void) => {
+          queueMicrotask(() => cb(undefined));
+        },
+      };
+
+      await cancelMediaScan(42);
+      assert.equal(cancelChecked, true, 'cancelMediaScan must read chrome.runtime.lastError in sendMessage callback');
+    } finally {
+      (globalThis as any).chrome = origChrome;
+    }
   });
 });
 

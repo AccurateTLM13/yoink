@@ -20,6 +20,25 @@ export function isChromeExtension(): boolean {
 }
 
 /**
+ * Sends a runtime message to the background worker and checks chrome.runtime.lastError
+ * in the callback so closed message ports never leak "Unchecked runtime.lastError".
+ */
+export function sendRuntimeMessage<T = any>(action: string, payload?: unknown): Promise<T> {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ action, payload }, (response) => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError) {
+        return reject(new Error(lastError.message || 'Extension message port closed.'));
+      }
+      if (response?.error) {
+        return reject(new Error(response.error));
+      }
+      resolve(response as T);
+    });
+  });
+}
+
+/**
  * Checks whether a URL is a standard web/file page that Chrome allows extensions to capture and inject into.
  */
 export function isCapturableWebUrl(url?: string): boolean {
@@ -166,6 +185,7 @@ export async function getInjectableOpenTabs(): Promise<OpenTabInfo[]> {
   if (isChromeExtension()) {
     return new Promise((resolve) => {
       chrome.tabs.query({ currentWindow: true }, (tabs) => {
+        if (chrome.runtime.lastError) return resolve([]);
         const valid: OpenTabInfo[] = (tabs || [])
           .filter((t) => typeof t.id === 'number' && isCapturableWebUrl(t.url))
           .map((t) => ({
@@ -209,6 +229,7 @@ async function resolveTargetTab(targetTabId?: number): Promise<{
 }> {
   return new Promise((resolve, reject) => {
     chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
       const activeTab = tabs?.[0];
 
       if (targetTabId) {
@@ -366,31 +387,16 @@ export function generateMockScreenshot(
 export async function captureVisible(settings: CaptureSettings, targetTabId?: number): Promise<HistoryItem> {
   if (isChromeExtension()) {
     const target = await resolveTargetTab(targetTabId);
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        {
-          action: 'CAPTURE_VISIBLE_PART',
-          payload: {
-            tabId: target.tabId,
-            windowId: target.windowId,
-            title: target.title || 'Visible Viewport',
-            url: target.url || '',
-            returnToTabId: target.returnToTabId,
-            settings,
-          },
-        },
-        (response) => {
-          if (response?.error) {
-            return reject(new Error(response.error));
-          }
-          if (response?.item) {
-            resolve(response.item);
-          } else {
-            reject(new Error('No capture data returned'));
-          }
-        }
-      );
+    const response = await sendRuntimeMessage<{ item?: HistoryItem }>('CAPTURE_VISIBLE_PART', {
+      tabId: target.tabId,
+      windowId: target.windowId,
+      title: target.title || 'Visible Viewport',
+      url: target.url || '',
+      returnToTabId: target.returnToTabId,
+      settings,
     });
+    if (response?.item) return response.item;
+    throw new Error('No capture data returned');
   }
 
   // Simulated fallback in dev/browser mode
@@ -426,22 +432,14 @@ export async function captureSelection(settings: CaptureSettings, targetTabId?: 
     return new Promise((resolve, reject) => {
       const { promise, cleanup } = awaitCaptureEvent('selection', 90000);
 
-      chrome.runtime.sendMessage(
-        {
-          action: 'CAPTURE_SELECTION_START',
-          payload: {
-            tabId: target.tabId,
-            returnToTabId: target.returnToTabId,
-            settings,
-          },
-        },
-        (response) => {
-          if (response?.error) {
-            cleanup();
-            return reject(new Error(response.error));
-          }
-        }
-      );
+      sendRuntimeMessage('CAPTURE_SELECTION_START', {
+        tabId: target.tabId,
+        returnToTabId: target.returnToTabId,
+        settings,
+      }).catch((err) => {
+        cleanup();
+        reject(err);
+      });
 
       promise.then(resolve, reject);
     });
@@ -480,22 +478,14 @@ export async function captureScrollingElement(settings: CaptureSettings, targetT
     return new Promise((resolve, reject) => {
       const { promise, cleanup } = awaitCaptureEvent('element', 90000);
 
-      chrome.runtime.sendMessage(
-        {
-          action: 'CAPTURE_ELEMENT_SCROLL_START',
-          payload: {
-            tabId: target.tabId,
-            returnToTabId: target.returnToTabId,
-            settings,
-          },
-        },
-        (response) => {
-          if (response?.error) {
-            cleanup();
-            return reject(new Error(response.error));
-          }
-        }
-      );
+      sendRuntimeMessage('CAPTURE_ELEMENT_SCROLL_START', {
+        tabId: target.tabId,
+        returnToTabId: target.returnToTabId,
+        settings,
+      }).catch((err) => {
+        cleanup();
+        reject(err);
+      });
 
       promise.then(resolve, reject);
     });
@@ -647,23 +637,9 @@ export async function captureDesktop(settings: CaptureSettings): Promise<History
 
   // 2. Extension background service worker with chrome.desktopCapture
   if (isChromeExtension()) {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        {
-          action: 'CAPTURE_DESKTOP_START',
-          payload: { settings },
-        },
-        (response) => {
-          if (response?.error) {
-            return reject(new Error(response.error));
-          }
-          if (response) {
-            return resolve(response as HistoryItem);
-          }
-          reject(new Error('Desktop capture produced no response.'));
-        }
-      );
-    });
+    const response = await sendRuntimeMessage<HistoryItem>('CAPTURE_DESKTOP_START', { settings });
+    if (response) return response;
+    throw new Error('Desktop capture produced no response.');
   }
 
   // 3. Simulated fallback
@@ -704,24 +680,16 @@ export async function captureFullPage(
       const delayMs = Math.max(0, (settings.captureDelaySec || 0) * 1000);
       const { promise, cleanup } = awaitCaptureEvent('full', 60000 + delayMs, onProgress);
 
-      chrome.runtime.sendMessage(
-        {
-          action: 'CAPTURE_FULL_PAGE',
-          payload: {
-            tabId: target.tabId,
-            title: target.title,
-            url: target.url,
-            returnToTabId: target.returnToTabId,
-            settings,
-          },
-        },
-        (response) => {
-          if (response?.error) {
-            cleanup();
-            return reject(new Error(response.error));
-          }
-        }
-      );
+      sendRuntimeMessage('CAPTURE_FULL_PAGE', {
+        tabId: target.tabId,
+        title: target.title,
+        url: target.url,
+        returnToTabId: target.returnToTabId,
+        settings,
+      }).catch((err) => {
+        cleanup();
+        reject(err);
+      });
 
       promise.then(resolve, reject);
     });
@@ -922,6 +890,11 @@ export async function captureMultiSize(
     if (!resolvedUrl) {
       resolvedUrl = await new Promise<string>((resolve) => {
         chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+          if (chrome.runtime.lastError) {
+            const openTabs = await getInjectableOpenTabs();
+            resolve(openTabs[0]?.url || '');
+            return;
+          }
           const activeUrl = tabs?.[0]?.url || '';
           if (isCapturableWebUrl(activeUrl)) {
             resolve(activeUrl);

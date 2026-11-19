@@ -7,6 +7,9 @@ import {
   isCapturableWebUrl,
   getInjectableOpenTabs,
   captureVisible,
+  captureSelection,
+  captureScrollingElement,
+  captureDesktop,
   captureFullPage,
   captureMultiSize,
 } from '../src/utils/capture';
@@ -296,6 +299,67 @@ describe('Phase 2: Architecture, Shared Logic & Target-Tab Capture APIs', () => 
     const codeqlWorkflow = fs.readFileSync('./.github/workflows/codeql.yml', 'utf8');
     assert.match(codeqlWorkflow, /uses:\s*github\/codeql-action\/init@v4/);
     assert.match(codeqlWorkflow, /uses:\s*github\/codeql-action\/analyze@v4/);
+  });
+
+  it('checks chrome.runtime.lastError on every capture sendMessage callback to prevent Unchecked runtime.lastError', async () => {
+    const origChrome = (globalThis as any).chrome;
+    try {
+      const actions: Array<{ name: string; run: () => Promise<any> }> = [
+        { name: 'captureVisible', run: () => captureVisible(DEFAULT_SETTINGS, 42) },
+        { name: 'captureSelection', run: () => captureSelection(DEFAULT_SETTINGS, 42) },
+        { name: 'captureScrollingElement', run: () => captureScrollingElement(DEFAULT_SETTINGS, 42) },
+        { name: 'captureDesktop', run: () => captureDesktop(DEFAULT_SETTINGS) },
+        { name: 'captureFullPage', run: () => captureFullPage(DEFAULT_SETTINGS, undefined, 42) },
+      ];
+
+      for (const action of actions) {
+        let lastErrorChecked = false;
+        let removedListener = false;
+        let activeListeners = 0;
+        let inSendMessageCallback = false;
+
+        (globalThis as any).chrome = {
+          runtime: {
+            onMessage: {
+              addListener: () => {
+                activeListeners++;
+              },
+              removeListener: () => {
+                removedListener = true;
+                activeListeners--;
+              },
+            },
+            get lastError() {
+              if (!inSendMessageCallback) return undefined;
+              lastErrorChecked = true;
+              return { message: 'The message port closed before a response was received.' };
+            },
+            sendMessage: (_msg: any, cb: (res?: any) => void) => {
+              queueMicrotask(() => {
+                inSendMessageCallback = true;
+                try {
+                  cb(undefined);
+                } finally {
+                  inSendMessageCallback = false;
+                }
+              });
+            },
+          },
+          tabs: {
+            query: (_q: any, cb: any) => cb([{ id: 99, windowId: 1, url: 'chrome-extension://ext/index.html?tab=true' }]),
+          },
+        };
+
+        await assert.rejects(action.run, /The message port closed before a response was received/);
+        assert.equal(lastErrorChecked, true, `${action.name} must read chrome.runtime.lastError inside sendMessage callback`);
+        if (action.name === 'captureSelection' || action.name === 'captureScrollingElement' || action.name === 'captureFullPage') {
+          assert.equal(removedListener, true, `${action.name} must clean up runtime listener on lastError`);
+          assert.equal(activeListeners, 0);
+        }
+      }
+    } finally {
+      (globalThis as any).chrome = origChrome;
+    }
   });
 });
 

@@ -35,13 +35,13 @@
     if (message.action === 'START_SELECTION_CAPTURE') {
       initSelectionOverlay();
       sendResponse({ started: true });
-      return true;
+      return false;
     }
 
     if (message.action === 'START_ELEMENT_SCROLL_CAPTURE') {
       initElementInspector(message.payload?.scrollDelay || 600);
       sendResponse({ started: true });
-      return true;
+      return false;
     }
   });
 
