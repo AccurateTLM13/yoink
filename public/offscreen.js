@@ -454,12 +454,14 @@ const WATERMARK_CARRIER_PIXELS = 4096;
 const MAGIC_BYTES = new Uint8Array([0x59, 0x4e, 0x4b, 0x50]); // "YNKP"
 const PROOF_VERSION = 1;
 
+const CRC32_POLYNOMIAL = -306674912; //IEEE 802.3 polynomial in signed 32-bit two's complement
+
 const CRC32_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
     let c = n;
     for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      c = c & 1 ? CRC32_POLYNOMIAL ^ (c >>> 1) : c >>> 1;
     }
     table[n] = c >>> 0;
   }
@@ -467,11 +469,11 @@ const CRC32_TABLE = (() => {
 })();
 
 function crc32Offscreen(bytes) {
-  let crc = 0xffffffff;
+  let crc = -1;
   for (let i = 0; i < bytes.length; i++) {
     crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
   }
-  return (crc ^ 0xffffffff) >>> 0;
+  return (~crc) >>> 0;
 }
 
 function bytesToBase64Offscreen(bytes) {

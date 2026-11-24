@@ -412,7 +412,9 @@ export const StudioHubView: React.FC<StudioHubViewProps> = ({
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onCopyShortcut(cmd.shortcut!, cmd.copyLabel);
+                    if (cmd.shortcut) {
+                      onCopyShortcut(cmd.shortcut, cmd.copyLabel);
+                    }
                   }}
                   title={`Copy shortcut ${cmd.shortcut}`}
                   className="px-2 py-1 rounded-[6px] border border-[var(--border)] bg-[var(--canvas)] hover:bg-[var(--surface)] text-[var(--ink-muted)] hover:text-[var(--ink)] type-keycap flex items-center gap-1 shrink-0 cursor-pointer studio-focus"

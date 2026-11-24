@@ -1,4 +1,5 @@
 import { CaptureFormat, HistoryItem } from '../types';
+import { createRandomId } from './storage';
 
 /**
  * P1-7 Upload and Edit.
@@ -75,7 +76,7 @@ export async function fileToHistoryItem(file: File): Promise<HistoryItem> {
   }
 
   return {
-    id: `upload_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: createRandomId('upload'),
     title: titleFromFilename(file.name),
     url: '',
     dataUrl,

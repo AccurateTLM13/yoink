@@ -29,6 +29,7 @@ import { renderAnnotations, createAnnotatedComposite } from '../utils/annotation
 import {
   addHistoryItem,
   copyImageToClipboard,
+  createRandomId,
   downloadDataUrl,
   getStoredSettings,
   updateStoredHistoryItem,
@@ -413,7 +414,7 @@ export const AnnotationEditor: React.FC<Props> = ({
         await getProofMeta()
       );
       const newItem: HistoryItem = {
-        id: `annotated_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        id: createRandomId('annotated'),
         title: `${item.title || 'Capture'} (Annotated)`,
         url: item.url || '',
         dataUrl: composite.dataUrl,

@@ -345,9 +345,83 @@ export async function reauthorizeSavedDirectory(): Promise<{
   }
 }
 
+/**
+ * Decodes a data: URL directly in memory into a Blob without invoking fetch().
+ */
+export function dataUrlToBlob(dataUrl: string): Blob {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) {
+    throw new Error('Expected a data: URL.');
+  }
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx === -1) {
+    throw new Error('Malformed data: URL.');
+  }
+  const header = dataUrl.slice(5, commaIdx);
+  const payload = dataUrl.slice(commaIdx + 1);
+  const parts = header.split(';');
+  const mime = parts[0] || 'application/octet-stream';
+  const isBase64 = parts.some((p) => p.toLowerCase() === 'base64');
+
+  if (isBase64) {
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mime });
+  }
+
+  return new Blob([decodeURIComponent(payload)], { type: mime });
+}
+
+/**
+ * Validates that an external media URL uses http(s), contains no credentials,
+ * and does not target loopback, link-local, or cloud metadata endpoints (SSRF protection).
+ */
+export function validateExternalMediaUrl(rawUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('Invalid media URL.');
+  }
+
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`Unsupported media URL protocol: ${parsed.protocol}`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('Media URL must not contain credentials.');
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '0.0.0.0' ||
+    host === '[::1]' ||
+    host === '::1' ||
+    host === '169.254.169.254' ||
+    host === 'metadata.google.internal' ||
+    host.startsWith('169.254.')
+  ) {
+    throw new Error(`Blocked internal or metadata host: ${host}`);
+  }
+
+  return parsed.toString();
+}
+
 async function urlToBlob(url: string): Promise<Blob> {
+  if (url.startsWith('data:')) {
+    return dataUrlToBlob(url);
+  }
+
+  const safeHref = validateExternalMediaUrl(url);
   const doFetch = async () => {
-    const res = await fetch(url);
+    const requestFn = globalThis.fetch;
+    if (typeof requestFn !== 'function') {
+      throw new Error('Fetch API unavailable.');
+    }
+    const res = await requestFn(safeHref);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status} while fetching media.`);
     }
@@ -358,7 +432,7 @@ async function urlToBlob(url: string): Promise<Blob> {
     return await doFetch();
   } catch (firstError) {
     if (
-      /^https?:/i.test(url) &&
+      /^https?:/i.test(safeHref) &&
       typeof chrome !== 'undefined' &&
       chrome.permissions?.contains &&
       chrome.permissions?.request
