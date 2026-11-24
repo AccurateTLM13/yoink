@@ -1,5 +1,6 @@
 import { CaptureSettings, HistoryItem } from '../types';
-import { saveToCustomFolder } from './saveDestination';
+import { saveToCustomFolder, dataUrlToBlob } from './saveDestination';
+export { dataUrlToBlob };
 
 export const DEFAULT_SETTINGS: CaptureSettings = {
   format: 'png',
@@ -369,12 +370,21 @@ export async function clearStoredHistory(): Promise<void> {
 }
 
 /**
+ * Generates a unique ID using Web Crypto CSPRNG instead of Math.random().
+ */
+export function createRandomId(prefix: string): string {
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${prefix}_${Date.now()}_${token}`;
+}
+
+/**
  * Copy a base64 / dataUrl image to the user's clipboard as PNG blob.
  */
 export async function copyImageToClipboard(dataUrl: string): Promise<boolean> {
   try {
-    const res = await fetch(dataUrl);
-    const blob = await res.blob();
+    const blob = dataUrlToBlob(dataUrl);
 
     let pngBlob = blob;
     if (blob.type !== 'image/png') {

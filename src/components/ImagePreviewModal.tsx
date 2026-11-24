@@ -1,23 +1,29 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  X,
-  Download,
-  Copy,
   Check,
+  Copy,
+  Download,
+  FileImage,
+  FileText,
+  Layers,
+  Pencil,
+  RotateCcw,
+  ScanText,
+  ShieldCheck,
+  X,
   ZoomIn,
   ZoomOut,
-  FileImage,
-  RotateCcw,
-  Pencil,
-  FileText,
-  ScanText,
-  Layers,
-  ShieldCheck,
 } from 'lucide-react';
-import { HistoryItem } from '../types';
-import { copyImageToClipboard, downloadDataUrl, getFullResolutionImage, updateStoredHistoryItem } from '../utils/storage';
+import type { HistoryItem } from '../types';
+import {
+  copyImageToClipboard,
+  downloadDataUrl,
+  getFullResolutionImage,
+  updateStoredHistoryItem,
+} from '../utils/storage';
 import { exportPdf } from '../utils/pdf';
 import { downloadImageSlices } from '../utils/slicer';
+import { formatDimensions, formatTimestamp, getModeLabel, safeHostname } from '../utils/studioFormat';
 import { AnnotationEditor } from './AnnotationEditor';
 import { OcrDrawer } from './OcrDrawer';
 import { VerifyModal } from './VerifyModal';
@@ -53,8 +59,11 @@ export const ImagePreviewModal: React.FC<Props> = ({
   const [actionError, setActionError] = useState('');
   const initialFull = item?.dataUrl && item.dataUrl.length > 0 ? item.dataUrl : null;
   const [fullImage, setFullImage] = useState<string | null>(initialFull);
-  const [measuredDims, setMeasuredDims] = useState<{ id: string; width: number; height: number } | null>(null);
+  const [measuredDims, setMeasuredDims] = useState<{ id: string; width: number; height: number } | null>(
+    null
+  );
   const [ocrTextOverride, setOcrTextOverride] = useState<{ id: string; text: string } | null>(null);
+
   const dimensions =
     measuredDims && item && measuredDims.id === item.id
       ? { width: measuredDims.width, height: measuredDims.height }
@@ -67,7 +76,6 @@ export const ImagePreviewModal: React.FC<Props> = ({
     onSaved?.({ ...item, ocrText: newText });
   };
 
-  // Close on Escape key
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -84,7 +92,6 @@ export const ImagePreviewModal: React.FC<Props> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleKeyDown]);
 
-  // Load full-resolution image asynchronously if separated from index
   useEffect(() => {
     if (!item) return;
     let isMounted = true;
@@ -97,9 +104,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
     }
     getFullResolutionImage(item.id)
       .then((full) => {
-        if (isMounted && full) {
-          setFullImage(full);
-        }
+        if (isMounted && full) setFullImage(full);
         if (isMounted) setLoadingOriginal(false);
       })
       .catch(() => {
@@ -156,7 +161,7 @@ export const ImagePreviewModal: React.FC<Props> = ({
     const success = await copyImageToClipboard(targetUrl);
     if (success) {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => setCopied(false), 1800);
     }
   };
 
@@ -168,9 +173,8 @@ export const ImagePreviewModal: React.FC<Props> = ({
     if (!targetUrl) return;
     const ext = item.format || 'png';
     const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
-    const filename = `${cleanTitle}_${Date.now()}.${ext}`;
     try {
-      await downloadDataUrl(targetUrl, filename);
+      await downloadDataUrl(targetUrl, `${cleanTitle}_${Date.now()}.${ext}`);
       setActionError('');
     } catch (error) {
       setActionError(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
@@ -183,7 +187,6 @@ export const ImagePreviewModal: React.FC<Props> = ({
     try {
       await exportPdf([currentImage], item.title || 'capture');
     } catch (err) {
-      console.error('PDF export failed:', err);
       setActionError(`PDF export failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setExportingPdf(false);
@@ -194,227 +197,207 @@ export const ImagePreviewModal: React.FC<Props> = ({
     if (!currentImage || slicing) return;
     setSlicing(true);
     try {
-      const cleanTitle = (item?.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
-      await downloadImageSlices(currentImage, cleanTitle, maxSliceHeight || 4000, item?.format || 'png');
+      const cleanTitle = (item.title || 'capture').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 30);
+      await downloadImageSlices(currentImage, cleanTitle, maxSliceHeight || 4000, item.format || 'png');
     } catch (err) {
-      console.error('Image slicing failed:', err);
       setActionError(`Slice export failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
       setSlicing(false);
     }
   };
 
-  const zoomIn = () => setZoomLevel((z) => Math.min(z + 0.25, 3));
-  const zoomOut = () => setZoomLevel((z) => Math.max(z - 0.25, 0.5));
-  const resetZoom = () => setZoomLevel(1);
+  const dimsLabel = formatDimensions(dimensions.width, dimensions.height);
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={item.title}
-      className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-md animate-in fade-in duration-150 font-sans select-none"
+      aria-label={item.title || 'Image preview'}
+      className="fixed inset-0 z-50 flex flex-col bg-[var(--canvas)] text-[var(--ink)] select-none overflow-hidden"
     >
-      {/* Top Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-zinc-900/95 border-b border-zinc-800/80 text-white">
-        <div className="flex items-center space-x-2.5 min-w-0 pr-3">
-          <div className="w-7 h-7 rounded-lg bg-blue-500/20 border border-blue-500/30 flex items-center justify-center shrink-0">
-            <FileImage size={15} className="text-blue-400" />
-          </div>
-          <div className="min-w-0">
-            <h3 className="text-xs font-semibold truncate text-zinc-100 leading-tight">
-              {item.title}
-            </h3>
-            <p className="text-[10px] text-zinc-400 font-mono truncate tabular-nums">
-              {dimensions.width > 0 ? `${dimensions.width} × ${dimensions.height}px • ` : ''}
-              {item.mode.toUpperCase()} • {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </p>
-          </div>
+      {/* Edge-Docked 44px Top Toolbar */}
+      <header className="h-[44px] px-3 md:px-4 bg-[var(--surface)] border-b border-[var(--border)] flex items-center justify-between gap-3 overflow-x-auto shrink-0">
+        <div className="flex items-center gap-2 min-w-0 shrink-0">
+          <FileImage size={16} strokeWidth={1.5} className="text-[var(--ink-muted)] shrink-0" />
+          <span className="type-ui-medium text-[var(--ink)] truncate max-w-[160px] md:max-w-[260px]">
+            {item.title || 'Untitled capture'}
+          </span>
+          {dimsLabel && (
+            <span className="hidden sm:inline type-mono text-[var(--ink-muted)]">{dimsLabel}</span>
+          )}
         </div>
 
-        {/* Action Controls */}
-        <div className="flex flex-wrap items-center gap-1.5 w-full sm:w-auto">
-          {/* Annotate / Redact Button */}
-          <button
-            onClick={() => (onOpenAnnotate ? onOpenAnnotate(item) : setIsAnnotating(true))}
-            disabled={!currentImage}
-            className="flex items-center gap-1 px-2.5 py-1 bg-orange-600 hover:bg-orange-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-xs mr-1"
-            title="Open Annotation & Redaction Studio"
-          >
-            <Pencil size={13} />
-            <span>Annotate & Redact</span>
-          </button>
-
+        <div className="flex items-center gap-2 shrink-0">
           {/* Zoom Controls */}
-          <div className="flex items-center bg-zinc-800/90 rounded-lg p-0.5 border border-zinc-700/60 mr-1 text-zinc-300">
+          <div className="flex items-center gap-1 pr-2 border-r border-[var(--border)]">
             <button
-              onClick={zoomOut}
-              className="p-1 hover:text-white hover:bg-zinc-700 rounded transition cursor-pointer"
-              title="Zoom Out"
+              type="button"
+              onClick={() => setZoomLevel((z) => Math.max(z - 0.25, 0.5))}
+              aria-label="Zoom out"
+              className="w-8 h-8 rounded-[8px] hover:bg-[var(--canvas)] text-[var(--ink)] flex items-center justify-center cursor-pointer studio-focus"
             >
-              <ZoomOut size={13} />
+              <ZoomOut size={16} strokeWidth={1.5} />
             </button>
-            <span className="px-1.5 text-[10px] font-mono tabular-nums text-zinc-300 min-w-[34px] text-center">
+            <span className="type-mono text-[var(--ink)] min-w-[40px] text-center">
               {Math.round(zoomLevel * 100)}%
             </span>
             <button
-              onClick={zoomIn}
-              className="p-1 hover:text-white hover:bg-zinc-700 rounded transition cursor-pointer"
-              title="Zoom In"
+              type="button"
+              onClick={() => setZoomLevel((z) => Math.min(z + 0.25, 3))}
+              aria-label="Zoom in"
+              className="w-8 h-8 rounded-[8px] hover:bg-[var(--canvas)] text-[var(--ink)] flex items-center justify-center cursor-pointer studio-focus"
             >
-              <ZoomIn size={13} />
+              <ZoomIn size={16} strokeWidth={1.5} />
             </button>
             {zoomLevel !== 1 && (
               <button
-                onClick={resetZoom}
-                className="p-1 hover:text-white hover:bg-zinc-700 rounded transition cursor-pointer text-zinc-400"
-                title="Reset Zoom"
+                type="button"
+                onClick={() => setZoomLevel(1)}
+                aria-label="Reset zoom"
+                className="w-8 h-8 rounded-[8px] hover:bg-[var(--canvas)] text-[var(--ink-muted)] hover:text-[var(--ink)] flex items-center justify-center cursor-pointer studio-focus"
               >
-                <RotateCcw size={12} />
+                <RotateCcw size={16} strokeWidth={1.5} />
               </button>
             )}
           </div>
 
-          {/* Copy Button */}
+          {/* Single Primary CTA: Annotate */}
           <button
+            type="button"
+            onClick={() => (onOpenAnnotate ? onOpenAnnotate(item) : setIsAnnotating(true))}
+            disabled={!currentImage}
+            className="h-8 px-3 rounded-[8px] bg-[var(--accent)] text-[var(--accent-ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
+          >
+            <Pencil size={16} strokeWidth={1.5} />
+            <span>Annotate</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleCopy}
             disabled={!currentImage}
-            className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
-            title="Copy to clipboard"
+            className="h-8 px-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            {copied ? (
-              <Check size={13} className="text-emerald-400" />
-            ) : (
-              <Copy size={13} />
-            )}
+            {copied ? <Check size={16} strokeWidth={1.5} /> : <Copy size={16} strokeWidth={1.5} />}
             <span>{copied ? 'Copied' : 'Copy'}</span>
           </button>
 
-          {/* PDF Export Button (P0-2) */}
           <button
+            type="button"
             onClick={handleExportPdf}
             disabled={exportingPdf || !currentImage}
-            className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
-            title="Export as PDF (tall pages split across A4 pages)"
+            className="h-8 px-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            <FileText size={13} />
+            <FileText size={16} strokeWidth={1.5} />
             <span>{exportingPdf ? 'Building…' : 'PDF'}</span>
           </button>
 
-          {/* Slices Button (Anti-Squish multi-part export) */}
           <button
+            type="button"
             onClick={handleDownloadSlices}
             disabled={slicing || !currentImage}
-            className="flex items-center gap-1 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-60 text-zinc-200 rounded-lg text-xs font-medium transition cursor-pointer border border-zinc-700/60"
-            title={`Split tall image into web-friendly parts (max ${(maxSliceHeight || 4000).toLocaleString()}px per part) so upload platforms don't squash it`}
+            className="h-8 px-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            <Layers size={13} />
+            <Layers size={16} strokeWidth={1.5} />
             <span>{slicing ? 'Slicing…' : 'Slices'}</span>
           </button>
 
-          {/* Extract Text / OCR Button (P2-9) */}
           <button
+            type="button"
             onClick={() => setShowOcr(true)}
             disabled={!currentImage}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
-              showOcr
-                ? 'bg-indigo-600 text-white border-indigo-500'
-                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
-            }`}
-            title="Extract text from capture (Offline OCR // Shape Detection API)"
+            className="h-8 px-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            <ScanText size={13} />
+            <ScanText size={16} strokeWidth={1.5} />
             <span>OCR</span>
           </button>
 
-          {/* Yoink Proof Verification Button */}
           <button
+            type="button"
             onClick={handleOpenVerify}
             disabled={!currentImage}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition cursor-pointer border ${
-              showVerify
-                ? 'bg-emerald-600 text-white border-emerald-500'
-                : 'bg-zinc-800 hover:bg-zinc-700 text-emerald-300 border-zinc-700/60'
-            }`}
-            title="Inspect Yoink Proof™ cryptographic signature, LSB pixel watermark & IPTC provenance"
+            className="h-8 px-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            <ShieldCheck size={13} />
+            <ShieldCheck size={16} strokeWidth={1.5} />
             <span>Proof</span>
           </button>
 
-          {/* Download Button */}
           <button
+            type="button"
             onClick={handleDownload}
             disabled={!currentImage}
-            className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold transition cursor-pointer shadow-xs"
-            title="Download image file"
+            className="h-8 px-2 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            <Download size={13} />
-            <span>Download</span>
+            <Download size={16} strokeWidth={1.5} />
+            <span>Save</span>
           </button>
 
-          {/* Close Button */}
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg transition cursor-pointer ml-1"
+            aria-label="Close preview"
             title="Close (Esc)"
+            className="w-8 h-8 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] flex items-center justify-center cursor-pointer studio-focus"
           >
-            <X size={16} />
+            <X size={16} strokeWidth={1.5} />
           </button>
         </div>
-      </div>
+      </header>
 
       {(item.warning || actionError || (!currentImage && !loadingOriginal)) && (
-        <div role="status" className="px-4 py-2 bg-amber-100 text-amber-950 text-xs font-medium">
-          {actionError || item.warning || 'The original image is unavailable. The thumbnail cannot be exported.'}
+        <div
+          role="status"
+          className="px-4 py-2 border-b border-[var(--border)] bg-[var(--surface)] type-ui text-[var(--ink)] shrink-0"
+        >
+          {actionError ||
+            item.warning ||
+            'The original image is unavailable. Export and editing require the original.'}
         </div>
       )}
 
-      {/* Main Image Viewport with smooth scroll & zoom */}
-      <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-zinc-950/80">
+      {/* Full-Bleed Canvas Viewport */}
+      <div className="flex-1 overflow-auto p-4 md:p-6 flex items-center justify-center bg-[var(--canvas)]">
         <div
-          className="transition-transform duration-150 ease-out origin-center flex items-center justify-center max-w-full max-h-full"
+          className="origin-center flex items-center justify-center max-w-full max-h-full"
           style={{ transform: `scale(${zoomLevel})` }}
         >
           {previewImage ? (
-            <img
-              src={previewImage}
-              alt={item.title}
-              onLoad={(e) => {
-                const target = e.currentTarget;
-                if (!dimensions.width || !dimensions.height) {
-                  setMeasuredDims({ id: item.id, width: target.naturalWidth, height: target.naturalHeight });
-                }
-              }}
-              className="max-w-[90vw] max-h-[80vh] object-contain rounded-lg border border-zinc-800 shadow-[0_20px_50px_rgba(0,0,0,0.6)]"
-            />
+            <div className="p-2 rounded-[12px] bg-[var(--surface)] border border-[var(--border)]">
+              <img
+                src={previewImage}
+                alt={item.title || 'Captured screenshot'}
+                onLoad={(e) => {
+                  const target = e.currentTarget;
+                  if (!dimensions.width || !dimensions.height) {
+                    setMeasuredDims({
+                      id: item.id,
+                      width: target.naturalWidth,
+                      height: target.naturalHeight,
+                    });
+                  }
+                }}
+                className="max-w-[90vw] max-h-[76vh] object-contain rounded-[4px] border border-[var(--border)] block"
+              />
+            </div>
           ) : (
-            <div className="p-8 text-zinc-500 text-center">
-              <FileImage size={40} className="mx-auto mb-2 opacity-50" />
-              <p className="text-xs">Image data unavailable</p>
+            <div className="p-8 text-center space-y-2 text-[var(--ink-muted)]">
+              <FileImage size={16} strokeWidth={1.5} className="mx-auto" />
+              <p className="type-ui">Image data unavailable</p>
             </div>
           )}
         </div>
       </div>
 
-      {!currentImage && (
-        <div role="status" className="p-2 text-center bg-amber-100 text-amber-950 text-xs">
-          Original image unavailable or still loading. This is a thumbnail preview; export and editing require the original.
-        </div>
-      )}
-      {/* Footer Info */}
-      <div className="px-4 py-2 bg-zinc-900/95 border-t border-zinc-800/80 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-        <span className="truncate max-w-[400px]">
-          {item.url || 'local-tab'}
+      {/* 40px Docked Footer Readout */}
+      <footer className="h-[40px] px-4 bg-[var(--surface)] border-t border-[var(--border)] flex items-center justify-between gap-3 shrink-0">
+        <span className="type-mono text-[var(--ink-muted)] truncate">
+          {safeHostname(item.url)} · {getModeLabel(item.mode)} · {formatTimestamp(item.timestamp).short}
         </span>
-        <div className="flex items-center gap-3 shrink-0">
-          <span>{item.format.toUpperCase()}</span>
-          <span className="text-zinc-500">•</span>
-          <span>Press ESC to close</span>
-        </div>
-      </div>
+        <span className="type-mono text-[var(--ink-muted)] shrink-0">
+          {(item.format || 'png').toUpperCase()} · Esc to close
+        </span>
+      </footer>
 
-      {/* Yoink Proof Inspector Modal */}
       {showVerify && (verifyDataUrl || currentImage) && (
         <VerifyModal
           initialDataUrl={verifyDataUrl || currentImage}

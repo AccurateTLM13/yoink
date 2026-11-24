@@ -1,28 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import {
-  ChevronLeft,
-  Play,
-  Smartphone,
-  Tablet,
-  Monitor,
-  Tv,
-  Loader2,
+  Camera,
   CheckCircle2,
-  AlertTriangle,
-  Plus,
   CheckSquare,
-  Square,
+  ChevronLeft,
   Globe,
+  Loader2,
+  Monitor,
+  Play,
+  Plus,
   RefreshCw,
+  RotateCcw,
+  Smartphone,
+  Square,
+  Tablet,
+  Tv,
+  XCircle,
 } from 'lucide-react';
-import { BatchIssue, CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
+import type { BatchIssue, CaptureSettings, HistoryItem, ResolutionConfig } from '../types';
 import {
   captureMultiSize,
   ensureAllSitesAccess,
   getInjectableOpenTabs,
   isCapturableWebUrl,
-  OpenTabInfo,
+  type OpenTabInfo,
 } from '../utils/capture';
+import { formatViewportFrameHeader } from '../utils/studioFormat';
 
 interface Props {
   settings: CaptureSettings;
@@ -39,17 +42,20 @@ const DEFAULT_PRESETS: ResolutionConfig[] = [
   { name: '4K Display', width: 1920, height: 1080 },
 ];
 
-export const MultiSizeModal: React.FC<Props> = React.memo(({
+const ZOOM_LEVELS = [50, 75, 100] as const;
+
+export const MultiSizeModal: React.FC<Props> = React.memo(function MultiSizeModal({
   settings,
   onBack,
   onFinished,
   onPreview,
   isFullTab = false,
-}) => {
+}: Props) {
   const [targetUrl, setTargetUrl] = useState<string>('');
   const [openTabs, setOpenTabs] = useState<OpenTabInfo[]>([]);
   const [resolutions, setResolutions] = useState<ResolutionConfig[]>(DEFAULT_PRESETS);
   const [selectedIndices, setSelectedIndices] = useState<number[]>([0, 1, 2]);
+  const [zoomPercent, setZoomPercent] = useState<number>(100);
   const [isRunning, setIsRunning] = useState(false);
   const [progressMsg, setProgressMsg] = useState('');
   const [hasIssues, setHasIssues] = useState(false);
@@ -103,41 +109,45 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
       height: customHeight,
     };
 
-    const newResolutions = [...resolutions, newRes];
-    setResolutions(newResolutions);
-    setSelectedIndices([...selectedIndices, newResolutions.length - 1]);
+    const next = [...resolutions, newRes];
+    setResolutions(next);
+    setSelectedIndices([...selectedIndices, next.length - 1]);
     setCustomName('');
     setShowCustomForm(false);
   };
 
   const isValidUrl = isCapturableWebUrl(targetUrl.trim());
 
-  const handleStart = async (retryNames?: string[]) => {
-    const targets = selectedIndices
-      .map((i) => resolutions[i])
-      .filter((r) => !retryNames || retryNames.includes(r.name || `${r.width}x${r.height}`));
+  const handleStart = async (explicitTargets?: ResolutionConfig[], retryNames?: string[]) => {
+    const targets =
+      explicitTargets ||
+      selectedIndices
+        .map((i) => resolutions[i])
+        .filter((r) => !retryNames || retryNames.includes(r.name || `${r.width}x${r.height}`));
     let failed: BatchIssue[] = [];
     if (targets.length === 0) return;
     if (!isValidUrl) {
       setHasIssues(true);
-      setProgressMsg('Error: Please enter or select a valid http(s) URL.');
+      setProgressMsg('Error: Enter or select a valid http or https URL.');
       return;
     }
 
     try {
       if (!(await ensureAllSitesAccess())) {
         setHasIssues(true);
-        setProgressMsg('Yoink needs access to all sites for responsive multi-size capture.');
+        setProgressMsg('Yoink needs access to all sites for responsive capture.');
         return;
       }
       setIsRunning(true);
       setHasIssues(false);
-      setProgressMsg('Starting responsive multi-device capture...');
+      setProgressMsg('Starting responsive viewport capture…');
       setIssues([]);
-      setCompletedItems([]);
+      if (!explicitTargets) setCompletedItems([]);
     } catch (error) {
       setHasIssues(true);
-      setProgressMsg(`Could not request site access: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setProgressMsg(
+        `Could not request site access: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
       return;
     }
 
@@ -155,392 +165,419 @@ export const MultiSizeModal: React.FC<Props> = React.memo(({
           setHasIssues(failed.length > 0);
         }
       );
-      setCompletedItems(results);
+      setCompletedItems((prev) =>
+        explicitTargets
+          ? [...results, ...prev.filter((p) => !results.some((r) => r.title === p.title))]
+          : results
+      );
       onFinished(results);
       setProgressMsg(`Finished: ${results.length} captured, ${failed.length} failed.`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setHasIssues(true);
-      setProgressMsg(`Error: ${err.message || 'Capture failed'}`);
+      setProgressMsg(`Error: ${err instanceof Error ? err.message : 'Capture failed'}`);
     } finally {
       setIsRunning(false);
     }
   };
 
   const getDeviceIcon = (width: number) => {
-    if (width <= 480) return <Smartphone size={16} className="text-blue-600" />;
-    if (width <= 900) return <Tablet size={16} className="text-indigo-600" />;
-    if (width <= 1600) return <Monitor size={16} className="text-sky-600" />;
-    return <Tv size={16} className="text-purple-600" />;
+    if (width <= 480) return <Smartphone size={16} strokeWidth={1.5} />;
+    if (width <= 900) return <Tablet size={16} strokeWidth={1.5} />;
+    if (width <= 1600) return <Monitor size={16} strokeWidth={1.5} />;
+    return <Tv size={16} strokeWidth={1.5} />;
   };
 
+  const findCompletedForResolution = (res: ResolutionConfig): HistoryItem | undefined =>
+    completedItems.find(
+      (item) =>
+        item.viewport?.requestedWidth === res.width && item.viewport?.requestedHeight === res.height
+    ) || completedItems.find((item) => item.title.includes(res.name));
+
   return (
-    <div className="flex flex-col h-full bg-[#fbfbfd] text-zinc-900 font-sans select-none overflow-hidden">
-      {/* Popup-only Sub-Header */}
+    <div className="flex flex-col h-full bg-[var(--canvas)] text-[var(--ink)] select-none overflow-hidden">
+      {/* Popup-only 44px Header */}
       {!isFullTab && (
-        <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-200/80 bg-white/90 backdrop-blur-xs">
+        <header className="h-[44px] px-4 border-b border-[var(--border)] bg-[var(--surface)] flex items-center justify-between gap-2 shrink-0">
           <button
+            type="button"
             onClick={onBack}
             disabled={isRunning}
-            className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 hover:text-zinc-950 transition cursor-pointer px-1 py-1 rounded hover:bg-zinc-100 disabled:opacity-50"
+            className="h-8 px-2 rounded-[8px] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            <ChevronLeft size={16} />
-            <span>Back to Menu</span>
+            <ChevronLeft size={16} strokeWidth={1.5} />
+            <span>Back</span>
           </button>
-
-          <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200/60">
-            Multi-Device
-          </span>
-        </div>
+          <span className="type-mono text-[var(--ink-muted)]">{selectedIndices.length} viewports</span>
+        </header>
       )}
 
-      <div
-        className={`flex-1 overflow-y-auto text-xs ${
-          isFullTab ? 'p-6 md:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start' : 'p-4 space-y-4'
-        }`}
-      >
-        {/* Left Column: URL Target & Breakpoint Configuration */}
-        <div className={isFullTab ? 'lg:col-span-7 space-y-5' : 'space-y-4'}>
-          <div className="bg-white p-4 rounded-xl border border-zinc-200/80 shadow-2xs space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-sm text-zinc-900">Responsive Viewport Lab</h3>
-                <p className="text-[11.5px] text-zinc-600 leading-relaxed mt-0.5">
-                  Opens your target URL in a managed viewport window and snapshots each selected device resolution in sequence.
-                </p>
-              </div>
-              <span className="hidden sm:inline-flex text-[10px] font-mono font-bold uppercase tracking-wider text-sky-700 bg-sky-50 px-2.5 py-1 rounded-full border border-sky-200/70">
-                {selectedIndices.length} Viewports
-              </span>
+      {/* Docked Target URL & Controls Bar */}
+      <div className="bg-[var(--surface)] border-b border-[var(--border)] px-4 md:px-6 py-3 space-y-3 shrink-0">
+        <div className="flex flex-col xl:flex-row xl:items-center gap-3">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <div className="relative flex-1 min-w-0 flex items-center">
+              <Globe
+                size={16}
+                strokeWidth={1.5}
+                className="text-[var(--ink-muted)] absolute left-3 pointer-events-none"
+              />
+              <input
+                type="url"
+                value={targetUrl}
+                onChange={(e) => setTargetUrl(e.target.value)}
+                disabled={isRunning}
+                aria-label="Target website URL"
+                placeholder="https://example.com"
+                className="w-full h-9 pl-8 pr-3 rounded-[8px] bg-[var(--canvas)] border border-[var(--border)] type-mono text-[var(--ink)] placeholder:text-[var(--ink-muted)] select-text studio-focus"
+              />
             </div>
 
-            {/* Target URL Input */}
-            <div className="space-y-1.5 pt-1">
-              <div className="flex items-center justify-between">
-                <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-600">
-                  Target Website URL
-                </label>
-                <button
-                  type="button"
-                  onClick={loadTabs}
-                  disabled={isRunning}
-                  className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
-                  title="Refresh open browser tabs"
-                >
-                  <RefreshCw size={11} />
-                  <span>Refresh Open Tabs</span>
-                </button>
-              </div>
-              <div className="relative flex items-center">
-                <Globe size={14} className="text-zinc-400 absolute left-3 pointer-events-none" />
-                <input
-                  type="url"
-                  value={targetUrl}
-                  onChange={(e) => setTargetUrl(e.target.value)}
-                  disabled={isRunning}
-                  placeholder="https://example.com"
-                  className="w-full pl-8 pr-3 py-2 font-mono text-xs bg-zinc-50/70 focus:bg-white border border-zinc-200 rounded-lg focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                />
-              </div>
-
-              {/* Quick-Pick from Open Browser Tabs */}
-              {openTabs.length > 0 && (
-                <div className="pt-1 space-y-1">
-                  <span className="text-[10px] font-mono text-zinc-500 block">
-                    Or pick an open browser tab:
-                  </span>
-                  <div className="flex items-center gap-1.5 flex-wrap max-h-20 overflow-y-auto">
-                    {openTabs.slice(0, 6).map((t) => {
-                      const active = targetUrl.trim() === t.url;
-                      return (
-                        <button
-                          key={t.id}
-                          type="button"
-                          onClick={() => setTargetUrl(t.url)}
-                          disabled={isRunning}
-                          className={`px-2 py-1 rounded-md text-[11px] font-medium truncate max-w-[200px] border transition cursor-pointer flex items-center gap-1.5 ${
-                            active
-                              ? 'bg-blue-50 border-blue-300 text-blue-800 font-semibold'
-                              : 'bg-white border-zinc-200/80 text-zinc-700 hover:border-zinc-300'
-                          }`}
-                          title={t.url}
-                        >
-                          {t.favIconUrl ? (
-                            <img src={t.favIconUrl} alt="" className="w-3.5 h-3.5 rounded-xs shrink-0" />
-                          ) : (
-                            <Globe size={11} className="text-zinc-400 shrink-0" />
-                          )}
-                          <span className="truncate">{t.title}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </div>
+            <button
+              type="button"
+              onClick={loadTabs}
+              disabled={isRunning}
+              aria-label="Refresh open tabs"
+              title="Refresh open tabs"
+              className="w-9 h-9 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] hover:bg-[var(--surface)] text-[var(--ink)] flex items-center justify-center shrink-0 cursor-pointer disabled:opacity-50 studio-focus"
+            >
+              <RefreshCw size={16} strokeWidth={1.5} />
+            </button>
           </div>
 
-          {/* Viewport Selectors */}
-          <div className="space-y-2.5 bg-white p-4 rounded-xl border border-zinc-200/80 shadow-2xs">
-            <div className="flex items-center justify-between">
-              <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-600">
-                Select Target Devices ({selectedIndices.length})
-              </label>
-              <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {/* Global frame preview zoom */}
+            <div
+              role="group"
+              aria-label="Frame zoom"
+              className="flex items-center gap-0.5 p-0.5 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)]"
+            >
+              {ZOOM_LEVELS.map((z) => (
                 <button
-                  onClick={handleSelectAll}
-                  disabled={isRunning}
-                  className="text-[10.5px] font-semibold text-blue-600 hover:text-blue-700 transition cursor-pointer disabled:opacity-50"
+                  key={z}
+                  type="button"
+                  onClick={() => setZoomPercent(z)}
+                  aria-pressed={zoomPercent === z}
+                  className={`h-8 px-2 rounded-[6px] type-mono cursor-pointer transition-colors studio-focus ${
+                    zoomPercent === z
+                      ? 'bg-[var(--ink)] text-[var(--surface)]'
+                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                  }`}
                 >
-                  {selectedIndices.length === resolutions.length ? 'Clear All' : 'Select All'}
+                  {z}%
                 </button>
-                <button
-                  onClick={() => setShowCustomForm(!showCustomForm)}
-                  disabled={isRunning}
-                  className="flex items-center gap-0.5 text-[10.5px] font-semibold text-zinc-700 hover:text-zinc-900 bg-zinc-100 hover:bg-zinc-200 px-2 py-0.5 rounded-md transition cursor-pointer"
-                >
-                  <Plus size={11} />
-                  <span>Custom Size</span>
-                </button>
-              </div>
+              ))}
             </div>
 
-            {showCustomForm && (
-              <form onSubmit={handleAddCustom} className="p-3 bg-blue-50/40 rounded-xl border border-blue-200/80 space-y-2.5">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-blue-700 block">
-                  Add Custom Breakpoint
-                </span>
-                <div className="space-y-2">
-                  <input
-                    type="text"
-                    placeholder="Device Name (e.g. Pixel 8)"
-                    value={customName}
-                    onChange={(e) => setCustomName(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-zinc-200 rounded-md focus:outline-none focus:border-blue-500"
-                    required
-                  />
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="flex items-center gap-1">
-                      <span className="text-[10px] font-mono text-zinc-600">W:</span>
-                      <input
-                        type="number"
-                        value={customWidth}
-                        onChange={(e) => setCustomWidth(parseInt(e.target.value, 10))}
-                        className="w-full px-2 py-1 text-xs bg-white border border-zinc-200 rounded-md font-mono"
-                        min={280}
-                        max={3840}
-                        required
-                      />
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-[10px] font-mono text-zinc-600">H:</span>
-                      <input
-                        type="number"
-                        value={customHeight}
-                        onChange={(e) => setCustomHeight(parseInt(e.target.value, 10))}
-                        className="w-full px-2 py-1 text-xs bg-white border border-zinc-200 rounded-md font-mono"
-                        min={400}
-                        max={2400}
-                        required
-                      />
-                    </div>
-                  </div>
-                </div>
-                <div className="flex justify-end gap-1.5 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => setShowCustomForm(false)}
-                    className="px-2 py-1 text-[11px] text-zinc-600 hover:text-zinc-900 rounded cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-2.5 py-1 text-[11px] font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-md cursor-pointer"
-                  >
-                    Add Viewport
-                  </button>
-                </div>
-              </form>
-            )}
+            <button
+              type="button"
+              onClick={handleSelectAll}
+              disabled={isRunning}
+              className="h-9 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium cursor-pointer disabled:opacity-50 studio-focus"
+            >
+              {selectedIndices.length === resolutions.length ? 'Reset' : 'Select all'}
+            </button>
 
-            <div className={isFullTab ? 'grid grid-cols-1 sm:grid-cols-2 gap-2' : 'space-y-1.5'}>
-              {resolutions.map((res, idx) => {
-                const isChecked = selectedIndices.includes(idx);
-                return (
-                  <div
-                    key={`${res.name}_${idx}`}
-                    onClick={() => toggleSelect(idx)}
-                    className={`flex items-center justify-between p-2.5 rounded-xl border transition-all duration-150 cursor-pointer ${
-                      isChecked
-                        ? 'bg-blue-50/70 border-blue-300 text-blue-950 shadow-2xs'
-                        : 'bg-white border-zinc-200/80 text-zinc-700 hover:border-zinc-300'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-7 h-7 rounded-lg bg-white border border-zinc-200/60 flex items-center justify-center shrink-0 shadow-2xs">
-                        {getDeviceIcon(res.width)}
-                      </div>
-                      <div className="min-w-0">
-                        <h4 className="font-semibold text-xs leading-tight truncate">{res.name}</h4>
-                        <p className="text-[10px] font-mono text-zinc-600 tabular-nums">
-                          {res.width} × {res.height} px
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="shrink-0 ml-2">
-                      {isChecked ? (
-                        <CheckSquare size={16} className="text-blue-600" />
-                      ) : (
-                        <Square size={16} className="text-zinc-300" />
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowCustomForm((s) => !s)}
+              disabled={isRunning}
+              className="h-9 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
+            >
+              <Plus size={16} strokeWidth={1.5} />
+              <span>Custom</span>
+            </button>
 
             {isFullTab && (
-              <div className="pt-2">
-                <button
-                  onClick={() => handleStart()}
-                  disabled={isRunning || selectedIndices.length === 0 || !isValidUrl}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold text-xs transition cursor-pointer shadow-xs active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isRunning ? (
-                    <>
-                      <Loader2 size={14} className="animate-spin" />
-                      <span>Resizing & Capturing Viewports...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Play size={13} fill="currentColor" />
-                      <span>Capture Selected Viewports ({selectedIndices.length})</span>
-                    </>
-                  )}
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => handleStart()}
+                disabled={isRunning || selectedIndices.length === 0 || !isValidUrl}
+                className="h-9 px-4 rounded-[8px] bg-[var(--accent)] text-[var(--accent-ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
+              >
+                {isRunning ? (
+                  <>
+                    <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
+                    <span>Capturing…</span>
+                  </>
+                ) : (
+                  <>
+                    <Play size={16} strokeWidth={1.5} />
+                    <span>Capture selected ({selectedIndices.length})</span>
+                  </>
+                )}
+              </button>
             )}
           </div>
         </div>
 
-        {/* Right Column: Live Progress & Results */}
-        <div className={isFullTab ? 'lg:col-span-5 space-y-4' : 'space-y-4'}>
-          {progressMsg && (
-            <div
-              className={`p-3.5 rounded-xl border flex items-center gap-2.5 text-xs shadow-2xs ${
-                progressMsg.startsWith('Error:') || hasIssues
-                  ? 'bg-amber-50 border-amber-200 text-amber-950'
-                  : isRunning
-                  ? 'bg-blue-50/90 border-blue-200 text-blue-900'
-                  : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
-              }`}
-            >
-              {isRunning ? (
-                <Loader2 size={16} className="animate-spin text-blue-600 shrink-0" />
-              ) : hasIssues ? (
-                <AlertTriangle size={16} className="text-amber-700 shrink-0" />
-              ) : (
-                <CheckCircle2 size={16} className="text-emerald-600 shrink-0" />
-              )}
-              <span className="font-medium text-xs leading-snug">{progressMsg}</span>
-            </div>
-          )}
+        {/* Open browser tab chips */}
+        {openTabs.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            {openTabs.slice(0, 6).map((tab) => {
+              const active = targetUrl.trim() === tab.url;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setTargetUrl(tab.url)}
+                  disabled={isRunning}
+                  title={tab.url}
+                  className={`h-8 px-2 rounded-[6px] border type-caption truncate max-w-[200px] cursor-pointer transition-colors studio-focus ${
+                    active
+                      ? 'bg-[var(--ink)] text-[var(--surface)] border-[var(--ink)]'
+                      : 'bg-[var(--canvas)] text-[var(--ink-muted)] border-[var(--border)] hover:text-[var(--ink)]'
+                  }`}
+                >
+                  {tab.title}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
-          {issues.length > 0 && (
-            <div role="alert" className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-950 space-y-2">
-              <p className="font-semibold">Viewports not captured</p>
-              <ul>
-                {issues.map((issue, i) => (
-                  <li key={i}>
-                    {issue.target}: {issue.reason}
-                  </li>
-                ))}
-              </ul>
+        {/* Custom breakpoint inline form */}
+        {showCustomForm && (
+          <form
+            onSubmit={handleAddCustom}
+            className="p-4 rounded-[12px] bg-[var(--canvas)] border border-[var(--border)] grid grid-cols-1 sm:grid-cols-12 gap-3 items-end"
+          >
+            <label className="sm:col-span-5 space-y-1">
+              <span className="type-caption text-[var(--ink-muted)] block">Device name</span>
+              <input
+                type="text"
+                placeholder="Pixel 8"
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+                required
+                className="w-full h-9 px-3 rounded-[8px] bg-[var(--surface)] border border-[var(--border)] type-ui text-[var(--ink)] select-text studio-focus"
+              />
+            </label>
+
+            <label className="sm:col-span-2 space-y-1">
+              <span className="type-caption text-[var(--ink-muted)] block">Width</span>
+              <input
+                type="number"
+                value={customWidth}
+                onChange={(e) => setCustomWidth(parseInt(e.target.value, 10))}
+                min={280}
+                max={3840}
+                required
+                className="w-full h-9 px-2 rounded-[8px] bg-[var(--surface)] border border-[var(--border)] type-mono text-[var(--ink)] select-text studio-focus"
+              />
+            </label>
+
+            <label className="sm:col-span-2 space-y-1">
+              <span className="type-caption text-[var(--ink-muted)] block">Height</span>
+              <input
+                type="number"
+                value={customHeight}
+                onChange={(e) => setCustomHeight(parseInt(e.target.value, 10))}
+                min={400}
+                max={2400}
+                required
+                className="w-full h-9 px-2 rounded-[8px] bg-[var(--surface)] border border-[var(--border)] type-mono text-[var(--ink)] select-text studio-focus"
+              />
+            </label>
+
+            <div className="sm:col-span-3 flex items-center gap-2">
+              <button
+                type="submit"
+                className="flex-1 h-9 px-3 rounded-[8px] bg-[var(--ink)] text-[var(--surface)] type-ui-medium cursor-pointer studio-focus"
+              >
+                Add
+              </button>
               <button
                 type="button"
-                disabled={isRunning}
-                className="underline font-semibold"
-                onClick={() => handleStart(issues.map((issue) => issue.target))}
+                onClick={() => setShowCustomForm(false)}
+                className="h-9 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] type-ui-medium cursor-pointer studio-focus"
               >
-                Retry failed
+                Cancel
               </button>
             </div>
-          )}
+          </form>
+        )}
+      </div>
 
-          {completedItems.length > 0 ? (
-            <div className="bg-white p-4 rounded-xl border border-zinc-200/80 shadow-2xs space-y-3">
-              <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-600 block">
-                Captured Viewports ({completedItems.length}) — Click to Inspect
-              </label>
-              <div className="grid grid-cols-2 gap-2.5">
-                {completedItems.map((item) => (
-                  <div
-                    key={item.id}
-                    onClick={() => onPreview(item)}
-                    className="group relative bg-zinc-50 border border-zinc-200/80 hover:border-blue-400 rounded-xl p-2 cursor-pointer shadow-2xs hover:shadow-xs transition"
-                  >
-                    <img
-                      src={item.thumbnailUrl || item.dataUrl}
-                      alt={item.title}
-                      className="w-full h-24 object-cover object-top rounded-lg bg-white border border-zinc-200/60"
-                    />
-                    <p className="text-[11px] text-zinc-900 truncate mt-1.5 font-semibold">
-                      {item.title}
-                    </p>
-                    <p className="text-[10px] text-zinc-500 font-mono tabular-nums">
-                      {item.viewport
-                        ? `Viewport ${item.viewport.width} × ${item.viewport.height} CSS px · Image ${item.width} × ${item.height} px`
-                        : `Image ${item.width} × ${item.height} px`}
-                      {item.viewport &&
-                        (item.viewport.width !== item.viewport.requestedWidth ||
-                          item.viewport.height !== item.viewport.requestedHeight) && (
-                          <span className="block text-amber-700">
-                            Requested {item.viewport.requestedWidth} × {item.viewport.requestedHeight}; window limits prevented an exact match.
-                          </span>
-                        )}
-                    </p>
-                  </div>
-                ))}
-              </div>
+      {/* Scrollable Device Frames Matrix */}
+      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-5">
+        {progressMsg && (
+          <div
+            role="status"
+            className="bg-[var(--surface)] border border-[var(--border)] rounded-[12px] p-4 flex flex-wrap items-center justify-between gap-3"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              {isRunning ? (
+                <Loader2 size={16} strokeWidth={1.5} className="animate-spin text-[var(--ink)] shrink-0" />
+              ) : hasIssues || progressMsg.startsWith('Error:') ? (
+                <XCircle size={16} strokeWidth={1.5} className="text-[var(--semantic-error)] shrink-0" />
+              ) : (
+                <CheckCircle2 size={16} strokeWidth={1.5} className="text-[var(--semantic-valid)] shrink-0" />
+              )}
+              <span className="type-ui text-[var(--ink)] break-words">{progressMsg}</span>
             </div>
-          ) : (
-            isFullTab && (
-              <div className="bg-white p-6 rounded-xl border border-dashed border-zinc-300 text-center space-y-2">
-                <div className="w-10 h-10 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center mx-auto">
-                  <Smartphone size={20} />
+
+            {issues.length > 0 && !isRunning && (
+              <button
+                type="button"
+                onClick={() =>
+                  handleStart(
+                    undefined,
+                    issues.map((issue) => issue.target)
+                  )
+                }
+                className="h-8 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] text-[var(--ink)] type-caption inline-flex items-center gap-2 cursor-pointer studio-focus"
+              >
+                <RotateCcw size={16} strokeWidth={1.5} />
+                <span>Retry failed</span>
+              </button>
+            )}
+          </div>
+        )}
+
+        {issues.length > 0 && (
+          <div
+            role="alert"
+            className="bg-[var(--surface)] border border-[var(--border)] rounded-[12px] p-4 space-y-2"
+          >
+            <div className="type-body-medium text-[var(--ink)]">Viewports not captured</div>
+            <ul className="space-y-1">
+              {issues.map((issue, idx) => (
+                <li key={idx} className="type-mono text-[var(--semantic-error)] break-words">
+                  {issue.target}: {issue.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Labeled Device Frames — Stacks vertically < 768px (Sizzy + Responsively) */}
+        <div className={isFullTab ? 'grid grid-cols-1 md:grid-cols-2 gap-5' : 'space-y-4'}>
+          {resolutions.map((res, idx) => {
+            const isChecked = selectedIndices.includes(idx);
+            const captured = findCompletedForResolution(res);
+            const aspect = Math.max(0.65, Math.min(1.85, res.width / res.height));
+            const scaledWidthPercent = zoomPercent;
+
+            return (
+              <article
+                key={`${res.name}_${idx}`}
+                className={`bg-[var(--surface)] rounded-[12px] border overflow-hidden flex flex-col ${
+                  isChecked ? 'border-[var(--ink)]' : 'border-[var(--border)]'
+                }`}
+              >
+                {/* Frame Header: Device + (width × height) zoom% + single screenshot trigger */}
+                <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => toggleSelect(idx)}
+                    aria-pressed={isChecked}
+                    className="flex items-center gap-2 min-w-0 text-left cursor-pointer studio-focus rounded-[6px]"
+                  >
+                    <span className="text-[var(--ink)] shrink-0">
+                      {isChecked ? (
+                        <CheckSquare size={16} strokeWidth={1.5} />
+                      ) : (
+                        <Square size={16} strokeWidth={1.5} className="text-[var(--ink-muted)]" />
+                      )}
+                    </span>
+                    <span className="text-[var(--ink-muted)] shrink-0">{getDeviceIcon(res.width)}</span>
+                    <span className="type-ui-medium text-[var(--ink)] truncate">{res.name}</span>
+                  </button>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="type-mono text-[var(--ink-muted)]">
+                      {formatViewportFrameHeader(res, zoomPercent)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleStart([res])}
+                      disabled={isRunning || !isValidUrl}
+                      title={`Capture ${res.name} (${res.width}×${res.height})`}
+                      aria-label={`Capture ${res.name}`}
+                      className="w-8 h-8 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] hover:bg-[var(--surface)] text-[var(--ink)] flex items-center justify-center cursor-pointer disabled:opacity-50 studio-focus"
+                    >
+                      <Camera size={16} strokeWidth={1.5} />
+                    </button>
+                  </div>
                 </div>
-                <h4 className="font-semibold text-xs text-zinc-800">No Viewports Captured Yet</h4>
-                <p className="text-[11px] text-zinc-500 max-w-xs mx-auto leading-relaxed">
-                  Choose a target URL on the left, select your device breakpoints, and click Capture to generate side-by-side responsive snapshots.
-                </p>
-              </div>
-            )
-          )}
+
+                {/* Device Frame Body */}
+                <div className="p-4 bg-[var(--canvas)] flex-1 flex flex-col items-center justify-center">
+                  {captured ? (
+                    <button
+                      type="button"
+                      onClick={() => onPreview(captured)}
+                      className="w-full text-left cursor-pointer rounded-[8px] overflow-hidden border border-[var(--border)] bg-[var(--surface)] studio-focus"
+                      style={{ maxWidth: `${scaledWidthPercent}%` }}
+                    >
+                      <div className="w-full overflow-hidden bg-[var(--canvas)]" style={{ aspectRatio: aspect }}>
+                        <img
+                          src={captured.thumbnailUrl || captured.dataUrl}
+                          alt={captured.title}
+                          className="w-full h-full object-cover object-top block"
+                        />
+                      </div>
+                      <div className="px-3 py-2 border-t border-[var(--border)] bg-[var(--surface)] space-y-1">
+                        <div className="type-mono text-[var(--ink)]">
+                          {captured.viewport
+                            ? `${captured.viewport.width}×${captured.viewport.height} CSS · ${captured.width}×${captured.height} px`
+                            : `${captured.width}×${captured.height} px`}
+                        </div>
+                        {captured.viewport &&
+                          (captured.viewport.width !== captured.viewport.requestedWidth ||
+                            captured.viewport.height !== captured.viewport.requestedHeight) && (
+                            <div className="type-caption text-[var(--ink-muted)]">
+                              Requested {captured.viewport.requestedWidth}×{captured.viewport.requestedHeight}; window limits adjusted viewport.
+                            </div>
+                          )}
+                      </div>
+                    </button>
+                  ) : (
+                    <div
+                      className="w-full rounded-[8px] border border-[var(--border)] bg-[var(--surface)] flex flex-col items-center justify-center p-4 text-center space-y-1"
+                      style={{
+                        maxWidth: `${scaledWidthPercent}%`,
+                        aspectRatio: aspect,
+                        maxHeight: '200px',
+                      }}
+                    >
+                      <span className="type-mono text-[var(--ink)]">
+                        {res.width} × {res.height}
+                      </span>
+                      <span className="type-caption text-[var(--ink-muted)]">
+                        {isChecked ? 'Included in matrix run' : 'Not selected'}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </article>
+            );
+          })}
         </div>
       </div>
 
-      {/* Popup-only Footer Start Button */}
+      {/* Popup-only sticky footer CTA */}
       {!isFullTab && (
-        <div className="p-3.5 border-t border-zinc-200/80 bg-white">
+        <footer className="p-4 border-t border-[var(--border)] bg-[var(--surface)] shrink-0">
           <button
+            type="button"
             onClick={() => handleStart()}
             disabled={isRunning || selectedIndices.length === 0 || !isValidUrl}
-            className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold text-xs transition cursor-pointer shadow-xs active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full h-9 px-4 rounded-[8px] bg-[var(--accent)] text-[var(--accent-ink)] type-ui-medium inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
             {isRunning ? (
               <>
-                <Loader2 size={14} className="animate-spin" />
-                <span>Resizing Viewports...</span>
+                <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
+                <span>Capturing viewports…</span>
               </>
             ) : (
               <>
-                <Play size={13} fill="currentColor" />
-                <span>Capture Selected ({selectedIndices.length})</span>
+                <Play size={16} strokeWidth={1.5} />
+                <span>Capture selected ({selectedIndices.length})</span>
               </>
             )}
           </button>
-        </div>
+        </footer>
       )}
     </div>
   );

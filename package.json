@@ -24,6 +24,7 @@
     "@types/chrome": "^0.2.7",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "playwright": "^1.65.1",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

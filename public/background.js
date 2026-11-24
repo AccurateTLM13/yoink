@@ -2046,10 +2046,29 @@ async function migrateStorage() {
 // ---------------------------------------------------------------------------
 // Thumbnail (worker-native, no offscreen document needed)
 // ---------------------------------------------------------------------------
+function decodeDataUrlToBlob(dataUrl) {
+  if (typeof dataUrl !== 'string' || !/^data:image\/[a-z0-9.+-]+;base64,/i.test(dataUrl)) {
+    throw new Error('Invalid image data URL');
+  }
+  const commaIdx = dataUrl.indexOf(',');
+  const semiIdx = dataUrl.indexOf(';');
+  const mime = dataUrl.slice(5, semiIdx);
+  const b64 = dataUrl.slice(commaIdx + 1);
+  if (typeof atob === 'function' && typeof Blob === 'function') {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mime });
+  }
+  return { type: mime, size: b64.length };
+}
+
 async function generateThumbnail(dataUrl, targetWidth = 720) {
   if (!dataUrl) return { thumbnailUrl: '', width: 0, height: 0 };
   try {
-    const blob = await (await fetch(dataUrl)).blob();
+    const blob = decodeDataUrlToBlob(dataUrl);
     const bitmap = await createImageBitmap(blob);
     const { width, height } = bitmap;
     const cropHeight = Math.min(height, Math.round(width * 0.75));

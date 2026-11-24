@@ -1,15 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  X,
-  Copy,
-  Check,
-  ScanText,
-  Save,
-  Loader2,
-  Sparkles,
   AlertCircle,
+  Check,
+  Copy,
+  Loader2,
+  Save,
+  ScanText,
+  X,
 } from 'lucide-react';
-import { extractOcrText, OcrResult } from '../utils/ai';
+import { extractOcrText, type OcrResult } from '../utils/ai';
 
 interface Props {
   dataUrl: string;
@@ -38,9 +37,11 @@ export const OcrDrawer: React.FC<Props> = ({
       const res: OcrResult = await extractOcrText(dataUrl);
       setText(res.text);
       setEngine(res.engine);
-      if (res.status === 'unavailable' || res.status === 'empty') setError(res.message || null);
-    } catch (err: any) {
-      setError(err.message || 'OCR extraction failed');
+      if (res.status === 'unavailable' || res.status === 'empty') {
+        setError(res.message || null);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'OCR extraction failed.');
     } finally {
       setIsScanning(false);
     }
@@ -57,22 +58,21 @@ export const OcrDrawer: React.FC<Props> = ({
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy text:', err);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setError('Could not copy text to clipboard.');
     }
   };
 
   const handleSave = async () => {
-    if (onSaveText) {
-      try {
-        await onSaveText(text);
-        setError(null);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
-      } catch (err) {
-        setError(`Could not save text: ${err instanceof Error ? err.message : 'Unknown error'}`);
-      }
+    if (!onSaveText) return;
+    try {
+      await onSaveText(text);
+      setError(null);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1800);
+    } catch (err) {
+      setError(`Could not save text: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
   };
 
@@ -83,101 +83,103 @@ export const OcrDrawer: React.FC<Props> = ({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Text Extraction (OCR)"
-      className="fixed inset-y-0 right-0 z-60 w-full max-w-md bg-white border-l border-zinc-200/90 shadow-2xl flex flex-col font-sans select-none animate-in slide-in-from-right-4 duration-200"
+      aria-label="Offline text extraction (OCR)"
+      className="fixed inset-y-0 right-0 z-60 w-full max-w-[380px] bg-[var(--surface)] text-[var(--ink)] border-l border-[var(--border)] flex flex-col select-none"
     >
-      {/* Drawer Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 bg-zinc-50/80">
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
-            <ScanText size={16} />
-          </div>
-          <div>
-            <h3 className="text-xs font-bold text-zinc-900 leading-tight">
-              Text Extraction (OCR)
-            </h3>
-            <span className="text-[10.5px] font-mono text-zinc-500">
+      {/* Header */}
+      <header className="h-[56px] px-4 border-b border-[var(--border)] bg-[var(--surface)] flex items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <ScanText size={16} strokeWidth={1.5} className="text-[var(--ink)] shrink-0" />
+          <div className="min-w-0">
+            <h3 className="type-body-medium text-[var(--ink)] truncate">Offline OCR</h3>
+            <p className="type-mono text-[var(--ink-muted)] truncate">
               {engine === 'shape-detection'
-                ? 'Offline Native Shape Detection'
+                ? 'Browser Shape Detection'
                 : engine === 'tesseract'
-                ? 'Offline OCR (Bundled Tesseract WASM)'
+                ? 'Local Tesseract WASM'
                 : 'OCR unavailable'}
-            </span>
+            </p>
           </div>
         </div>
 
         <button
+          type="button"
           onClick={onClose}
-          className="p-1 text-zinc-400 hover:text-zinc-700 rounded-lg hover:bg-zinc-200/60 transition cursor-pointer"
-          title="Close drawer"
+          aria-label="Close OCR drawer"
+          className="w-8 h-8 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] hover:bg-[var(--surface)] text-[var(--ink)] flex items-center justify-center cursor-pointer studio-focus"
         >
-          <X size={16} />
+          <X size={16} strokeWidth={1.5} />
         </button>
-      </div>
+      </header>
 
-      {/* Action Toolbar */}
-      <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-100 bg-white text-xs">
-        <div className="flex items-center gap-2 text-zinc-500 font-mono text-[11px]">
-          <span>{wordCount} words</span>
-          <span>•</span>
-          <span>{lineCount} lines</span>
-          <span>•</span>
-          <span>{text.length} chars</span>
+      {/* Metrics & Action Toolbar */}
+      <div className="px-4 py-3 border-b border-[var(--border)] bg-[var(--canvas)] space-y-2 shrink-0">
+        <div className="type-mono text-[var(--ink-muted)]">
+          {wordCount} words · {lineCount} lines · {text.length} chars
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           <button
-            onClick={performScan}
-            disabled={isScanning}
-            className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition cursor-pointer disabled:opacity-50"
-            title="Re-scan image"
+            type="button"
+            onClick={handleCopy}
+            disabled={!text}
+            className="h-8 px-3 rounded-[8px] bg-[var(--accent)] text-[var(--accent-ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            {isScanning ? <Loader2 size={12} className="animate-spin" /> : <ScanText size={12} />}
-            <span>{isScanning ? 'Scanning…' : 'Re-scan'}</span>
+            {copied ? <Check size={16} strokeWidth={1.5} /> : <Copy size={16} strokeWidth={1.5} />}
+            <span>{copied ? 'Copied' : 'Copy text'}</span>
           </button>
 
           <button
-            onClick={handleCopy}
-            disabled={!text}
-            className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition cursor-pointer disabled:opacity-50 shadow-2xs"
-            title="Copy text to clipboard"
+            type="button"
+            onClick={performScan}
+            disabled={isScanning}
+            className="h-8 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            {copied ? <Check size={12} className="text-emerald-300" /> : <Copy size={12} />}
-            <span>{copied ? 'Copied' : 'Copy Text'}</span>
+            {isScanning ? (
+              <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
+            ) : (
+              <ScanText size={16} strokeWidth={1.5} />
+            )}
+            <span>{isScanning ? 'Scanning…' : 'Re-scan'}</span>
           </button>
 
           {onSaveText && (
             <button
+              type="button"
               onClick={handleSave}
               disabled={!text}
-              className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-zinc-700 bg-zinc-100 hover:bg-zinc-200 rounded-lg transition cursor-pointer disabled:opacity-50"
-              title="Save recognized text to capture note"
+              className="h-8 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
             >
-              {saved ? <Check size={12} className="text-emerald-600" /> : <Save size={12} />}
+              {saved ? <Check size={16} strokeWidth={1.5} /> : <Save size={16} strokeWidth={1.5} />}
               <span>{saved ? 'Saved' : 'Save'}</span>
             </button>
           )}
         </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="flex-1 p-4 flex flex-col min-h-0 bg-[#fbfbfd]">
+      {/* Main Editable Text Area */}
+      <div className="flex-1 p-4 flex flex-col min-h-0 bg-[var(--canvas)] space-y-3">
         {error && (
-          <div className="mb-3 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2">
-            <AlertCircle size={14} className="shrink-0 text-rose-600" />
-            <span>{error}</span>
+          <div
+            role="alert"
+            className="p-3 rounded-[8px] bg-[var(--surface)] border border-[var(--border)] flex items-start gap-2"
+          >
+            <AlertCircle
+              size={16}
+              strokeWidth={1.5}
+              className="text-[var(--semantic-error)] shrink-0 mt-0.5"
+            />
+            <span className="type-ui text-[var(--ink)]">{error}</span>
           </div>
         )}
 
         {isScanning ? (
           <div className="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-3">
-            <Loader2 size={32} className="text-blue-600 animate-spin" />
-            <div>
-              <h4 className="text-sm font-semibold text-zinc-800">
-                Scanning pixels for text…
-              </h4>
-              <p className="text-xs text-zinc-500 mt-1 max-w-xs">
-                Running optical character detection directly in your browser. No image data is sent to external servers.
+            <Loader2 size={16} strokeWidth={1.5} className="animate-spin text-[var(--ink)]" />
+            <div className="space-y-1">
+              <h4 className="type-body-medium text-[var(--ink)]">Scanning pixels locally…</h4>
+              <p className="type-ui text-[var(--ink-muted)] max-w-[260px]">
+                Optical character detection runs on-device with zero network uploads.
               </p>
             </div>
           </div>
@@ -185,25 +187,24 @@ export const OcrDrawer: React.FC<Props> = ({
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
+            aria-label="Extracted OCR text"
             placeholder="No text detected in this capture."
-            className="flex-1 w-full p-3 font-mono text-xs text-zinc-900 bg-white border border-zinc-200 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 leading-relaxed scrollbar-thin select-text"
+            className="flex-1 w-full p-3 rounded-[8px] bg-[var(--surface)] border border-[var(--border)] type-mono text-[var(--ink)] placeholder:text-[var(--ink-muted)] resize-none select-text studio-focus"
           />
         )}
       </div>
 
-      {/* Footer Info */}
-      <div className="px-4 py-2.5 border-t border-zinc-200/80 bg-zinc-50 text-[11px] text-zinc-500 flex items-center justify-between font-mono">
-        <span className="flex items-center gap-1">
-          <Sparkles size={11} className="text-blue-600" />
-          <span>Yoink Local Intelligence (Free)</span>
-        </span>
+      {/* Footer */}
+      <footer className="h-[40px] px-4 border-t border-[var(--border)] bg-[var(--surface)] flex items-center justify-between gap-2 shrink-0">
+        <span className="type-mono text-[var(--ink-muted)]">100% local processing</span>
         <button
+          type="button"
           onClick={onClose}
-          className="text-zinc-600 hover:text-zinc-900 font-semibold cursor-pointer"
+          className="type-ui-medium text-[var(--ink)] hover:text-[var(--ink-muted)] cursor-pointer studio-focus rounded-[4px]"
         >
           Done
         </button>
-      </div>
+      </footer>
     </div>
   );
 };

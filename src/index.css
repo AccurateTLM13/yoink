@@ -7,6 +7,47 @@
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
 }
 
+:root {
+  color-scheme: light;
+  --canvas: #F7F7F5;
+  --surface: #FFFFFF;
+  --border: #E4E4E0;
+  --ink: #141518;
+  --ink-muted: #62666F;
+  --accent: #1D4ED8;
+  --accent-ink: #FFFFFF;
+  --semantic-valid: #15803D;
+  --semantic-error: #DC2626;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --canvas: #0F1012;
+    --surface: #17181C;
+    --border: #27292F;
+    --ink: #F2F3F5;
+    --ink-muted: #8E939E;
+    --accent: #60A5FA;
+    --accent-ink: #0B1120;
+    --semantic-valid: #4ADE80;
+    --semantic-error: #F87171;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #0F1012;
+  --surface: #17181C;
+  --border: #27292F;
+  --ink: #F2F3F5;
+  --ink-muted: #8E939E;
+  --accent: #60A5FA;
+  --accent-ink: #0B1120;
+  --semantic-valid: #4ADE80;
+  --semantic-error: #F87171;
+}
+
 @layer base {
   * {
     box-sizing: border-box;
@@ -16,11 +57,122 @@
 
   body {
     font-family: var(--font-sans);
-    color: #0f172a;
+    background-color: var(--canvas);
+    color: var(--ink);
   }
 }
 
-/* Custom sleek scrollbar */
+/* DESIGN.md typography roles (strictly 6 roles + 11px keycap floor) */
+.type-display-l {
+  font-family: var(--font-display);
+  font-size: 24px;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+
+.type-display-s {
+  font-family: var(--font-display);
+  font-size: 18px;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  font-weight: 500;
+}
+
+.type-body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.type-body-medium {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.type-ui {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.type-ui-medium {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.type-caption {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.35;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.type-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.type-mono-medium {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.type-keycap {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* DESIGN.md Studio Gallery responsive grid */
+.studio-gallery-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+@media (min-width: 480px) {
+  .studio-gallery-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 768px) {
+  .studio-gallery-grid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+}
+
+/* Keyboard focus indicator using DESIGN.md ink token */
+.studio-focus:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* Token-backed scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -31,22 +183,31 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.4);
-  border-radius: 9999px;
+  background: var(--border);
+  border-radius: 6px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(100, 116, 139, 0.7);
+  background: var(--ink-muted);
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
 
-/* Custom subtle noise texture simulation */
-.bg-grid-subtle {
-  background-size: 20px 20px;
-  background-image: 
-    linear-gradient(to right, rgba(0, 0, 0, 0.03) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(0, 0, 0, 0.03) 1px, transparent 1px);
+/* Token-backed transparency checkerboard for Page Media Yoinker previews */
+.media-checkerboard {
+  background-color: var(--canvas);
+  background-image:
+    linear-gradient(45deg, var(--border) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--border) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--border) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--border) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+}
+
+/* Monochrome range control using DESIGN.md ink token */
+.studio-range {
+  accent-color: var(--ink);
 }

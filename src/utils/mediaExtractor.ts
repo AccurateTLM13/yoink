@@ -9,7 +9,7 @@ import {
 } from '../types';
 import { isChromeExtension, sendRuntimeMessage } from './capture';
 import { applyProofToCanvasAndEncode } from './proof';
-import { addHistoryItem } from './storage';
+import { addHistoryItem, createRandomId } from './storage';
 
 /**
  * Resolves a potentially relative URL against an optional base URL.
@@ -267,7 +267,7 @@ export async function sendMediaItemToStudio(
   });
 
   const historyItem: HistoryItem = {
-    id: `yoink_media_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: createRandomId('yoink_media'),
     title: item.name,
     url: item.pageUrl || item.url,
     dataUrl: encoded.dataUrl,
@@ -312,9 +312,9 @@ export async function getInjectableOpenTabs(): Promise<OpenWebsiteTab[]> {
             }
           })
           .map((t) => ({
-            id: t.id!,
+            id: t.id ?? 0,
             title: t.title || t.url || 'Webpage',
-            url: t.url!,
+            url: t.url ?? '',
             favIconUrl: t.favIconUrl,
           }));
         resolve(valid);
