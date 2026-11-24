@@ -1,16 +1,19 @@
 import React, { useState, useMemo } from 'react';
 import {
+  CheckCircle2,
   ChevronLeft,
-  Play,
-  Globe,
+  Circle,
+  ExternalLink,
   ListPlus,
-  CheckCircle,
-  AlertTriangle,
   Loader2,
+  Play,
+  RotateCcw,
   Trash2,
+  XCircle,
 } from 'lucide-react';
-import { BatchIssue, CaptureSettings, HistoryItem } from '../types';
+import type { BatchIssue, CaptureSettings, HistoryItem } from '../types';
 import { captureUrlList, getOpenTabUrls, ensureAllSitesAccess } from '../utils/capture';
+import { formatCaptureReadout, safeHostname } from '../utils/studioFormat';
 
 interface Props {
   settings: CaptureSettings;
@@ -24,32 +27,32 @@ const DEFAULT_SAMPLE_URLS = `https://news.ycombinator.com
 https://github.com
 https://developer.chrome.com`;
 
-function safeHostname(url?: string): string {
-  if (!url) return 'capture';
-  try {
-    return new URL(url).hostname || 'capture';
-  } catch {
-    return 'capture';
-  }
-}
-
-export const UrlBatchModal: React.FC<Props> = React.memo(({
+export const UrlBatchModal: React.FC<Props> = React.memo(function UrlBatchModal({
   settings,
   onBack,
   onFinished,
   onPreview,
   isFullTab = false,
-}) => {
+}: Props) {
   const [urlsText, setUrlsText] = useState(DEFAULT_SAMPLE_URLS);
   const [delaySec, setDelaySec] = useState(3);
   const [isRunning, setIsRunning] = useState(false);
+  const [activeUrl, setActiveUrl] = useState<string | null>(null);
   const [progressMsg, setProgressMsg] = useState('');
   const [hasIssues, setHasIssues] = useState(false);
   const [progressStep, setProgressStep] = useState({ current: 0, total: 0 });
   const [completedItems, setCompletedItems] = useState<HistoryItem[]>([]);
   const [issues, setIssues] = useState<BatchIssue[]>([]);
 
-  const inputUrls = useMemo(() => urlsText.split('\n').map((u) => u.trim()).filter(Boolean), [urlsText]);
+  const inputUrls = useMemo(
+    () =>
+      urlsText
+        .split('\n')
+        .map((u) => u.trim())
+        .filter(Boolean),
+    [urlsText]
+  );
+
   const validUrls = useMemo(
     () =>
       inputUrls.filter((u) => {
@@ -61,6 +64,7 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
       }),
     [inputUrls]
   );
+
   const invalidCount = inputUrls.length - validUrls.length;
   const invalidQueue = invalidCount > 0 || validUrls.length > 100;
 
@@ -90,13 +94,16 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
       }
       setIsRunning(true);
       setHasIssues(false);
+      setActiveUrl(targets[0] || null);
       setProgressStep({ current: 0, total: targets.length });
       setIssues([]);
-      setProgressMsg('Starting batch URL capture sequence...');
+      setProgressMsg('Starting batch capture sequence…');
       setCompletedItems([]);
     } catch (error) {
       setHasIssues(true);
-      setProgressMsg(`Could not request site access: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setProgressMsg(
+        `Could not request site access: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
       return;
     }
 
@@ -105,9 +112,10 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
         targets,
         settings,
         delaySec * 1000,
-        (current, total, activeUrl) => {
+        (current, total, currentTarget) => {
           setProgressStep({ current, total });
-          setProgressMsg(`Capturing ${current} of ${total}: ${activeUrl}`);
+          setActiveUrl(currentTarget);
+          setProgressMsg(`Capturing ${current} of ${total}: ${currentTarget}`);
         },
         (outcome) => {
           failed = [...outcome.failures, ...outcome.skipped];
@@ -117,255 +125,326 @@ export const UrlBatchModal: React.FC<Props> = React.memo(({
       );
       setCompletedItems(results);
       onFinished(results);
-      setProgressMsg(`Batch complete: ${results.length} captured, ${failed.length} failed or skipped.`);
-    } catch (err: any) {
+      setProgressMsg(
+        `Batch complete: ${results.length} captured, ${failed.length} failed or skipped.`
+      );
+    } catch (err: unknown) {
       setHasIssues(true);
-      setProgressMsg(`Error: ${err.message || 'Batch capture failed'}`);
+      setProgressMsg(`Error: ${err instanceof Error ? err.message : 'Batch capture failed'}`);
     } finally {
       setIsRunning(false);
+      setActiveUrl(null);
     }
   };
 
+  const completedByUrl = useMemo(() => {
+    const map = new Map<string, HistoryItem>();
+    for (const item of completedItems) {
+      if (item.url) map.set(item.url, item);
+    }
+    return map;
+  }, [completedItems]);
+
+  const issueByUrl = useMemo(() => {
+    const map = new Map<string, BatchIssue>();
+    for (const issue of issues) {
+      map.set(issue.target, issue);
+    }
+    return map;
+  }, [issues]);
+
   return (
-    <div className="flex flex-col h-full bg-[#fbfbfd] text-zinc-900 font-sans select-none overflow-hidden">
-      {/* Popup-only Header */}
+    <div className="flex flex-col h-full bg-[var(--canvas)] text-[var(--ink)] select-none overflow-hidden">
+      {/* Popup-only 44px sub-header */}
       {!isFullTab && (
-        <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-200/80 bg-white/90 backdrop-blur-xs">
+        <header className="h-[44px] px-4 border-b border-[var(--border)] bg-[var(--surface)] flex items-center justify-between gap-2 shrink-0">
           <button
+            type="button"
             onClick={onBack}
             disabled={isRunning}
-            className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 hover:text-zinc-950 transition cursor-pointer px-1 py-1 rounded hover:bg-zinc-100 disabled:opacity-50"
+            className="h-8 px-2 rounded-[8px] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
-            <ChevronLeft size={16} />
-            <span>Back to Menu</span>
+            <ChevronLeft size={16} strokeWidth={1.5} />
+            <span>Back</span>
           </button>
-
-          <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60">
-            Batch URLs
-          </span>
-        </div>
+          <span className="type-mono text-[var(--ink-muted)]">{validUrls.length} URLs</span>
+        </header>
       )}
 
-      <div
-        className={`flex-1 overflow-y-auto text-xs ${
-          isFullTab ? 'p-6 md:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6 items-start' : 'p-4 space-y-4'
-        }`}
-      >
-        {/* Left Column: URL Queue & Latency Config */}
-        <div className={isFullTab ? 'lg:col-span-7 space-y-4 bg-white p-5 rounded-xl border border-zinc-200/80 shadow-2xs' : 'space-y-4'}>
-          {isFullTab && (
-            <div className="flex items-center justify-between pb-1 border-b border-zinc-100">
-              <div>
-                <h3 className="font-semibold text-sm text-zinc-900">Automated Batch URL Queue</h3>
-                <p className="text-[11.5px] text-zinc-600 mt-0.5">
-                  Paste one URL per line or import your open browser tabs to capture them sequentially.
-                </p>
+      {/* Main Content */}
+      <div className={`flex-1 overflow-y-auto ${isFullTab ? 'p-4 md:p-6 space-y-6' : 'p-4 space-y-4'}`}>
+        {/* Queue Configuration Card */}
+        <section
+          aria-label="URL queue input"
+          className="bg-[var(--surface)] border border-[var(--border)] rounded-[12px] p-4 space-y-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="space-y-1 min-w-0">
+              <label htmlFor="batch-urls-textarea" className="type-display-s text-[var(--ink)] block">
+                Target URLs
+              </label>
+              <p className="type-ui text-[var(--ink-muted)]">
+                Enter one http or https URL per line (up to 100) or load open tabs.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleLoadOpenTabs}
+                disabled={isRunning}
+                className="h-9 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] hover:bg-[var(--surface)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
+              >
+                <ListPlus size={16} strokeWidth={1.5} />
+                <span>Load open tabs</span>
+              </button>
+
+              {urlsText.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClear}
+                  disabled={isRunning}
+                  aria-label="Clear URL queue"
+                  title="Clear URL queue"
+                  className="w-9 h-9 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] hover:bg-[var(--surface)] text-[var(--ink-muted)] hover:text-[var(--ink)] flex items-center justify-center cursor-pointer disabled:opacity-50 studio-focus"
+                >
+                  <Trash2 size={16} strokeWidth={1.5} />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <textarea
+            id="batch-urls-textarea"
+            value={urlsText}
+            onChange={(e) => setUrlsText(e.target.value)}
+            disabled={isRunning}
+            rows={isFullTab ? 6 : 4}
+            placeholder={'https://example.com/page-1\nhttps://example.com/page-2'}
+            className="w-full p-3 rounded-[8px] bg-[var(--canvas)] border border-[var(--border)] type-mono text-[var(--ink)] placeholder:text-[var(--ink-muted)] resize-y select-text studio-focus disabled:opacity-50"
+          />
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-[var(--border)]">
+            <div className="flex-1 min-w-0 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <label htmlFor="batch-delay-slider" className="type-ui text-[var(--ink)]">
+                  Page render delay
+                </label>
+                <span className="type-mono text-[var(--ink)]">{delaySec}s</span>
               </div>
-              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-200/70">
-                {validUrls.length} Valid
+              <input
+                id="batch-delay-slider"
+                type="range"
+                min="1"
+                max="8"
+                step="1"
+                value={delaySec}
+                onChange={(e) => setDelaySec(parseInt(e.target.value, 10))}
+                disabled={isRunning}
+                className="w-full h-2 rounded-[6px] bg-[var(--canvas)] cursor-pointer studio-range disabled:opacity-50"
+              />
+            </div>
+
+            {isFullTab && (
+              <button
+                type="button"
+                onClick={() => handleStart()}
+                disabled={isRunning || validUrls.length === 0 || invalidQueue}
+                className="h-9 px-4 rounded-[8px] bg-[var(--accent)] text-[var(--accent-ink)] type-ui-medium inline-flex items-center justify-center gap-2 shrink-0 cursor-pointer disabled:opacity-50 studio-focus"
+              >
+                {isRunning ? (
+                  <>
+                    <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
+                    <span>Running…</span>
+                  </>
+                ) : (
+                  <>
+                    <Play size={16} strokeWidth={1.5} />
+                    <span>
+                      Capture {validUrls.length} {validUrls.length === 1 ? 'URL' : 'URLs'}
+                    </span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+
+          {invalidQueue && (
+            <div
+              role="alert"
+              className="p-3 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] flex items-start gap-2"
+            >
+              <XCircle
+                size={16}
+                strokeWidth={1.5}
+                className="text-[var(--semantic-error)] shrink-0 mt-0.5"
+              />
+              <span className="type-ui text-[var(--ink)]">
+                {invalidCount > 0
+                  ? `${invalidCount} invalid line(s). Enter one complete http or https URL per line. `
+                  : ''}
+                {validUrls.length > 100 ? 'Maximum 100 URLs per batch.' : ''}
               </span>
             </div>
           )}
+        </section>
 
-          {/* Instructions & Actions Bar */}
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-600">
-                Target URLs ({validUrls.length} valid)
-              </label>
-              <div className="flex items-center gap-2">
+        {/* Live Run Status Summary */}
+        {progressMsg && (
+          <div
+            role="status"
+            className="bg-[var(--surface)] border border-[var(--border)] rounded-[12px] p-4 space-y-3"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                {isRunning ? (
+                  <Loader2 size={16} strokeWidth={1.5} className="animate-spin text-[var(--ink)] shrink-0" />
+                ) : hasIssues ? (
+                  <XCircle size={16} strokeWidth={1.5} className="text-[var(--semantic-error)] shrink-0" />
+                ) : (
+                  <CheckCircle2 size={16} strokeWidth={1.5} className="text-[var(--semantic-valid)] shrink-0" />
+                )}
+                <span className="type-body-medium text-[var(--ink)] break-words">{progressMsg}</span>
+              </div>
+
+              {issues.length > 0 && !isRunning && (
                 <button
-                  onClick={handleLoadOpenTabs}
-                  disabled={isRunning}
-                  className="flex items-center gap-1 text-[11px] font-semibold text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100/70 px-2.5 py-1 rounded-md transition cursor-pointer disabled:opacity-50 border border-blue-200/60"
+                  type="button"
+                  onClick={() => handleStart(issues.map((issue) => issue.target))}
+                  className="h-8 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--canvas)] hover:bg-[var(--surface)] text-[var(--ink)] type-caption inline-flex items-center gap-2 shrink-0 cursor-pointer studio-focus"
                 >
-                  <ListPlus size={12} />
-                  <span>Load Open Web Tabs</span>
+                  <RotateCcw size={16} strokeWidth={1.5} />
+                  <span>Retry failed ({issues.length})</span>
                 </button>
-                {urlsText.length > 0 && (
-                  <button
-                    onClick={handleClear}
-                    disabled={isRunning}
-                    className="p-1 text-zinc-400 hover:text-zinc-700 rounded transition cursor-pointer disabled:opacity-50"
-                    title="Clear URLs"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                )}
-              </div>
+              )}
             </div>
 
-            <textarea
-              value={urlsText}
-              onChange={(e) => setUrlsText(e.target.value)}
-              disabled={isRunning}
-              rows={isFullTab ? 8 : 5}
-              placeholder="https://example.com/page1&#10;https://example.com/page2"
-              className="w-full p-3 font-mono text-xs bg-zinc-50/50 focus:bg-white border border-zinc-200 rounded-xl focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 disabled:bg-zinc-50 leading-relaxed shadow-2xs resize-none"
-            />
+            {isRunning && progressStep.total > 0 && (
+              <div className="w-full h-1 rounded-[4px] bg-[var(--border)] overflow-hidden">
+                <div
+                  className="h-full bg-[var(--ink)] transition-all"
+                  style={{ width: `${Math.round((progressStep.current / progressStep.total) * 100)}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Full-Width Single-Column Run Rows (GitHub Actions pattern) */}
+        <section aria-label="Batch run queue" className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="type-display-s text-[var(--ink)]">Run queue</h2>
+            <span className="type-mono text-[var(--ink-muted)]">
+              {completedItems.length}/{validUrls.length} completed
+            </span>
           </div>
 
-          <div className="bg-zinc-50/80 p-3.5 rounded-xl border border-zinc-200/80 space-y-2">
-            <div className="flex justify-between items-center text-xs">
-              <span className="font-medium text-zinc-700">Page Render & Hydration Latency</span>
-              <span className="font-mono font-bold text-blue-600 tabular-nums">{delaySec}s delay</span>
-            </div>
-            <input
-              type="range"
-              min="1"
-              max="8"
-              step="1"
-              value={delaySec}
-              onChange={(e) => setDelaySec(parseInt(e.target.value, 10))}
-              disabled={isRunning}
-              className="w-full h-1.5 bg-zinc-200 rounded-lg appearance-none cursor-pointer accent-blue-600 disabled:opacity-50"
-            />
-            <p className="text-[10.5px] text-zinc-600 leading-snug">
-              Allows JavaScript hydration, webfonts, and deferred images to finish before each snapshot.
-            </p>
-          </div>
-
-          {isFullTab && (
-            <button
-              onClick={() => handleStart()}
-              disabled={isRunning || validUrls.length === 0 || invalidQueue}
-              className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold text-xs transition cursor-pointer shadow-xs active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isRunning ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" />
-                  <span>Processing Batch URLs...</span>
-                </>
-              ) : (
-                <>
-                  <Play size={13} fill="currentColor" />
-                  <span>Capture {validUrls.length} URL{validUrls.length === 1 ? '' : 's'}</span>
-                </>
-              )}
-            </button>
-          )}
-        </div>
-
-        {/* Right Column: Progress & Results */}
-        <div className={isFullTab ? 'lg:col-span-5 space-y-4' : 'space-y-4'}>
-          {progressMsg && (
-            <div
-              className={`p-3.5 rounded-xl border flex items-start gap-2.5 text-xs shadow-2xs ${
-                isRunning
-                  ? 'bg-blue-50/90 border-blue-200 text-blue-900'
-                  : hasIssues
-                  ? 'bg-amber-50 border-amber-200 text-amber-950'
-                  : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
-              }`}
-            >
-              {isRunning ? (
-                <Loader2 size={15} className="animate-spin text-blue-600 shrink-0 mt-0.5" />
-              ) : hasIssues ? (
-                <AlertTriangle size={15} className="text-amber-700 shrink-0 mt-0.5" />
-              ) : (
-                <CheckCircle size={15} className="text-emerald-600 shrink-0 mt-0.5" />
-              )}
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-xs leading-tight break-words">{progressMsg}</p>
-                {isRunning && progressStep.total > 0 && (
-                  <div className="w-full bg-blue-200/80 h-1.5 rounded-full mt-2 overflow-hidden">
-                    <div
-                      className="bg-blue-600 h-full transition-all duration-300 rounded-full"
-                      style={{ width: `${(progressStep.current / progressStep.total) * 100}%` }}
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {invalidQueue && (
-            <div role="alert" className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-950">
-              {invalidCount > 0 ? `${invalidCount} URL(s) are invalid. Enter one complete http(s) URL per line. ` : ''}
-              {validUrls.length > 100 ? 'The limit is 100 URLs per batch.' : ''}
-            </div>
-          )}
-          {issues.length > 0 && (
-            <div role="alert" className="p-3 rounded-xl border border-amber-300 bg-amber-50 text-amber-950 space-y-2">
-              <p className="font-semibold">Could not capture {issues.length} URL(s)</p>
-              <ul className="max-h-40 overflow-y-auto space-y-1">
-                {issues.map((issue, i) => (
-                  <li key={i} className="break-all">
-                    {issue.target}: {issue.reason}
-                  </li>
-                ))}
-              </ul>
-              <button
-                type="button"
-                disabled={isRunning}
-                onClick={() => handleStart(issues.map((issue) => issue.target))}
-                className="underline font-semibold disabled:opacity-50"
-              >
-                Retry failed
-              </button>
-            </div>
-          )}
-          {completedItems.length > 0 ? (
-            <div className="bg-white p-4 rounded-xl border border-zinc-200/80 shadow-2xs space-y-3">
-              <label className="font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-600 block">
-                Captured URLs ({completedItems.length}) — Click to Inspect
-              </label>
-              <div className="grid grid-cols-2 gap-2.5">
-                {completedItems.map((item) => (
-                  <div
-                    key={item.id}
-                    onClick={() => onPreview(item)}
-                    className="group relative bg-zinc-50 border border-zinc-200/80 hover:border-blue-400 rounded-xl p-2 cursor-pointer shadow-2xs hover:shadow-xs transition"
-                  >
-                    <img
-                      src={item.thumbnailUrl || item.dataUrl}
-                      alt={item.title}
-                      className="w-full h-24 object-cover object-top rounded-lg bg-white border border-zinc-200/60"
-                    />
-                    <p className="text-[11px] text-zinc-800 truncate mt-1.5 font-semibold font-mono">
-                      {safeHostname(item.url)}
-                    </p>
-                  </div>
-                ))}
-              </div>
+          {validUrls.length === 0 ? (
+            <div className="bg-[var(--surface)] border border-[var(--border)] rounded-[12px] p-6 text-center space-y-1">
+              <p className="type-body-medium text-[var(--ink)]">Queue is empty</p>
+              <p className="type-ui text-[var(--ink-muted)]">
+                Paste URLs above or load open tabs to prepare a batch run.
+              </p>
             </div>
           ) : (
-            isFullTab && (
-              <div className="bg-white p-6 rounded-xl border border-dashed border-zinc-300 text-center space-y-2">
-                <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto">
-                  <Globe size={20} />
-                </div>
-                <h4 className="font-semibold text-xs text-zinc-800">Ready for Batch Capture</h4>
-                <p className="text-[11px] text-zinc-500 max-w-xs mx-auto leading-relaxed">
-                  Queue up to 100 URLs on the left. Yoink will open each page, wait for hydration, capture the viewport, and save every snapshot to your Gallery.
-                </p>
-              </div>
-            )
+            <div className="bg-[var(--surface)] border border-[var(--border)] rounded-[12px] divide-y divide-[var(--border)] overflow-hidden">
+              {validUrls.map((url, idx) => {
+                const doneItem = completedByUrl.get(url);
+                const failedIssue = issueByUrl.get(url);
+                const isActive = isRunning && activeUrl === url;
+
+                return (
+                  <div
+                    key={`${url}-${idx}`}
+                    className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 hover:bg-[var(--canvas)] transition-colors"
+                  >
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                      <span className="w-4 h-4 mt-0.5 flex items-center justify-center shrink-0">
+                        {isActive ? (
+                          <Loader2 size={16} strokeWidth={1.5} className="animate-spin text-[var(--ink)]" />
+                        ) : doneItem ? (
+                          <CheckCircle2
+                            size={16}
+                            strokeWidth={1.5}
+                            className="text-[var(--semantic-valid)]"
+                          />
+                        ) : failedIssue ? (
+                          <XCircle
+                            size={16}
+                            strokeWidth={1.5}
+                            className="text-[var(--semantic-error)]"
+                          />
+                        ) : (
+                          <Circle size={16} strokeWidth={1.5} className="text-[var(--ink-muted)]" />
+                        )}
+                      </span>
+
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="type-body-medium text-[var(--ink)] truncate">
+                          {doneItem?.title || safeHostname(url)}
+                        </div>
+                        <div className="type-mono text-[var(--ink-muted)] truncate">{url}</div>
+                        {failedIssue && (
+                          <div className="type-ui text-[var(--semantic-error)] break-words">
+                            {failedIssue.reason}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 shrink-0 pl-6 sm:pl-0">
+                      {doneItem ? (
+                        <>
+                          <span className="type-mono text-[var(--ink-muted)]">
+                            {formatCaptureReadout(doneItem)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onPreview(doneItem)}
+                            className="h-8 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-caption inline-flex items-center gap-2 cursor-pointer studio-focus"
+                          >
+                            <span>Inspect</span>
+                            <ExternalLink size={16} strokeWidth={1.5} />
+                          </button>
+                        </>
+                      ) : (
+                        <span className="type-mono text-[var(--ink-muted)]">
+                          {isActive ? 'Capturing' : failedIssue ? 'Failed' : 'Queued'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
-        </div>
+        </section>
       </div>
 
-      {/* Popup-only Footer Start Button */}
+      {/* Popup-only sticky footer primary action */}
       {!isFullTab && (
-        <div className="p-3.5 border-t border-zinc-200/80 bg-white">
+        <footer className="p-4 border-t border-[var(--border)] bg-[var(--surface)] shrink-0">
           <button
+            type="button"
             onClick={() => handleStart()}
             disabled={isRunning || validUrls.length === 0 || invalidQueue}
-            className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold text-xs transition cursor-pointer shadow-xs active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full h-9 px-4 rounded-[8px] bg-[var(--accent)] text-[var(--accent-ink)] type-ui-medium inline-flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
           >
             {isRunning ? (
               <>
-                <Loader2 size={14} className="animate-spin" />
-                <span>Processing Batch URLs...</span>
+                <Loader2 size={16} strokeWidth={1.5} className="animate-spin" />
+                <span>Processing…</span>
               </>
             ) : (
               <>
-                <Play size={13} fill="currentColor" />
-                <span>Capture {validUrls.length} URLs</span>
+                <Play size={16} strokeWidth={1.5} />
+                <span>
+                  Capture {validUrls.length} {validUrls.length === 1 ? 'URL' : 'URLs'}
+                </span>
               </>
             )}
           </button>
-        </div>
+        </footer>
       )}
     </div>
   );

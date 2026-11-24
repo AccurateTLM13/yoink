@@ -1,15 +1,15 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
+  AlertCircle,
+  CheckCircle2,
+  Download,
   FolderOpen,
   HardDrive,
-  Download,
   MessageSquare,
-  CheckCircle2,
-  AlertTriangle,
   RefreshCw,
   X,
 } from 'lucide-react';
-import { CaptureSettings, FolderAccessState, SaveLocationMode } from '../types';
+import type { CaptureSettings, FolderAccessState, SaveLocationMode } from '../types';
 import {
   checkSavedDirectoryStatus,
   clearSavedDirectoryHandle,
@@ -45,9 +45,7 @@ export const SaveDestinationControl: React.FC<Props> = ({
   const refreshStatus = useCallback(async () => {
     const res = await checkSavedDirectoryStatus();
     setStatusState(res.state);
-    if (res.name) {
-      setFolderName(res.name);
-    }
+    if (res.name) setFolderName(res.name);
   }, []);
 
   useEffect(() => {
@@ -123,7 +121,9 @@ export const SaveDestinationControl: React.FC<Props> = ({
         });
         setFeedback(`Access granted for "${res.name}".`);
       } else if (res.state === 'not_found') {
-        setFeedback(`"${res.name || 'Selected drive'}" could not be found. Reconnect the drive or pick a new folder.`);
+        setFeedback(
+          `"${res.name || 'Selected drive'}" could not be found. Reconnect the drive or pick a new folder.`
+        );
       } else if (res.state === 'unset') {
         await handleChooseFolder();
       } else {
@@ -158,67 +158,61 @@ export const SaveDestinationControl: React.FC<Props> = ({
 
   if (variant === 'compact') {
     return (
-      <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-white border border-zinc-200/80 text-[11px]">
-        <div className="flex items-center gap-1.5 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-[8px] bg-[var(--canvas)] border border-[var(--border)]">
+        <div className="flex items-center gap-2 min-w-0">
           {mode === 'folder' ? (
-            <HardDrive size={12} className="text-blue-600 shrink-0" />
+            <HardDrive size={16} strokeWidth={1.5} className="text-[var(--ink)] shrink-0" />
           ) : mode === 'ask' ? (
-            <MessageSquare size={12} className="text-indigo-600 shrink-0" />
+            <MessageSquare size={16} strokeWidth={1.5} className="text-[var(--ink-muted)] shrink-0" />
           ) : (
-            <Download size={12} className="text-zinc-500 shrink-0" />
+            <Download size={16} strokeWidth={1.5} className="text-[var(--ink-muted)] shrink-0" />
           )}
-          <span className="text-zinc-500 font-medium shrink-0">Save to:</span>
-          <span className="font-mono font-semibold text-zinc-800 truncate max-w-[165px]" title={displayFolder}>
+          <span className="type-caption text-[var(--ink-muted)] shrink-0">Save to</span>
+          <span className="type-mono text-[var(--ink)] truncate max-w-[160px]" title={displayFolder}>
             {mode === 'folder'
               ? displayFolder
               : mode === 'ask'
-              ? 'Ask Each Time'
-              : 'Downloads Folder'}
+              ? 'Ask each save'
+              : 'Downloads'}
           </span>
 
-          {mode === 'folder' && statusState === 'ready' && (
-            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9.5px] font-mono font-semibold shrink-0">
-              <CheckCircle2 size={9} /> Ready
-            </span>
-          )}
           {mode === 'folder' && (statusState === 'needs_permission' || statusState === 'not_found') && (
             <button
               type="button"
               onClick={handleReauthorize}
               disabled={busy}
-              className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 text-[9.5px] font-semibold cursor-pointer shrink-0"
+              className="h-7 px-2 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] text-[var(--ink)] type-caption inline-flex items-center gap-1 cursor-pointer shrink-0 studio-focus"
             >
-              <AlertTriangle size={9} />
-              <span>{statusState === 'not_found' ? 'Drive Missing' : 'Grant Access'}</span>
+              <AlertCircle size={12} strokeWidth={1.5} />
+              <span>{statusState === 'not_found' ? 'Reconnect' : 'Grant access'}</span>
             </button>
           )}
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <select
             aria-label="Save destination mode"
             value={mode}
             onChange={(e) => handleSelectMode(e.target.value as SaveLocationMode)}
-            className="px-1.5 py-0.5 rounded-md bg-zinc-50 border border-zinc-200 text-[10.5px] font-medium text-zinc-700 cursor-pointer focus:outline-none focus:border-blue-500"
+            className="h-8 px-2 rounded-[6px] bg-[var(--surface)] border border-[var(--border)] type-ui text-[var(--ink)] cursor-pointer studio-focus"
           >
             <option value="downloads">Downloads</option>
-            <option value="folder">Custom Folder / Drive</option>
-            <option value="ask">Ask Every Time</option>
+            <option value="folder">Custom folder</option>
+            <option value="ask">Ask each save</option>
           </select>
 
           <button
             type="button"
             onClick={handleChooseFolder}
             disabled={busy}
-            className={`px-2 py-0.5 rounded-md text-[10.5px] font-semibold transition cursor-pointer flex items-center gap-1 ${
+            className={`h-8 px-2 rounded-[6px] border type-caption inline-flex items-center gap-1 cursor-pointer studio-focus ${
               highlightPicker
-                ? 'bg-blue-600 text-white ring-2 ring-blue-400 animate-pulse'
-                : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200/80'
+                ? 'border-[var(--ink)] bg-[var(--ink)] text-[var(--surface)]'
+                : 'border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)]'
             }`}
-            title="Select any folder on your computer or an external attached drive"
           >
-            <FolderOpen size={11} />
-            <span>{mode === 'folder' ? 'Change' : 'Pick Folder'}</span>
+            <FolderOpen size={16} strokeWidth={1.5} />
+            <span>{mode === 'folder' ? 'Change' : 'Pick folder'}</span>
           </button>
         </div>
       </div>
@@ -227,97 +221,94 @@ export const SaveDestinationControl: React.FC<Props> = ({
 
   return (
     <div
-      className={`p-3 space-y-2.5 transition ${
-        highlightPicker ? 'bg-blue-50/60 ring-2 ring-inset ring-blue-500/40' : ''
+      className={`p-4 space-y-3 ${
+        highlightPicker ? 'bg-[var(--canvas)]' : 'bg-[var(--surface)]'
       }`}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div>
-          <span className="font-semibold text-zinc-900 block leading-tight">
-            Save Destination (Local Folder &amp; External Drives)
-          </span>
-          <span className="text-[11px] text-zinc-600 block mt-0.5 leading-snug">
-            Applies to both captured screenshots and yoinked page images/SVGs.
-          </span>
-        </div>
+      <div className="space-y-1">
+        <span className="type-body-medium text-[var(--ink)] block">
+          Save destination
+        </span>
+        <span className="type-ui text-[var(--ink-muted)] block">
+          Applies to captured screenshots and extracted page media (local folders or external drives).
+        </span>
       </div>
 
       {/* Mode Selector */}
-      <div className="grid grid-cols-3 gap-1 p-1 bg-zinc-100 rounded-xl border border-zinc-200/80">
+      <div className="grid grid-cols-3 gap-1 p-1 rounded-[8px] bg-[var(--canvas)] border border-[var(--border)]">
         <button
           type="button"
           onClick={() => handleSelectMode('downloads')}
-          className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold transition cursor-pointer flex items-center justify-center gap-1 ${
+          aria-pressed={mode === 'downloads'}
+          className={`h-8 px-2 rounded-[6px] type-caption inline-flex items-center justify-center gap-1 cursor-pointer transition-colors studio-focus ${
             mode === 'downloads'
-              ? 'bg-white text-blue-600 shadow-xs border border-zinc-200/60 font-bold'
-              : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/50'
+              ? 'bg-[var(--ink)] text-[var(--surface)]'
+              : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
           }`}
         >
-          <Download size={11} />
-          <span>Downloads</span>
+          <Download size={16} strokeWidth={1.5} className="shrink-0" />
+          <span className="truncate">Downloads</span>
         </button>
 
         <button
           type="button"
           onClick={() => handleSelectMode('folder')}
-          className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold transition cursor-pointer flex items-center justify-center gap-1 ${
+          aria-pressed={mode === 'folder'}
+          className={`h-8 px-2 rounded-[6px] type-caption inline-flex items-center justify-center gap-1 cursor-pointer transition-colors studio-focus ${
             mode === 'folder'
-              ? 'bg-white text-blue-600 shadow-xs border border-zinc-200/60 font-bold'
-              : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/50'
+              ? 'bg-[var(--ink)] text-[var(--surface)]'
+              : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
           }`}
         >
-          <HardDrive size={11} />
-          <span>Folder / Drive</span>
+          <HardDrive size={16} strokeWidth={1.5} className="shrink-0" />
+          <span className="truncate">Folder</span>
         </button>
 
         <button
           type="button"
           onClick={() => handleSelectMode('ask')}
-          className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold transition cursor-pointer flex items-center justify-center gap-1 ${
+          aria-pressed={mode === 'ask'}
+          className={`h-8 px-2 rounded-[6px] type-caption inline-flex items-center justify-center gap-1 cursor-pointer transition-colors studio-focus ${
             mode === 'ask'
-              ? 'bg-white text-blue-600 shadow-xs border border-zinc-200/60 font-bold'
-              : 'text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/50'
+              ? 'bg-[var(--ink)] text-[var(--surface)]'
+              : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
           }`}
         >
-          <MessageSquare size={11} />
-          <span>Ask Each Time</span>
+          <MessageSquare size={16} strokeWidth={1.5} className="shrink-0" />
+          <span className="truncate">Ask</span>
         </button>
       </div>
 
-      {/* Folder / External Drive Details */}
       {mode === 'folder' && (
-        <div className="p-2.5 rounded-xl bg-zinc-50 border border-zinc-200/80 space-y-2">
+        <div className="p-3 rounded-[8px] bg-[var(--canvas)] border border-[var(--border)] space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
-              <div className="w-7 h-7 rounded-lg bg-blue-50 text-blue-600 border border-blue-200/70 flex items-center justify-center shrink-0">
-                <FolderOpen size={14} />
-              </div>
+              <FolderOpen size={16} strokeWidth={1.5} className="text-[var(--ink-muted)] shrink-0" />
               <div className="min-w-0">
-                <div className="font-mono text-[11px] font-bold text-zinc-900 truncate" title={displayFolder}>
+                <div className="type-mono text-[var(--ink)] truncate" title={displayFolder}>
                   {displayFolder}
                 </div>
-                <div className="flex items-center gap-1.5 mt-0.5">
+                <div className="flex items-center gap-1 type-caption text-[var(--ink-muted)]">
                   {statusState === 'ready' && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700">
-                      <CheckCircle2 size={10} /> Connected &amp; writable
-                    </span>
+                    <>
+                      <CheckCircle2 size={12} strokeWidth={1.5} />
+                      <span>Connected and writable</span>
+                    </>
                   )}
                   {statusState === 'needs_permission' && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-700">
-                      <AlertTriangle size={10} /> Permission required after restart
-                    </span>
+                    <>
+                      <AlertCircle size={12} strokeWidth={1.5} />
+                      <span>Permission required after restart</span>
+                    </>
                   )}
                   {statusState === 'not_found' && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-rose-700">
-                      <AlertTriangle size={10} /> Folder or external drive disconnected
-                    </span>
+                    <>
+                      <AlertCircle size={12} strokeWidth={1.5} />
+                      <span>Folder or drive disconnected</span>
+                    </>
                   )}
-                  {statusState === 'unset' && (
-                    <span className="text-[10px] text-zinc-500">Pick any folder or external USB/SSD drive</span>
-                  )}
-                  {statusState === 'unsupported' && (
-                    <span className="text-[10px] text-rose-700">Folder picker unavailable in this browser</span>
-                  )}
+                  {statusState === 'unset' && <span>Choose any local folder or external drive</span>}
+                  {statusState === 'unsupported' && <span>Folder picker unavailable in this browser</span>}
                 </div>
               </div>
             </div>
@@ -326,31 +317,24 @@ export const SaveDestinationControl: React.FC<Props> = ({
               <button
                 type="button"
                 onClick={handleClearFolder}
+                aria-label="Reset to default Downloads folder"
                 title="Reset to default Downloads folder"
-                className="p-1 rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-200/60 transition cursor-pointer shrink-0"
+                className="w-8 h-8 rounded-[6px] hover:bg-[var(--surface)] text-[var(--ink-muted)] hover:text-[var(--ink)] flex items-center justify-center shrink-0 cursor-pointer studio-focus"
               >
-                <X size={13} />
+                <X size={16} strokeWidth={1.5} />
               </button>
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={handleChooseFolder}
               disabled={busy}
-              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition cursor-pointer flex items-center gap-1.5 ${
-                highlightPicker
-                  ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-xs ring-2 ring-blue-300'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white shadow-2xs'
-              }`}
+              className="h-8 px-3 rounded-[8px] border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--canvas)] text-[var(--ink)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
             >
-              <FolderOpen size={12} />
-              <span>
-                {statusState === 'unset'
-                  ? 'Choose Folder / External Drive…'
-                  : 'Change Folder / Drive…'}
-              </span>
+              <FolderOpen size={16} strokeWidth={1.5} />
+              <span>{statusState === 'unset' ? 'Choose folder…' : 'Change folder…'}</span>
             </button>
 
             {(statusState === 'needs_permission' || statusState === 'not_found') && (
@@ -358,30 +342,26 @@ export const SaveDestinationControl: React.FC<Props> = ({
                 type="button"
                 onClick={handleReauthorize}
                 disabled={busy}
-                className="px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-amber-600 hover:bg-amber-700 text-white transition cursor-pointer flex items-center gap-1"
+                className="h-8 px-3 rounded-[8px] bg-[var(--ink)] text-[var(--surface)] type-ui-medium inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 studio-focus"
               >
-                <RefreshCw size={11} className={busy ? 'animate-spin' : ''} />
-                <span>{statusState === 'not_found' ? 'Retry Drive' : 'Grant Access'}</span>
+                <RefreshCw size={16} strokeWidth={1.5} className={busy ? 'animate-spin' : ''} />
+                <span>{statusState === 'not_found' ? 'Retry drive' : 'Grant access'}</span>
               </button>
             )}
           </div>
-
-          <p className="text-[10px] text-zinc-500 leading-snug">
-            Supports any folder on your computer and external attached drives. Choose <b>Allow on every visit</b> when Chrome prompts to keep access across restarts.
-          </p>
         </div>
       )}
 
       {mode === 'ask' && (
-        <p className="text-[10.5px] text-zinc-600 bg-zinc-50 px-2.5 py-2 rounded-lg border border-zinc-200/70">
-          Chrome will open the OS &ldquo;Save As&rdquo; dialog for each capture or yoinked image so you can pick a folder or drive on the fly.
+        <p className="p-3 rounded-[8px] bg-[var(--canvas)] border border-[var(--border)] type-ui text-[var(--ink-muted)]">
+          Chrome opens the system Save As dialog for each capture or extracted media file.
         </p>
       )}
 
       {feedback && (
-        <div className="text-[10.5px] font-medium px-2.5 py-1.5 rounded-lg bg-blue-50 text-blue-800 border border-blue-200/80">
+        <p role="status" className="p-2 rounded-[8px] bg-[var(--canvas)] border border-[var(--border)] type-mono text-[var(--ink)]">
           {feedback}
-        </div>
+        </p>
       )}
     </div>
   );

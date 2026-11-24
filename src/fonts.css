@@ -1,7 +1,7 @@
 @font-face {
   font-family: 'JetBrains Mono';
   font-style: normal;
-  font-weight: 500 600;
+  font-weight: 400 700;
   font-display: swap;
   src: url('/fonts/jetbrains_mono.woff2') format('woff2');
 }
@@ -9,7 +9,7 @@
 @font-face {
   font-family: 'Outfit';
   font-style: normal;
-  font-weight: 600 700;
+  font-weight: 400 700;
   font-display: swap;
   src: url('/fonts/outfit.woff2') format('woff2');
 }
@@ -17,7 +17,7 @@
 @font-face {
   font-family: 'Plus Jakarta Sans';
   font-style: normal;
-  font-weight: 500 700;
+  font-weight: 400 700;
   font-display: swap;
   src: url('/fonts/plus_jakarta_sans.woff2') format('woff2');
 }
